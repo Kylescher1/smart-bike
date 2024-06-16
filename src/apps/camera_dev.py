@@ -22,5 +22,6 @@ else:
             break
 
 # Release the capture object and close all windows
-cap.release()
+cap1.release()
+cap2.release()
 cv2.destroyAllWindows()
