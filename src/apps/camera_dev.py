@@ -1,7 +1,15 @@
 import cv2
 
-cap1 = cv2.VideoCapture(0, cv2.CAP_V4L2)  # Change to the correct index (1 or 2)
-cap2 = cv2.VideoCapture(1, cv2.CAP_V4L2)  # camera 2
+cap1 = cv2.VideoCapture(1, cv2.CAP_V4L2)  # Change to the correct index (1 or 2)
+cap2 = cv2.VideoCapture(3, cv2.CAP_V4L2)  # camera 2
+
+if not cap1.isOpened():
+    print("Error: Couldn't access camera 1")
+
+if not cap2.isOpened():
+    print("Camera 2 Error")
+
+
 
 if not cap1.isOpened() or not cap2.isOpened():
     print("Error: Couldn't access one or both of cameras.")
