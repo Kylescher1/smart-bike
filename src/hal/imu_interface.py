@@ -6,7 +6,7 @@ Handles data acquisition and processing for MPU6050 sensor.
 
 import numpy as np
 from typing import Optional, Tuple, Dict
-from .i2c_bus import I2CBus
+from .I2CBus import I2CBus
 
 class IMUInterface:
     """
