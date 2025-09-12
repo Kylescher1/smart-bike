@@ -6,7 +6,7 @@ Handles data acquisition for single-beam distance measurement.
 
 import numpy as np
 from typing import Optional
-from .i2c_bus import I2CBus
+from .I2CBus import I2CBus
 
 class TOFRangefinderInterface:
     """
