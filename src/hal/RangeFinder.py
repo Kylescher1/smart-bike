@@ -1,119 +1,102 @@
+# -*- coding: utf-8 -*-
 """
-Time-of-Flight (TOF) Rangefinder Interface Module
+TF03 Time-of-Flight (TOF) Rangefinder Interface
 
-Handles data acquisition for single-beam distance measurement.
+Provides object-oriented access to TF03 sensor over USB/Serial.
 """
 
-import numpy as np
+import serial
+import time
 from typing import Optional
-from .I2CBus import I2CBus
 
-class TOFRangefinderInterface:
+
+class RangeFinder:
     """
-    Manages Time-of-Flight rangefinder sensor
-    
+    TF03 Time-of-Flight Rangefinder wrapper class.
+
     Attributes:
-        - Handles 30-60 Hz range measurements
-        - Provides single-beam distance readings
-        - Near-field sanity check for perception
+        port (str): Serial port (e.g. "/dev/ttyUSB0", "COM5").
+        baudrate (int): Serial baudrate (default: 115200).
     """
-    
-    # Typical VL53L0X I2C Registers
-    ADDR_DEFAULT = 0x29
-    REG_RESULT_RANGE_STATUS = 0x14
-    
-    def __init__(self, bus: Optional[I2CBus] = None, address: int = 0x29):
+
+    FRAME_HEADER = 0x59
+    FRAME_LENGTH = 9
+
+    def __init__(self, port: str = "COM5", baudrate: int = 115200, timeout: float = 0.1):
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.ser: Optional[serial.Serial] = None
+
+    def open(self):
+        """Open the serial connection."""
+        if self.ser is None or not self.ser.is_open:
+            self.ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
+        print(f"[TF03] Opened connection on {self.port} at {self.baudrate} baud")
+
+    def close(self):
+        """Close the serial connection."""
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+            print("[TF03] Connection closed")
+
+    def read_frame(self) -> Optional[dict[str, float]]:
         """
-        Initialize TOF rangefinder interface
-        
-        Args:
-            bus: I2C bus instance (optional)
-            address: I2C device address
-        """
-        self.bus = bus or I2CBus()
-        self.address = address
-        
-        # Calibration parameters
-        self.offset = 0.0
-        self.scale_factor = 1.0
-        
-        self._initialize_tof()
-    
-    def _initialize_tof(self):
-        """
-        Perform TOF sensor initialization
-        
-        - Configure measurement mode
-        - Set measurement timing budget
-        - Enable/disable features
-        """
-        # Placeholder for specific TOF initialization
-        # TODO: Implement device-specific initialization sequence
-        pass
-    
-    def read_distance(self) -> Optional[float]:
-        """
-        Read single distance measurement
-        
+        Read and parse a full TF03 data frame.
+
         Returns:
-            Distance in meters, or None if measurement fails
+            dict with distance (cm), signal_strength, and temperature (°C),
+            or None if frame not valid.
         """
-        try:
-            # Placeholder: Simulated distance reading
-            # In actual implementation, this would read from I2C registers
-            distance = np.random.uniform(0.1, 5.0)
-            
-            # Apply calibration
-            calibrated_distance = (distance - self.offset) * self.scale_factor
-            
-            return max(0.0, calibrated_distance)
-        
-        except Exception as e:
-            print(f"TOF distance read error: {e}")
+        if not self.ser or not self.ser.is_open:
+            raise RuntimeError("Serial port not open. Call open() first.")
+
+        if self.ser.in_waiting >= self.FRAME_LENGTH:#Check we have at least the full frame of bytes
+            data = self.ser.read(self.FRAME_LENGTH)
+            self.ser.reset_input_buffer()#clear buffer for next frame
+
+            # Validate frame header
+            if data[0] == self.FRAME_HEADER and data[1] == self.FRAME_HEADER:
+                # Compute checksum
+                checksum = sum(data[0:8]) & 0xFF #see data sheet for checksum
+                if checksum != data[8]:
+                    return None  # bad frame
+
+                distance = data[2] + (data[3] << 8)         # cm
+                signal_strength = data[4] + (data[5] << 8)
+
+                return {
+                    "distance_cm": distance,
+                    "signal_strength": signal_strength,
+                }
+        else: #No Frame collected/building packet
             return None
-    
-    def calibrate(self, reference_distance: float, samples: int = 100):
+
+    def debug_print_loop(self, delay: float = 0.05):
         """
-        Perform rangefinder calibration
-        
+        Continuously print sensor readings for debugging.
+
         Args:
-            reference_distance: Known distance for calibration
-            samples: Number of samples to average
+            delay (float): Delay between reads in seconds.
         """
-        print("Calibrating TOF Rangefinder...")
-        
-        measurements = []
-        for _ in range(samples):
-            dist = self.read_distance()
-            if dist is not None:
-                measurements.append(dist)
-        
-        if not measurements:
-            print("Calibration failed: No valid measurements")
-            return
-        
-        # Compute average measurement
-        avg_measurement = np.mean(measurements)
-        
-        # Compute offset and scale
-        self.offset = avg_measurement
-        self.scale_factor = reference_distance / avg_measurement
-        
-        print(f"TOF Calibration Complete: Offset = {self.offset}, Scale = {self.scale_factor}")
-    
-    def validate_measurement(self, distance: float, max_range: float = 5.0, min_range: float = 0.1) -> bool:
-        """
-        Validate TOF rangefinder measurement
-        
-        Args:
-            distance: Measured distance
-            max_range: Maximum valid distance
-            min_range: Minimum valid distance
-        
-        Returns:
-            Measurement validity
-        """
-        return (
-            distance is not None and
-            min_range <= distance <= max_range
-        )
+        print("[TF03] Starting debug output (Ctrl+C to stop)")
+        try:
+            while True:
+                frame = self.read_frame()
+                if frame:
+                    print(
+                        f"Distance: {frame['distance_cm']} cm"
+                        f" @ "
+                        f"Signal: {frame['signal_strength']} "
+                    )
+                time.sleep(delay)
+        except KeyboardInterrupt:
+            print("\n[TF03] Debug loop stopped by user")
+        finally:
+            self.close()
+
+
+if __name__ == "__main__":
+    sensor = RangeFinder(port="COM5")
+    sensor.open()
+    sensor.debug_print_loop()
