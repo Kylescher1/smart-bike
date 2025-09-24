@@ -1,70 +1,98 @@
+# -*- coding: utf-8 -*-
 """
-Camera Interface Module for Smart Bike Project
+Camera Interface Wrapper
 
-Handles USB3 camera (AR0234) video capture and basic sensor configuration.
-Responsible for frame grabbing, exposure control, and timestamp management.
+Provides object-oriented access to USB cameras using OpenCV.
 """
 
 import cv2
-import numpy as np
-from typing import Optional, Tuple
+from typing import Optional
 
-class CameraInterface:
+
+class Camera:
     """
-    Manages USB3 stereo camera pair (Left and Right)
-    
+    Camera wrapper class for OpenCV VideoCapture.
+
     Attributes:
-        - Handles frame capture at 30 Hz
-        - Locks exposure, gain, white balance
-        - Provides timestamped frames
+        index (int): Camera index for OpenCV (e.g. 0, 1, 2...).
+        cap (cv2.VideoCapture): OpenCV capture object.
     """
-    
-    def __init__(self, left_camera_index: int = 0, right_camera_index: int = 1):
+
+    def __init__(self, index: int = 0, backend: int = cv2.CAP_V4L2):
+        self.index = index
+        self.backend = backend
+        self.cap: Optional[cv2.VideoCapture] = None
+
+    def open(self) -> bool:
+        """Open the camera stream."""
+        if self.cap is None or not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(self.index, self.backend)
+        if self.cap.isOpened():
+            print(f"[Camera {self.index}] Opened successfully.")
+            return True
+        else:
+            print(f"[Camera {self.index}] Failed to open.")
+            return False
+
+    def close(self):
+        """Release the camera resource."""
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+            print(f"[Camera {self.index}] Released.")
+
+    def read(self):
         """
-        Initialize stereo camera capture
-        
-        Args:
-            left_camera_index: USB index for left camera
-            right_camera_index: USB index for right camera
-        """
-        self.left_capture = cv2.VideoCapture(left_camera_index)
-        self.right_capture = cv2.VideoCapture(right_camera_index)
-        
-        # Configure camera parameters
-        self._configure_cameras()
-    
-    def _configure_cameras(self):
-        """
-        Set fixed camera parameters for consistent capture
-        
-        - Lock exposure
-        - Set fixed gain
-        - Set white balance
-        """
-        # TODO: Implement specific camera configuration for AR0234
-        pass
-    
-    def grab_stereo_frame(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-        """
-        Capture synchronized stereo frames
-        
+        Capture a single frame from the camera.
+
         Returns:
-            Tuple of (left_frame, right_frame) or None if capture fails
+            (ret, frame): ret is True if successful, frame is the image array.
         """
-        ret_left = self.left_capture.grab()
-        ret_right = self.right_capture.grab()
-        
-        if not (ret_left and ret_right):
-            return None
-        
-        _, left_frame = self.left_capture.retrieve()
-        _, right_frame = self.right_capture.retrieve()
-        
-        return left_frame, right_frame
-    
-    def __del__(self):
+        if not self.cap or not self.cap.isOpened():
+            raise RuntimeError(f"[Camera {self.index}] Not open. Call open() first.")
+        return self.cap.read()
+
+    def debug_show_loop(self, window_name: str = "Camera", exit_key: str = "q"):
         """
-        Release camera resources on object destruction
+        Continuously show camera feed for debugging.
+
+        Args:
+            window_name (str): Name of the OpenCV window.
+            exit_key (str): Key to press to exit loop.
         """
-        self.left_capture.release()
-        self.right_capture.release()
+        if not self.open():
+            return
+        print(f"[Camera {self.index}] Starting debug feed (press '{exit_key}' to quit).")
+        try:
+            while True:
+                ret, frame = self.read()
+                if ret:
+                    cv2.imshow(window_name, frame)
+                if cv2.waitKey(1) & 0xFF == ord(exit_key):
+                    print(f"[Camera {self.index}] Exiting debug loop.")
+                    break
+        finally:
+            self.close()
+            cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    # Example: test two cameras
+    cam1 = Camera(index=1)
+    cam2 = Camera(index=3)
+
+    if cam1.open() and cam2.open():
+        while True:
+            ret1, frame1 = cam1.read()
+            ret2, frame2 = cam2.read()
+            if ret1:
+                cv2.imshow("Camera 1", frame1)
+            if ret2:
+                cv2.imshow("Camera 2", frame2)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("Exiting...")
+                break
+
+    cam1.close()
+    cam2.close()
+    cv2.destroyAllWindows()
