@@ -51,48 +51,45 @@ class Camera:
             raise RuntimeError(f"[Camera {self.index}] Not open. Call open() first.")
         return self.cap.read()
 
-    def debug_show_loop(self, window_name: str = "Camera", exit_key: str = "q"):
-        """
-        Continuously show camera feed for debugging.
-
-        Args:
-            window_name (str): Name of the OpenCV window.
-            exit_key (str): Key to press to exit loop.
-        """
-        if not self.open():
-            return
-        print(f"[Camera {self.index}] Starting debug feed (press '{exit_key}' to quit).")
-        try:
-            while True:
-                ret, frame = self.read()
-                if ret:
-                    cv2.imshow(window_name, frame)
-                if cv2.waitKey(1) & 0xFF == ord(exit_key):
-                    print(f"[Camera {self.index}] Exiting debug loop.")
-                    break
-        finally:
-            self.close()
-            cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
-    # Example: test two cameras
-    cam1 = Camera(index=1)
-    cam2 = Camera(index=3)
+    # Try some likely indexes (you can adjust if needed)
+    camera_indexes = [0, 1, 2, 3]
+    cameras = []
 
-    if cam1.open() and cam2.open():
-        while True:
-            ret1, frame1 = cam1.read()
-            ret2, frame2 = cam2.read()
-            if ret1:
-                cv2.imshow("Camera 1", frame1)
-            if ret2:
-                cv2.imshow("Camera 2", frame2)
+    for idx in camera_indexes:
+        cam = Camera(index=idx)
+        if cam.open():
+            cameras.append(cam)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("Exiting...")
-                break
-
-    cam1.close()
-    cam2.close()
-    cv2.destroyAllWindows()
+    if len(cameras) == 0:
+        print("❌ No cameras could be opened. Exiting.")
+    elif len(cameras) == 1:
+        print("✅ Using single camera mode.")
+        cam = cameras[0]
+        try:
+            while True:
+                ret, frame = cam.read()
+                if ret:
+                    cv2.imshow(f"Camera {cam.index}", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("Exiting...")
+                    break
+        finally:
+            cam.close()
+            cv2.destroyAllWindows()
+    else:
+        print(f"✅ Using multi-camera mode with {len(cameras)} cameras.")
+        try:
+            while True:
+                for cam in cameras:
+                    ret, frame = cam.read()
+                    if ret:
+                        cv2.imshow(f"Camera {cam.index}", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("Exiting...")
+                    break
+        finally:
+            for cam in cameras:
+                cam.close()
+            cv2.destroyAllWindows()
