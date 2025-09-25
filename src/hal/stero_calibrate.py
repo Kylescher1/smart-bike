@@ -3,21 +3,22 @@ import numpy as np
 import glob
 import os
 
-CHECKERBOARD = (7, 10)   # inner corners
+CHECKERBOARD = (7, 10)   # inner corners (cols, rows)
 SQUARE_SIZE = 15.0       # mm
 
+criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
+
 def main():
-    # Prepare object points
+    # Prepare a single set of object points
     objp = np.zeros((1, CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
-    objp[0,:,:2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
+    objp[0, :, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
     objp *= SQUARE_SIZE
 
+    objpoints = []   # 3D points
+    imgpointsL = []  # 2D points (left)
+    imgpointsR = []  # 2D points (right)
 
-    objpoints = []
-    imgpointsL = []
-    imgpointsR = []
-
-    # Load images
+    # Load stereo images
     left_images = sorted(glob.glob(os.path.join("stereo_pairs", "left_*.png")))
     right_images = sorted(glob.glob(os.path.join("stereo_pairs", "right_*.png")))
 
@@ -25,15 +26,27 @@ def main():
         imgL = cv2.imread(left_img, cv2.IMREAD_GRAYSCALE)
         imgR = cv2.imread(right_img, cv2.IMREAD_GRAYSCALE)
 
+        if imgL is None or imgR is None:
+            print(f"⚠️ Could not read {left_img} or {right_img}")
+            continue
+
+        # Optional cropping
+        h, w = imgL.shape
+        crop = 20
+        imgL = imgL[crop:h-crop, crop:w-crop]
+        imgR = imgR[crop:h-crop, crop:w-crop]
+
         retL, cornersL = cv2.findChessboardCorners(imgL, CHECKERBOARD, None)
         retR, cornersR = cv2.findChessboardCorners(imgR, CHECKERBOARD, None)
 
         if retL and retR:
-            objpoints.append(objp)
+            cornersL = cv2.cornerSubPix(imgL, cornersL, (11, 11), (-1, -1), criteria)
+            cornersR = cv2.cornerSubPix(imgR, cornersR, (11, 11), (-1, -1), criteria)
 
+            # Ensure correct shape
+            objpoints.append(objp)  # (1, N, 3)
             imgpointsL.append(cornersL.reshape(1, -1, 2))
             imgpointsR.append(cornersR.reshape(1, -1, 2))
-
 
     N_OK = len(objpoints)
     print(f"✅ Using {N_OK} valid pairs")
@@ -42,30 +55,34 @@ def main():
         print("❌ Not enough valid pairs")
         return
 
-    # Calibration
-    K1 = np.zeros((3, 3))
+    # Debug: check shapes
+    print("objpoints[0].shape =", objpoints[0].shape)
+    print("imgpointsL[0].shape =", imgpointsL[0].shape)
+    print("imgpointsR[0].shape =", imgpointsR[0].shape)
+
+    img_shape = imgL.shape[::-1]  # (width, height)
+
+    # Init intrinsics
+    K1 = np.eye(3)
     D1 = np.zeros((4, 1))
-    K2 = np.zeros((3, 3))
+    K2 = np.eye(3)
     D2 = np.zeros((4, 1))
-    R = np.zeros((3, 3))
-    T = np.zeros((3, 1))
 
-    img_shape = imgL.shape[::-1]
-
-    rms, _, _, _, _, R, T = cv2.fisheye.stereoCalibrate(
+    # Stereo calibration (fisheye model)
+    rms, K1, D1, K2, D2, R, T = cv2.fisheye.stereoCalibrate(
         objpoints,
         imgpointsL,
         imgpointsR,
         K1, D1,
         K2, D2,
         img_shape,
-        R, T,
         flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC,
-        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
+        criteria=criteria
     )
 
     print("RMS error:", rms)
 
+    # Stereo rectification
     R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(
         K1, D1, K2, D2,
         img_shape, R, T,
@@ -74,12 +91,23 @@ def main():
         fov_scale=1.0
     )
 
+    # Rectification maps
+    leftMapX, leftMapY = cv2.fisheye.initUndistortRectifyMap(
+        K1, D1, R1, P1, img_shape, cv2.CV_32FC1
+    )
+    rightMapX, rightMapY = cv2.fisheye.initUndistortRectifyMap(
+        K2, D2, R2, P2, img_shape, cv2.CV_32FC1
+    )
 
-
-    # Save
-    np.savez("stereo_calib_fisheye.npz",
-             K1=K1, D1=D1, K2=K2, D2=D2,
-             R=R, T=T, R1=R1, R2=R2, P1=P1, P2=P2, Q=Q)
+    # Save calibration
+    np.savez_compressed("stereo_calib_fisheye.npz",
+        imageSize=img_shape,
+        K1=K1, D1=D1, K2=K2, D2=D2,
+        R=R, T=T,
+        R1=R1, R2=R2, P1=P1, P2=P2, Q=Q,
+        leftMapX=leftMapX, leftMapY=leftMapY,
+        rightMapX=rightMapX, rightMapY=rightMapY
+    )
 
     print("💾 Saved calibration to stereo_calib_fisheye.npz")
 

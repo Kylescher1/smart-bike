@@ -18,17 +18,49 @@ class Camera:
         cap (cv2.VideoCapture): OpenCV capture object.
     """
 
-    def __init__(self, index: int = 0, backend: int = cv2.CAP_V4L2):
+# -*- coding: utf-8 -*-
+"""
+Camera Interface Wrapper
+
+Provides object-oriented access to USB cameras using OpenCV.
+"""
+
+import cv2
+from typing import Optional
+
+
+class Camera:
+    """
+    Camera wrapper class for OpenCV VideoCapture.
+
+    Attributes:
+        index (int): Camera index for OpenCV (e.g. 0, 1, 2...).
+        cap (cv2.VideoCapture): OpenCV capture object.
+    """
+
+    def __init__(self, index: int = 0, backend: int = cv2.CAP_V4L2,
+                 width: int = 1920, height: int = 1080):
         self.index = index
         self.backend = backend
+        self.width = width
+        self.height = height
         self.cap: Optional[cv2.VideoCapture] = None
 
     def open(self) -> bool:
         """Open the camera stream."""
         if self.cap is None or not self.cap.isOpened():
             self.cap = cv2.VideoCapture(self.index, self.backend)
+
+            # Request resolution
+            if self.cap.isOpened():
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+
+                # Confirm actual resolution
+                w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                print(f"[Camera {self.index}] Opened at {w}x{h}")
         if self.cap.isOpened():
-            print(f"[Camera {self.index}] Opened successfully.")
             return True
         else:
             print(f"[Camera {self.index}] Failed to open.")
@@ -50,7 +82,6 @@ class Camera:
         if not self.cap or not self.cap.isOpened():
             raise RuntimeError(f"[Camera {self.index}] Not open. Call open() first.")
         return self.cap.read()
-
 
 if __name__ == "__main__":
     # Try some likely indexes (you can adjust if needed)

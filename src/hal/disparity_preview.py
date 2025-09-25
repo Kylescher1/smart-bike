@@ -33,12 +33,12 @@ def main():
     # Stereo matcher (SGBM = better quality than BM)
     window_size = 5
     min_disp = 0
-    num_disp = 16 * 8  # must be divisible by 16
+    num_disp = 16 * 12  # must be divisible by 16
 
     stereo = cv2.StereoSGBM_create(
         minDisparity=min_disp,
         numDisparities=num_disp,
-        blockSize=7,
+        blockSize=3,
         P1=8 * 3 * window_size**2,
         P2=32 * 3 * window_size**2,
         disp12MaxDiff=1,
