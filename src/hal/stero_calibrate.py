@@ -12,6 +12,7 @@ def main():
     objp[0,:,:2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
     objp *= SQUARE_SIZE
 
+
     objpoints = []
     imgpointsL = []
     imgpointsR = []
@@ -24,15 +25,15 @@ def main():
         imgL = cv2.imread(left_img, cv2.IMREAD_GRAYSCALE)
         imgR = cv2.imread(right_img, cv2.IMREAD_GRAYSCALE)
 
-        retL, cornersL = cv2.findChessboardCorners(imgL, CHECKERBOARD,
-                                                   cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE)
-        retR, cornersR = cv2.findChessboardCorners(imgR, CHECKERBOARD,
-                                                   cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE)
+        retL, cornersL = cv2.findChessboardCorners(imgL, CHECKERBOARD, None)
+        retR, cornersR = cv2.findChessboardCorners(imgR, CHECKERBOARD, None)
 
         if retL and retR:
             objpoints.append(objp)
-            imgpointsL.append(cornersL)
-            imgpointsR.append(cornersR)
+
+            imgpointsL.append(cornersL.reshape(1, -1, 2))
+            imgpointsR.append(cornersR.reshape(1, -1, 2))
+
 
     N_OK = len(objpoints)
     print(f"✅ Using {N_OK} valid pairs")
