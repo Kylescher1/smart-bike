@@ -66,14 +66,15 @@ def main():
 
     print("RMS error:", rms)
 
-    # Rectification
-    R1 = np.zeros([3,3])
-    R2 = np.zeros([3,3])
-    P1 = np.zeros([3,4])
-    P2 = np.zeros([3,4])
-    Q  = np.zeros([4,4])
+    R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(
+        K1, D1, K2, D2,
+        img_shape, R, T,
+        flags=cv2.CALIB_ZERO_DISPARITY,
+        balance=0.0,
+        fov_scale=1.0
+    )
 
-    cv2.fisheye.stereoRectify(K1, D1, K2, D2, img_shape, R, T, R1, R2, P1, P2, Q)
+
 
     # Save
     np.savez("stereo_calib_fisheye.npz",
