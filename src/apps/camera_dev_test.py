@@ -1,11 +1,4 @@
-import sys
-import os
-
-# Add the hal folder to Python's search path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "hal")))
-
-from Camera import Camera
-
+from hal.Camera import Camera
 
 # create and open a camera
 cam = Camera(index=0)

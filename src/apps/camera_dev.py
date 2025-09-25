@@ -1,28 +1,43 @@
 import cv2
 
-cap1 = cv2.VideoCapture(1, cv2.CAP_V4L2)  # Change to the correct index (1 or 2)
-cap2 = cv2.VideoCapture(3, cv2.CAP_V4L2)  # camera 2
+def find_cameras(max_index=10):
+    """Scan through indices and return opened VideoCapture objects."""
+    cameras = []
+    for i in range(max_index):
+        cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
+        if cap.isOpened():
+            print(f"Camera found at index {i}")
+            cameras.append((i, cap))
+        else:
+            cap.release()
+    return cameras
 
 
-if not cap1.isOpened() or not cap2.isOpened():
-    print("Error: Couldn't access one or both of cameras.")
-else:
-    print("Cameras opened successfully.")
+def main():
+    cameras = find_cameras(max_index=10)
+
+    if not cameras:
+        print("No cameras detected.")
+        return
+
+    print(f"{len(cameras)} camera(s) opened successfully.")
 
     while True:
-        ret1, frame1 = cap1.read()
-        ret2, frame2 = cap2.read()
-        if ret1:
-            cv2.imshow("Camera 1", frame1)
+        for idx, cap in cameras:
+            ret, frame = cap.read()
+            if ret:
+                cv2.imshow(f"Camera {idx}", frame)
 
-        if ret2:
-            cv2.imshow("Camera 2", frame2)
         # Check for 'q' key press to exit the loop
         if cv2.waitKey(1) & 0xFF == ord('q'):
             print("Exiting...")
             break
 
-# Release the capture object and close all windows
-cap1.release()
-cap2.release()
-cv2.destroyAllWindows()
+    # Release all opened cameras
+    for _, cap in cameras:
+        cap.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
