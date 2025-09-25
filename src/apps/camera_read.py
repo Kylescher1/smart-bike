@@ -1,4 +1,6 @@
-from hal.Camera import Camera
+import sys
+sys.path.insert(1,'/home/radxa/smart-bike/src/hal')
+import Camera
 
 # create and open a camera
 cam = Camera(index=0)
