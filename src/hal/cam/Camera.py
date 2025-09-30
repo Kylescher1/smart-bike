@@ -30,6 +30,17 @@ class Camera:
             raise RuntimeError(f"[Camera {self.index}] Not open. Call open() first.")
         ret, frame = self.cap.read()
         return frame if ret else None
+    def open_stereo_pair(left_idx=1, right_idx=3):
+        """
+        Convenience: open two cameras as a stereo pair.
+        Uses defaults defined in Camera.__init__.
+        """
+        left = Camera(index=left_idx)
+        right = Camera(index=right_idx)
+        left.open()
+        right.open()
+        return left, right
+
 
 
 if __name__ == "__main__":
