@@ -1,6 +1,7 @@
 # src/hal/cam/calibrate/stero_capture.py
 import cv2
 import sys, os
+import glob
 
 # Add repo root (3 levels up from /src/hal/cam/calibrate)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
@@ -11,6 +12,14 @@ def main():
     base_dir = os.path.dirname(__file__)          # /src/hal/cam/calibrate
     save_dir = os.path.join(base_dir, "stereo_pairs")
     os.makedirs(save_dir, exist_ok=True)
+
+    # Clear out existing files
+    for f in glob.glob(os.path.join(save_dir, "*.png")):
+        try:
+            os.remove(f)
+        except OSError as e:
+            print(f"⚠️ Could not delete {f}: {e}")
+    print(f"🧹 Cleared out existing files in {save_dir}")
 
     try:
         left_cam, right_cam = open_stereo_pair()   # automatically picks two working cameras
@@ -29,8 +38,8 @@ def main():
                 print("⚠️ Failed to grab one or both frames.")
                 continue
 
-            cv2.imshow("Left Camera", frameL)
-            cv2.imshow("Right Camera", frameR)
+            cv2.imshow("Right Camera", frameL)
+            cv2.imshow("Left Camera", frameR)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):

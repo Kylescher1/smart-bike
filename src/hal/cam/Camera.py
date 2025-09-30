@@ -4,7 +4,7 @@ from typing import Optional
 
 class Camera:
     def __init__(self, index: int, backend: int = cv2.CAP_V4L2,
-                 width: int = 800, height: int = 600, fps: int = 90):
+                 width: int = 1024, height: int = 768, fps: int = 30):
         self.index = index
         self.backend = backend
         self.width = width

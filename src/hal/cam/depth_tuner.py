@@ -1,18 +1,12 @@
 # src/hal/cam/depth_tuner.py
-import cv2
-import json
-import os
-import numpy as np
+import cv2, json, os, numpy as np
 from src.hal.cam.depth import load_calibration, rectify_pair
-from src.hal.cam.Camera import Camera
 from src.hal.cam.Camera import open_stereo_pair
 
 SETTINGS_FILE = "stereo_settings.json"
-
-# Default parameters
 DEFAULTS = {
-    "numDisparities": 6,  # multiplier of 16
-    "blockSize": 5,
+    "numDisparities": 6,  # -> used as 16 * value
+    "blockSize": 5,       # odd, >=3
     "preFilterCap": 31,
     "uniquenessRatio": 15,
     "speckleWindowSize": 100,
@@ -21,84 +15,81 @@ DEFAULTS = {
 }
 
 def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, "r") as f:
-            return json.load(f)
-    return DEFAULTS.copy()
+    return json.load(open(SETTINGS_FILE)) if os.path.exists(SETTINGS_FILE) else DEFAULTS.copy()
 
-def save_settings(settings):
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f, indent=2)
-
+def save_settings(s): json.dump(s, open(SETTINGS_FILE, "w"), indent=2)
 def nothing(x): pass
 
-def create_tuner_window(settings):
-    cv2.namedWindow("Tuner", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Tuner", 500, 400)
-    cv2.createTrackbar("numDisparities", "Tuner", settings["numDisparities"], 20, nothing)
-    cv2.createTrackbar("blockSize", "Tuner", settings["blockSize"], 21, nothing)
-    cv2.createTrackbar("preFilterCap", "Tuner", settings["preFilterCap"], 63, nothing)
-    cv2.createTrackbar("uniquenessRatio", "Tuner", settings["uniquenessRatio"], 50, nothing)
-    cv2.createTrackbar("speckleWindowSize", "Tuner", settings["speckleWindowSize"], 200, nothing)
-    cv2.createTrackbar("speckleRange", "Tuner", settings["speckleRange"], 50, nothing)
-    cv2.createTrackbar("disp12MaxDiff", "Tuner", settings["disp12MaxDiff"], 25, nothing)
+def create_tuner_window(s):
+    cv2.namedWindow("Tuner", cv2.WINDOW_NORMAL); cv2.resizeWindow("Tuner", 500, 400)
+    cv2.createTrackbar("numDisparities", "Tuner", s["numDisparities"], 20, nothing)
+    cv2.createTrackbar("blockSize", "Tuner", s["blockSize"], 21, nothing)
+    cv2.createTrackbar("preFilterCap", "Tuner", s["preFilterCap"], 63, nothing)
+    cv2.createTrackbar("uniquenessRatio", "Tuner", s["uniquenessRatio"], 50, nothing)
+    cv2.createTrackbar("speckleWindowSize", "Tuner", s["speckleWindowSize"], 200, nothing)
+    cv2.createTrackbar("speckleRange", "Tuner", s["speckleRange"], 50, nothing)
+    cv2.createTrackbar("disp12MaxDiff", "Tuner", s["disp12MaxDiff"], 25, nothing)
 
-def get_settings_from_trackbar():
-    vals = {
+def read_trackbar():
+    v = {
         "numDisparities": cv2.getTrackbarPos("numDisparities", "Tuner"),
-        "blockSize": cv2.getTrackbarPos("blockSize", "Tuner"),
-        "preFilterCap": cv2.getTrackbarPos("preFilterCap", "Tuner"),
-        "uniquenessRatio": cv2.getTrackbarPos("uniquenessRatio", "Tuner"),
+        "blockSize":      cv2.getTrackbarPos("blockSize", "Tuner"),
+        "preFilterCap":   cv2.getTrackbarPos("preFilterCap", "Tuner"),
+        "uniquenessRatio":cv2.getTrackbarPos("uniquenessRatio", "Tuner"),
         "speckleWindowSize": cv2.getTrackbarPos("speckleWindowSize", "Tuner"),
-        "speckleRange": cv2.getTrackbarPos("speckleRange", "Tuner"),
-        "disp12MaxDiff": cv2.getTrackbarPos("disp12MaxDiff", "Tuner"),
+        "speckleRange":   cv2.getTrackbarPos("speckleRange", "Tuner"),
+        "disp12MaxDiff":  cv2.getTrackbarPos("disp12MaxDiff", "Tuner"),
     }
-    # Ensure constraints
-    vals["numDisparities"] = max(1, vals["numDisparities"])
-    vals["blockSize"] = max(3, vals["blockSize"] | 1)  # must be odd and >=3
-    return vals
+    # enforce constraints
+    v["numDisparities"] = max(1, v["numDisparities"])
+    v["blockSize"] = max(3, v["blockSize"] | 1)  # odd and >=3
+    return v
 
 def main():
     calib = load_calibration()
-    left_cam, right_cam = open_stereo_pair()
-
-
-
+    left_cam, right_cam = open_stereo_pair()  # already opened
     settings = load_settings()
     create_tuner_window(settings)
 
     try:
         while True:
-            frameL = left_cam.read_frame()
-            frameR = right_cam.read_frame()
-            if frameL is None or frameR is None:
-                continue
+            L = left_cam.read_frame(); R = right_cam.read_frame()
+            if L is None or R is None: continue
+            rectL, rectR = rectify_pair(L, R, calib)
 
-            rectL, rectR = rectify_pair(frameL, frameR, calib)
-            params = get_settings_from_trackbar()
+            # Use grayscale for SGBM
+            grayL = cv2.cvtColor(rectL, cv2.COLOR_BGR2GRAY) if rectL.ndim == 3 else rectL
+            grayR = cv2.cvtColor(rectR, cv2.COLOR_BGR2GRAY) if rectR.ndim == 3 else rectR
+
+            p = read_trackbar()
+            numDisp = 16 * p["numDisparities"]
+            blk = p["blockSize"]
+            cn = 1
+            P1 = 8 * cn * blk * blk
+            P2 = 32 * cn * blk * blk
 
             stereo = cv2.StereoSGBM_create(
                 minDisparity=0,
-                numDisparities=16 * params["numDisparities"],
-                blockSize=params["blockSize"],
-                P1=8 * 3 * params["blockSize"] ** 2,
-                P2=32 * 3 * params["blockSize"] ** 2,
-                preFilterCap=params["preFilterCap"],
-                uniquenessRatio=params["uniquenessRatio"],
-                speckleWindowSize=params["speckleWindowSize"],
-                speckleRange=params["speckleRange"],
-                disp12MaxDiff=params["disp12MaxDiff"],
+                numDisparities=numDisp,
+                blockSize=blk,
+                P1=P1, P2=P2,
+                preFilterCap=p["preFilterCap"],
+                uniquenessRatio=p["uniquenessRatio"],
+                speckleWindowSize=p["speckleWindowSize"],
+                speckleRange=p["speckleRange"],
+                disp12MaxDiff=p["disp12MaxDiff"],
                 mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY
             )
-            disparity = stereo.compute(rectL, rectR).astype(np.float32) / 16.0
-            disp_vis = cv2.normalize(disparity, None, 0, 255, cv2.NORM_MINMAX)
-            disp_vis = np.uint8(disp_vis)
 
-            cv2.imshow("Depth Map", disp_vis)
+            disp = stereo.compute(grayL, grayR).astype(np.float32) / 16.0
+            vis = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            cv2.putText(vis, f"numDisp={numDisp} block={blk}", (10,30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+            cv2.imshow("Depth Map", vis)
 
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                save_settings(params)
+            k = cv2.waitKey(1) & 0xFF
+            if k == ord('q'):
+                save_settings(p)
                 break
     finally:
         left_cam.close(); right_cam.close()
