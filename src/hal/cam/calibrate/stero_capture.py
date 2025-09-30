@@ -1,22 +1,19 @@
+# src/hal/cam/calibrate/stero_capture.py
 import cv2
 import sys, os
 
 # Add repo root (3 levels up from /src/hal/cam/calibrate)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
 
-from src.hal.cam.Camera import Camera
+from src.hal.cam.Camera import open_stereo_pair
 
 def main():
     base_dir = os.path.dirname(__file__)          # /src/hal/cam/calibrate
     save_dir = os.path.join(base_dir, "stereo_pairs")
     os.makedirs(save_dir, exist_ok=True)
 
-    left_cam = Camera(index=3)
-    right_cam = Camera(index=1)
-
     try:
-        left_cam.open()
-        right_cam.open()
+        left_cam, right_cam = open_stereo_pair()   # automatically picks two working cameras
     except RuntimeError as e:
         print(e)
         return

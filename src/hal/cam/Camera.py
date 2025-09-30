@@ -13,7 +13,7 @@ class Camera:
         self.cap: Optional[cv2.VideoCapture] = None
 
     def open(self):
-        self.cap = cv2.VideoCapture(self.index, cv2.CAP_V4L2)  # force V4L2
+        self.cap = cv2.VideoCapture(self.index, self.backend)
         if not self.cap.isOpened():
             raise RuntimeError(f"[Camera {self.index}] Failed to open.")
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
@@ -32,44 +32,45 @@ class Camera:
         return frame if ret else None
 
 
-def open_stereo_pair(left_idx=3, right_idx=1):
+def open_stereo_pair(max_index: int = 10):
     """
-    Convenience: open two cameras as a stereo pair.
-    Uses defaults defined in Camera.__init__.
+    Try all /dev/video indices up to `max_index` and open the first two that work.
+    Returns (left, right) Camera objects.
     """
-    left = Camera(index=left_idx)
-    right = Camera(index=right_idx)
-    left.open()
-    right.open()
-    return left, right
+    opened = []
+    for idx in range(max_index):
+        try:
+            cam = Camera(index=idx, backend=cv2.CAP_V4L2, width=800, height=600, fps=90)
+            cam.open()
+            print(f"✅ Opened camera {idx}")
+            opened.append(cam)
+            if len(opened) == 2:
+                break
+        except RuntimeError:
+            pass
+
+    if len(opened) < 2:
+        # clean up any partial opens
+        for cam in opened:
+            cam.close()
+        raise RuntimeError("❌ Could not find two working cameras.")
+
+    return opened[0], opened[1]
 
 
 if __name__ == "__main__":
-    # Demo: try to open two cameras and show their streams
-    cam_indices = [3, 1]  # adjust if your devices use different indices
-    cameras = []
-
     try:
-        for idx in cam_indices:
-            try:
-                cam = Camera(index=idx, backend=cv2.CAP_ANY, width=800, height=600, fps=90)
-                cam.open()
-                cameras.append(cam)
-                print(f"✅ Opened camera {idx}")
-            except RuntimeError as e:
-                print(e)
-
-        if not cameras:
-            print("❌ No cameras opened.")
-        else:
-            while True:
-                for cam in cameras:
-                    frame = cam.read_frame()
-                    if frame is not None:
-                        cv2.imshow(f"Camera {cam.index}", frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
+        left, right = open_stereo_pair()
+        while True:
+            frameL = left.read_frame()
+            frameR = right.read_frame()
+            if frameL is not None:
+                cv2.imshow(f"Camera {left.index}", frameL)
+            if frameR is not None:
+                cv2.imshow(f"Camera {right.index}", frameR)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
     finally:
-        for cam in cameras:
-            cam.close()
+        left.close()
+        right.close()
         cv2.destroyAllWindows()

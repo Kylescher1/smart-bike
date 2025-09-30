@@ -36,11 +36,6 @@ def main():
             print(f"⚠️ Could not read {left_img} or {right_img}")
             continue
 
-        # Optional cropping
-        h, w = imgL.shape
-        crop = 20
-        imgL = imgL[crop:h-crop, crop:w-crop]
-        imgR = imgR[crop:h-crop, crop:w-crop]
 
         retL, cornersL = cv2.findChessboardCorners(imgL, CHECKERBOARD, None)
         retR, cornersR = cv2.findChessboardCorners(imgR, CHECKERBOARD, None)
