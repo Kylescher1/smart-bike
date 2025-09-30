@@ -4,7 +4,7 @@ from typing import Optional
 
 class Camera:
     def __init__(self, index: int, backend: int = cv2.CAP_V4L2,
-                 width: int = 1920, height: int = 1080, fps: int = 90):
+                 width: int = 800, height: int = 600, fps: int = 90):
         self.index = index
         self.backend = backend
         self.width = width
@@ -52,7 +52,7 @@ if __name__ == "__main__":
     try:
         for idx in cam_indices:
             try:
-                cam = Camera(index=idx, backend=cv2.CAP_ANY, width=1920, height=1080, fps=90)
+                cam = Camera(index=idx, backend=cv2.CAP_ANY, width=800, height=600, fps=90)
                 cam.open()
                 cameras.append(cam)
                 print(f"✅ Opened camera {idx}")
