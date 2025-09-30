@@ -4,7 +4,7 @@ from typing import Optional
 
 class Camera:
     def __init__(self, index: int, backend: int = cv2.CAP_V4L2,
-                 width: int = 1920, height: int = 1080, fps: int = 30):
+                 width: int = 1920, height: int = 1080, fps: int = 90):
         self.index = index
         self.backend = backend
         self.width = width
@@ -13,7 +13,7 @@ class Camera:
         self.cap: Optional[cv2.VideoCapture] = None
 
     def open(self):
-        self.cap = cv2.VideoCapture(self.index, self.backend)
+        self.cap = cv2.VideoCapture(self.index, cv2.CAP_V4L2)  # force V4L2
         if not self.cap.isOpened():
             raise RuntimeError(f"[Camera {self.index}] Failed to open.")
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
@@ -30,17 +30,18 @@ class Camera:
             raise RuntimeError(f"[Camera {self.index}] Not open. Call open() first.")
         ret, frame = self.cap.read()
         return frame if ret else None
-    def open_stereo_pair(left_idx=1, right_idx=3):
-        """
-        Convenience: open two cameras as a stereo pair.
-        Uses defaults defined in Camera.__init__.
-        """
-        left = Camera(index=left_idx)
-        right = Camera(index=right_idx)
-        left.open()
-        right.open()
-        return left, right
 
+
+def open_stereo_pair(left_idx=3, right_idx=1):
+    """
+    Convenience: open two cameras as a stereo pair.
+    Uses defaults defined in Camera.__init__.
+    """
+    left = Camera(index=left_idx)
+    right = Camera(index=right_idx)
+    left.open()
+    right.open()
+    return left, right
 
 
 if __name__ == "__main__":
@@ -51,7 +52,7 @@ if __name__ == "__main__":
     try:
         for idx in cam_indices:
             try:
-                cam = Camera(index=idx, backend=cv2.CAP_ANY, width=640, height=480, fps=30)
+                cam = Camera(index=idx, backend=cv2.CAP_ANY, width=1920, height=1080, fps=90)
                 cam.open()
                 cameras.append(cam)
                 print(f"✅ Opened camera {idx}")
