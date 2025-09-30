@@ -30,3 +30,34 @@ class Camera:
             raise RuntimeError(f"[Camera {self.index}] Not open. Call open() first.")
         ret, frame = self.cap.read()
         return frame if ret else None
+
+
+if __name__ == "__main__":
+    # Demo: try to open two cameras and show their streams
+    cam_indices = [0, 1]  # adjust if your devices use different indices
+    cameras = []
+
+    try:
+        for idx in cam_indices:
+            try:
+                cam = Camera(index=idx, backend=cv2.CAP_ANY, width=640, height=480, fps=30)
+                cam.open()
+                cameras.append(cam)
+                print(f"✅ Opened camera {idx}")
+            except RuntimeError as e:
+                print(e)
+
+        if not cameras:
+            print("❌ No cameras opened.")
+        else:
+            while True:
+                for cam in cameras:
+                    frame = cam.read_frame()
+                    if frame is not None:
+                        cv2.imshow(f"Camera {cam.index}", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+    finally:
+        for cam in cameras:
+            cam.close()
+        cv2.destroyAllWindows()
