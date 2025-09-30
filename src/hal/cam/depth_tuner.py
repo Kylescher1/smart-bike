@@ -62,7 +62,7 @@ def main():
     calib = load_calibration()
     left_cam, right_cam = open_stereo_pair()
 
-    left_cam.open(); right_cam.open()
+
 
     settings = load_settings()
     create_tuner_window(settings)
