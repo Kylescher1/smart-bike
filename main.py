@@ -1,33 +1,37 @@
 from src.hal.cam.Camera import open_stereo_pair
-from src.hal.cam.depth import load_calibration, compute_depth_map
-import cv2, time
+from src.hal.cam.depth import get_static_depth, disparity_to_points
+from src.hal.cam.calib import load_calibration
+
+import cv2, time, numpy as np
+
 
 def main():
+
     calib = load_calibration()
-    try:
-        left_cam, right_cam = open_stereo_pair()
-    except RuntimeError as e:
-        print(e)
+    disp, vis = get_static_depth(show=False)
+    if disp is None:
         return
+    points = disparity_to_points(disp, calib)
 
-    print(f"✅ Running stereo with cameras {left_cam.index}, {right_cam.index}")
+    # mouse callback
+    def on_click(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            X, Y, Z = points[y, x]
+            Z = Z * 0.03937
+            print(f"Pixel ({x},{y}) -> X={X:.2f}, Y={Y:.2f}, Z={Z:.2f}")
 
-    try:
-        while True:
-            left_frame = left_cam.read_frame()
-            right_frame = right_cam.read_frame()
-            if left_frame is None or right_frame is None:
-                continue
+            # optional: overlay text directly at click
+            cv2.putText(vis, f"{Z:.1f}", (x, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+            cv2.imshow("Depth Map", vis)
 
-            depth_map = compute_depth_map(left_frame, right_frame, calib)
-            cv2.imshow("Depth Map", depth_map)
+    cv2.imshow("Depth Map", vis)
+    cv2.setMouseCallback("Depth Map", on_click)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-            time.sleep(0.05)
-    finally:
-        left_cam.close(); right_cam.close()
-        cv2.destroyAllWindows()
+    print("Click on the depth map to see 3D coordinates. Press any key to exit.")
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
