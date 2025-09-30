@@ -4,7 +4,7 @@ from typing import Optional
 
 class Camera:
     def __init__(self, index: int, backend: int = cv2.CAP_V4L2,
-                 width: int = 1920, height: int = 1080, fps: int = 60):
+                 width: int = 1920, height: int = 1080, fps: int = 30):
         self.index = index
         self.backend = backend
         self.width = width
@@ -34,7 +34,7 @@ class Camera:
 
 if __name__ == "__main__":
     # Demo: try to open two cameras and show their streams
-    cam_indices = [0, 1]  # adjust if your devices use different indices
+    cam_indices = [3, 1]  # adjust if your devices use different indices
     cameras = []
 
     try:

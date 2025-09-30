@@ -1,13 +1,17 @@
 import cv2
-import os
-from src.hal.cam.Camera import Camera  # fix import if needed
+import sys, os
+
+# Add repo root (3 levels up from /src/hal/cam/calibrate)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
+
+from src.hal.cam.Camera import Camera
 
 def main():
     base_dir = os.path.dirname(__file__)          # /src/hal/cam/calibrate
     save_dir = os.path.join(base_dir, "stereo_pairs")
     os.makedirs(save_dir, exist_ok=True)
 
-    left_cam = Camera(index=2)
+    left_cam = Camera(index=3)
     right_cam = Camera(index=1)
 
     try:
