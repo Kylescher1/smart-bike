@@ -1,37 +1,40 @@
 # main.py
 from src.hal.cam.Camera import Camera
-from src.hal.cam.depth import compute_depth_map
+from src.hal.cam.depth import load_calibration, compute_depth_map
 import cv2
 import time
 
 def main():
-    cameras = []
-    for idx in [1, 3]:
-        try:
-            cam = Camera(index=idx)
-            cam.open()
-            cameras.append(cam)
-        except RuntimeError as e:
-            print(e)
+    calib = load_calibration()
 
-    if not cameras:
-        print("❌ No cameras available. Exiting.")
+    # Open left and right cameras
+    left_cam = Camera(index=1)
+    right_cam = Camera(index=3)
+    try:
+        left_cam.open()
+        right_cam.open()
+    except RuntimeError as e:
+        print(e)
         return
 
-    print(f"✅ Running with cameras {', '.join(str(c.index) for c in cameras)}")
+    print(f"✅ Running stereo with cameras {left_cam.index}, {right_cam.index}")
 
     try:
         while True:
-            for cam in cameras:
-                depth_map = compute_depth_map(cam)
-                if depth_map is not None:
-                    cv2.imshow(f"Depth Map {cam.index}", depth_map)
+            left_frame = left_cam.read_frame()
+            right_frame = right_cam.read_frame()
+            if left_frame is None or right_frame is None:
+                continue
+
+            depth_map = compute_depth_map(left_frame, right_frame, calib)
+            cv2.imshow("Depth Map", depth_map)
+
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
             time.sleep(0.05)
     finally:
-        for cam in cameras:
-            cam.close()
+        left_cam.close()
+        right_cam.close()
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":

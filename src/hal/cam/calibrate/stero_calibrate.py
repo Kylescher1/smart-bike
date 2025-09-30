@@ -1,3 +1,4 @@
+# src/hal/cam/calibrate/stero_calibrate.py
 import cv2
 import numpy as np
 import glob
@@ -9,6 +10,11 @@ SQUARE_SIZE = 15.0       # mm
 criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
 
 def main():
+    base_dir = os.path.dirname(__file__)          # /src/hal/cam/calibrate
+    pairs_dir = os.path.join(base_dir, "stereo_pairs")
+    data_dir = os.path.join(base_dir, "data")
+    os.makedirs(data_dir, exist_ok=True)
+
     # Prepare a single set of object points
     objp = np.zeros((1, CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
     objp[0, :, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
@@ -19,8 +25,8 @@ def main():
     imgpointsR = []  # 2D points (right)
 
     # Load stereo images
-    left_images = sorted(glob.glob(os.path.join("stereo_pairs", "left_*.png")))
-    right_images = sorted(glob.glob(os.path.join("stereo_pairs", "right_*.png")))
+    left_images = sorted(glob.glob(os.path.join(pairs_dir, "left_*.png")))
+    right_images = sorted(glob.glob(os.path.join(pairs_dir, "right_*.png")))
 
     for left_img, right_img in zip(left_images, right_images):
         imgL = cv2.imread(left_img, cv2.IMREAD_GRAYSCALE)
@@ -66,50 +72,4 @@ def main():
     K1 = np.eye(3)
     D1 = np.zeros((4, 1))
     K2 = np.eye(3)
-    D2 = np.zeros((4, 1))
-
-    # Stereo calibration (fisheye model)
-    rms, K1, D1, K2, D2, R, T = cv2.fisheye.stereoCalibrate(
-        objpoints,
-        imgpointsL,
-        imgpointsR,
-        K1, D1,
-        K2, D2,
-        img_shape,
-        flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC,
-        criteria=criteria
-    )
-
-    print("RMS error:", rms)
-
-    # Stereo rectification
-    R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(
-        K1, D1, K2, D2,
-        img_shape, R, T,
-        flags=cv2.CALIB_ZERO_DISPARITY,
-        balance=0.0,
-        fov_scale=1.0
-    )
-
-    # Rectification maps
-    leftMapX, leftMapY = cv2.fisheye.initUndistortRectifyMap(
-        K1, D1, R1, P1, img_shape, cv2.CV_32FC1
-    )
-    rightMapX, rightMapY = cv2.fisheye.initUndistortRectifyMap(
-        K2, D2, R2, P2, img_shape, cv2.CV_32FC1
-    )
-
-    # Save calibration
-    np.savez_compressed("stereo_calib_fisheye.npz",
-        imageSize=img_shape,
-        K1=K1, D1=D1, K2=K2, D2=D2,
-        R=R, T=T,
-        R1=R1, R2=R2, P1=P1, P2=P2, Q=Q,
-        leftMapX=leftMapX, leftMapY=leftMapY,
-        rightMapX=rightMapX, rightMapY=rightMapY
-    )
-
-    print("💾 Saved calibration to stereo_calib_fisheye.npz")
-
-if __name__ == "__main__":
-    main()
+    D2 = np.zero
