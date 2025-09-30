@@ -39,7 +39,7 @@ class Camera:
     """
 
     def __init__(self, index: int = 0, backend: int = cv2.CAP_V4L2,
-                 width: int = 1920, height: int = 1080):
+                 width: int = 1280, height: int = 720):
         self.index = index
         self.backend = backend
         self.width = width
