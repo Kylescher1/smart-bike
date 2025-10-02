@@ -1,103 +1,106 @@
+# src/main.py
+import time, os, json, cv2, numpy as np, matplotlib.pyplot as plt
 from src.hal.cam.Camera import open_stereo_pair
 from src.hal.cam.calib import load_calibration
-from src.hal.cam.depth import disparity_to_points, rectify_pair
+from src.hal.cam.depth import rectify_pair, disparity_to_points
 
-import os, cv2, time, numpy as np, matplotlib.pyplot as plt, json
+SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "stereo_settings.json")
 
-SETTINGS_FILE = "stereo_settings.json"
+DEFAULTS = {
+    "numDisparities": 6,
+    "blockSize": 5,
+    "preFilterCap": 31,
+    "uniquenessRatio": 15,
+    "speckleWindowSize": 100,
+    "speckleRange": 32,
+    "disp12MaxDiff": 1
+}
 
-def load_settings(path=SETTINGS_FILE):
-    return json.load(open(path)) if os.path.exists(path) else {}
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            return json.load(open(SETTINGS_FILE))
+        except Exception:
+            pass
+    return DEFAULTS.copy()
 
-def build_matcher(p):
-    numDisp = 16 * max(1, p.get("numDisparities", 6))
-    blk = max(3, p.get("blockSize", 5) | 1)  # odd >=3
-    cn = 1
-    P1, P2 = 8*cn*blk*blk, 32*cn*blk*blk
-    return cv2.StereoSGBM_create(
+def setup_system():
+    calib = load_calibration()
+    left, right = open_stereo_pair()
+    if not left or not right:
+        raise RuntimeError("❌ Could not open stereo cameras")
+
+    s = load_settings()
+    numDisp = 16 * max(1, s.get("numDisparities", 6))
+    matcher = cv2.StereoSGBM_create(
         minDisparity=0,
         numDisparities=numDisp,
-        blockSize=blk,
-        P1=P1, P2=P2,
-        preFilterCap=p.get("preFilterCap", 31),
-        uniquenessRatio=p.get("uniquenessRatio", 15),
-        speckleWindowSize=p.get("speckleWindowSize", 100),
-        speckleRange=p.get("speckleRange", 32),
-        disp12MaxDiff=p.get("disp12MaxDiff", 1),
+        blockSize=max(3, s.get("blockSize", 5) | 1),
+        preFilterCap=s.get("preFilterCap", 31),
+        uniquenessRatio=s.get("uniquenessRatio", 15),
+        speckleWindowSize=s.get("speckleWindowSize", 100),
+        speckleRange=s.get("speckleRange", 32),
+        disp12MaxDiff=s.get("disp12MaxDiff", 1),
         mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY
-    ), numDisp
+    )
+    return calib, left, right, matcher, numDisp
+
+def compute_points(left, right, calib, matcher, numDisp):
+    L, R = left.read_frame(), right.read_frame()
+    if L is None or R is None:
+        return None, None
+    rectL, rectR = rectify_pair(L, R, calib)
+    gL, gR = cv2.cvtColor(rectL, cv2.COLOR_BGR2GRAY), cv2.cvtColor(rectR, cv2.COLOR_BGR2GRAY)
+    disp = matcher.compute(gL, gR).astype("float32") / 16.0
+    disp = np.clip(disp, 0, numDisp)
+    points = disparity_to_points(disp, calib)
+    return disp, points
+
+def visualize(disp, points, numDisp, scatter, ax):
+    # Depth map
+    vis = (disp / numDisp * 255).astype(np.uint8)
+    color_vis = cv2.applyColorMap(vis, cv2.COLORMAP_JET)
+    cv2.imshow("Depth Map", color_vis)
+
+    # Top-down: X (left/right), Z (forward up to 15 m)
+    mask = (
+        np.isfinite(points[:,:,2]) &
+        (points[:,:,2] > 0) &
+        (points[:,:,2] <= 15000)   # trim at 15 m
+    )
+    pts = points[mask]
+    if len(pts) > 0:
+        sample = pts[::800]
+        scatter.set_offsets(np.c_[sample[:,0], sample[:,2]])
+        plt.draw()
+        plt.pause(0.001)
+
+
+
 
 def main():
-    time.sleep(2)
-    calib = load_calibration()
-    left_cam, right_cam = open_stereo_pair()
-    if not left_cam or not right_cam:
-        print("❌ Could not open stereo cameras")
-        return
+    calib, left, right, matcher, numDisp = setup_system()
 
-    settings = load_settings()
-    stereo, numDisp = build_matcher(settings)
-
+    # prepare matplotlib scatter
     plt.ion()
     fig, ax = plt.subplots()
     sc = ax.scatter([], [], s=1)
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Z forward (m)")
-
-    # lock to 15 ft (≈4.6 m) forward and ±2 m sideways
+    ax.set_xlabel("X (m left/right)")
+    ax.set_ylabel("Z (m forward)")
     ax.set_xlim(-2000, 2000)
-    ax.set_ylim(00, 4600)
+    ax.set_ylim(0, 4600)
 
-    plt.show()
-
-
-    prev_vis = None
     try:
         while True:
-            L = left_cam.read_frame(); R = right_cam.read_frame()
-            if L is None or R is None:
-                continue
-
-            rectL, rectR = rectify_pair(L, R, calib)
-            gL = cv2.cvtColor(rectL, cv2.COLOR_BGR2GRAY)
-            gR = cv2.cvtColor(rectR, cv2.COLOR_BGR2GRAY)
-
-            disp = stereo.compute(gL, gR).astype(np.float32) / 16.0
-            disp = np.clip(disp, 0, numDisp).astype(np.float32)
-
-            vis = (disp / numDisp * 255).astype(np.uint8)
-
-            # median blur on vis
-            k = settings.get("medianBlurK", 0)
-            if k >= 3 and k % 2 == 1:
-                vis = cv2.medianBlur(vis, k)
-
-            # temporal smoothing with alpha
-            alpha = settings.get("alpha", 40) / 100.0
-            if prev_vis is None:
-                prev_vis = vis.copy()
-            vis = cv2.addWeighted(prev_vis, alpha, vis, 1 - alpha, 0)
-            prev_vis = vis.copy()
-
-            color_vis = cv2.applyColorMap(vis, cv2.COLORMAP_JET)
-            cv2.imshow("Depth Map", color_vis)
-
-            # points for scatter
-            points = disparity_to_points(disp, calib)
-            mask = np.isfinite(points[:,:,2]) & (points[:,:,2] > 0)
-            pts = points[mask]
-            if len(pts) > 0:
-                sample = pts[::800]
-                sc.set_offsets(np.c_[sample[:,0], sample[:,2]])
-
-                fig.canvas.draw()
-                fig.canvas.flush_events()
-
-            k = cv2.waitKey(1) & 0xFF
-            if k == ord('q') or k == 27:
+            disp, points = compute_points(left, right, calib, matcher, numDisp)
+            if disp is not None:
+                visualize(disp, points, numDisp, sc, ax)  # <-- pass ax too
+            if cv2.waitKey(1) & 0xFF in (ord('q'), 27):
                 break
+            time.sleep(0.25)
+
     finally:
-        left_cam.close(); right_cam.close()
+        left.close(); right.close()
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
