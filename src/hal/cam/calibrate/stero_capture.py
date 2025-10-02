@@ -38,8 +38,11 @@ def main():
                 print("⚠️ Failed to grab one or both frames.")
                 continue
 
-            cv2.imshow("Right Camera", frameL)
-            cv2.imshow("Left Camera", frameR)
+            previewL = cv2.resize(frameL, (1024, 960))
+            previewR = cv2.resize(frameR, (1024, 960))
+            cv2.imshow("Left Camera", previewL)
+            cv2.imshow("Right Camera", previewR)
+
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
