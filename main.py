@@ -66,7 +66,7 @@ def visualize(disp, points, numDisp, scatter, ax):
     mask = (
         np.isfinite(points[:,:,2]) &
         (points[:,:,2] > 0) &
-        (points[:,:,2] <= 15000)   # trim at 15 m
+        (points[:,:,2] <= 1500)   # trim at 15 m
     )
     pts = points[mask]
     if len(pts) > 0:
@@ -88,7 +88,7 @@ def main():
     ax.set_xlabel("X (m left/right)")
     ax.set_ylabel("Z (m forward)")
     ax.set_xlim(-2000, 2000)
-    ax.set_ylim(0, 4600)
+    ax.set_ylim(200, 2000)
 
     try:
         while True:
@@ -97,7 +97,7 @@ def main():
                 visualize(disp, points, numDisp, sc, ax)  # <-- pass ax too
             if cv2.waitKey(1) & 0xFF in (ord('q'), 27):
                 break
-            time.sleep(0.25)
+            time.sleep(0.15)
 
     finally:
         left.close(); right.close()
