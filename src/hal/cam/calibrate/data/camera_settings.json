@@ -1,0 +1,12 @@
+{
+  "backend": 200,
+  "width": 800,
+  "height": 600,
+  "fps": 60,
+  "fourcc": "MJPG",
+  "brightness": 19,
+  "contrast": 9,
+  "saturation": 119,
+  "hue": 0,
+  "exposure": 35
+}
