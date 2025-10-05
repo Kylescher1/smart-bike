@@ -136,29 +136,41 @@ def main():
     prev_vis = None
     try:
         while True:
-            L = left_cam.read_frame(); R = right_cam.read_frame()
-            if L is None or R is None: continue
+            L = left_cam.read_frame()
+            R = right_cam.read_frame()
+            if L is None or R is None:
+                continue
+
             rectL, rectR = rectify_pair(L, R, calib)
-            grayL = cv2.cvtColor(rectL, cv2.COLOR_BGR2GRAY) if rectL.ndim==3 else rectL
-            grayR = cv2.cvtColor(rectR, cv2.COLOR_BGR2GRAY) if rectR.ndim==3 else rectR
+            grayL = cv2.cvtColor(rectL, cv2.COLOR_BGR2GRAY) if rectL.ndim == 3 else rectL
+            grayR = cv2.cvtColor(rectR, cv2.COLOR_BGR2GRAY) if rectR.ndim == 3 else rectR
 
             p = read_trackbar()
             disp, _ = compute_disparity(grayL, grayR, p)
 
             vis, Z, prev_vis = visualize_depth(disp, Q, p, prev_vis)
-            color_vis = cv2.applyColorMap(vis, cv2.COLORMAP_JET)
-            cv2.putText(color_vis, f"farEnhance={p['farEnhance']}", (10,30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-            cv2.imshow("Depth Map", color_vis)
+
+            # --- Depth Map: grayscale ---
+            cv2.putText(vis, f"farEnhance={p['farEnhance']}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.imshow("Depth Map", vis)
+
+            # --- Disparity Map: color ---
+            disp_color = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX)
+            disp_color = cv2.applyColorMap(disp_color.astype(np.uint8), cv2.COLORMAP_JET)
+            cv2.imshow("Disparity Map", disp_color)
 
             draw_histogram(Z, p["maxDepth"])
 
             k = cv2.waitKey(1) & 0xFF
             if k == ord('q'):
-                save_settings(p); break
+                save_settings(p)
+                break
     finally:
-        left_cam.close(); right_cam.close()
+        left_cam.close()
+        right_cam.close()
         cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
