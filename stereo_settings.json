@@ -1,5 +1,5 @@
 {
-  "numDisparities": 4,
+  "numDisparities": 6,
   "blockSize": 9,
   "preFilterCap": 4,
   "uniquenessRatio": 5,
