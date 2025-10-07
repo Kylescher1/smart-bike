@@ -1,7 +1,7 @@
 # src/hal/cam/depth.py
 import cv2, numpy as np
 from src.hal.cam.Camera import open_stereo_pair
-from src.hal.cam.calib import load_calibration, rectify_pair
+from src.hal.cam.calib import load_calibration
 
 
 DEFAULTS = {
@@ -14,6 +14,12 @@ DEFAULTS = {
     "disp12MaxDiff": 1,
     "medianBlurK": 0
 }
+
+def rectify_pair(left, right, calib):
+    leftMapX, leftMapY, rightMapX, rightMapY, _, _ = calib
+    rectL = cv2.remap(left, leftMapX, leftMapY, cv2.INTER_LINEAR)
+    rectR = cv2.remap(right, rightMapX, rightMapY, cv2.INTER_LINEAR)
+    return rectL, rectR
 
 def compute_depth_map(left, right, calib, settings=DEFAULTS):
     rectL, rectR = rectify_pair(left, right, calib)
