@@ -73,13 +73,29 @@ def main():
 
     try:
         # stereo calibration (fisheye model)
-        rms, K1, D1, K2, D2, R, T = cv2.fisheye.stereoCalibrate(
+        # Note: different OpenCV builds may return different tuple lengths.
+        # Capture the full return and unpack robustly.
+        ret = cv2.fisheye.stereoCalibrate(
             objpoints, imgpointsL, imgpointsR,
             K1, D1, K2, D2,
             img_shape,
             flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC,
             criteria=criteria
         )
+        # Expect at least (rms, K1, D1, K2, D2, R, T). Some builds append extra values.
+        if isinstance(ret, (tuple, list)):
+            if len(ret) >= 7:
+                rms, K1, D1, K2, D2, R, T = ret[:7]
+            else:
+                # Fallback: try direct unpack and raise clear error if it fails.
+                try:
+                    rms, K1, D1, K2, D2, R, T = ret
+                except Exception:
+                    raise ValueError(f"Unexpected return from fisheye.stereoCalibrate: {ret}")
+        else:
+            # Single return value (very unlikely) — treat as RMS only.
+            rms = ret
+
         print("RMS error (fisheye):", rms)
 
         R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(
