@@ -5,7 +5,7 @@ def load_calibration(filename=None):
     if filename is None:
         # path of this file: /src/hal/cam/calib.py
         base = os.path.dirname(__file__)
-        filename = os.path.join(base, "calibrate", "data", "stereo_calib_fisheye.npz")
+        filename = os.path.join(base, "calibrate", "data", "stereo_calib.npz")
 
     if not os.path.exists(filename):
         raise FileNotFoundError(f"Calibration file not found: {filename}")
