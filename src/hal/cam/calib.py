@@ -14,9 +14,3 @@ def load_calibration(filename=None):
     return (data["leftMapX"], data["leftMapY"],
             data["rightMapX"], data["rightMapY"],
             tuple(data["imageSize"]), data["Q"])
-
-def rectify_pair(left, right, calib):
-    leftMapX, leftMapY, rightMapX, rightMapY, _, _ = calib
-    rectL = cv2.remap(left, leftMapX, leftMapY, cv2.INTER_LINEAR)
-    rectR = cv2.remap(right, rightMapX, rightMapY, cv2.INTER_LINEAR)
-    return rectL, rectR
