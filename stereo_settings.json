@@ -1,8 +1,8 @@
 {
-  "numDisparities": 6,
-  "blockSize": 9,
+  "numDisparities": 4,
+  "blockSize": 7,
   "preFilterCap": 4,
-  "uniquenessRatio": 5,
+  "uniquenessRatio": 0,
   "speckleWindowSize": 200,
   "speckleRange": 5,
   "disp12MaxDiff": 7,

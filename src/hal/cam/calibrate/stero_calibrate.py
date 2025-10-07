@@ -5,7 +5,7 @@ import os
 
 # Checkerboard parameters
 CHECKERBOARD = (7, 10)   # inner corners (cols, rows)
-SQUARE_SIZE = 15.0       # mm
+SQUARE_SIZE = 20.0       # mm
 
 # termination criteria
 criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
