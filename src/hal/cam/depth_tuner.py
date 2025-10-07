@@ -147,6 +147,9 @@ def main():
 
             p = read_trackbar()
             disp, _ = compute_disparity(grayL, grayR, p)
+            print("disp stats:", np.min(disp), np.max(disp))
+            print("rectL shape:", rectL.shape)
+
 
             vis, Z, prev_vis = visualize_depth(disp, Q, p, prev_vis)
 

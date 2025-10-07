@@ -7,7 +7,7 @@ from typing import Optional, Dict
 CAMERA_CONFIG: Dict[str, int | str] = {
     "backend": cv2.CAP_V4L2,
     "width": 1600,
-    "height": 1600,
+    "height": 1200,
     "fps": 60,
     "fourcc": "MJPG",  # string form for clarity
 }
