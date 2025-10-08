@@ -19,6 +19,38 @@ def compute_reprojection_error(objpoints, imgpoints, rvecs, tvecs, K, D):
         total_points += len(objpoints[i])
     return np.sqrt(total_error / total_points)
 
+
+def check_camera_similarity(imgL, imgR, brightness_thresh=10, contrast_thresh=20, hist_thresh=0.5):
+    """Return True if the two images have similar size, brightness, and contrast."""
+    if imgL.shape != imgR.shape:
+        print("⚠️ Resolution mismatch")
+        return False
+
+    meanL, stdL = cv2.meanStdDev(imgL)
+    meanR, stdR = cv2.meanStdDev(imgR)
+
+    brightness_diff = abs(meanL[0][0] - meanR[0][0])
+    contrast_diff = abs(stdL[0][0] - stdR[0][0])
+
+    histL = cv2.calcHist([imgL], [0], None, [64], [0, 256])
+    histR = cv2.calcHist([imgR], [0], None, [64], [0, 256])
+    histL = cv2.normalize(histL, histL).flatten()
+    histR = cv2.normalize(histR, histR).flatten()
+    hist_corr = cv2.compareHist(histL, histR, cv2.HISTCMP_CORREL)
+
+    if brightness_diff > brightness_thresh:
+        print(f"⚠️ Brightness mismatch ({brightness_diff:.1f})")
+        return False
+    if contrast_diff > contrast_thresh:
+        print(f"⚠️ Contrast mismatch ({contrast_diff:.1f})")
+        return False
+    if hist_corr < hist_thresh:
+        print(f"⚠️ Histogram mismatch (corr={hist_corr:.2f})")
+        return False
+
+    return True
+
+
 def main():
     base_dir = os.path.dirname(__file__)
     pairs_dir = os.path.join(base_dir, "stereo_pairs")
@@ -29,9 +61,7 @@ def main():
     objp[:, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
     objp *= SQUARE_SIZE
 
-    objpoints = []
-    imgpointsL = []
-    imgpointsR = []
+    objpoints, imgpointsL, imgpointsR = [], [], []
 
     left_images = sorted(glob.glob(os.path.join(pairs_dir, "left_*.png")))
     right_images = sorted(glob.glob(os.path.join(pairs_dir, "right_*.png")))
@@ -44,16 +74,22 @@ def main():
             print("⚠️ Could not read one of the images")
             continue
 
+        if not check_camera_similarity(imgL, imgR):
+            print("🚫 Skipping this pair due to mismatch\n")
+            continue
+
         retL, cornersL = cv2.findChessboardCorners(imgL, CHECKERBOARD, None)
         retR, cornersR = cv2.findChessboardCorners(imgR, CHECKERBOARD, None)
         print(f"  Found corners L={retL}, R={retR}")
 
         if retL and retR:
-            cornersL = cv2.cornerSubPix(imgL, cornersL, (11,11), (-1,-1), criteria)
-            cornersR = cv2.cornerSubPix(imgR, cornersR, (11,11), (-1,-1), criteria)
-            objpoints.append(objp.reshape(-1,1,3))
-            imgpointsL.append(cornersL.reshape(-1,1,2))
-            imgpointsR.append(cornersR.reshape(-1,1,2))
+            cornersL = cv2.cornerSubPix(imgL, cornersL, (11, 11), (-1, -1), criteria)
+            cornersR = cv2.cornerSubPix(imgR, cornersR, (11, 11), (-1, -1), criteria)
+            objpoints.append(objp.reshape(-1, 1, 3))
+            imgpointsL.append(cornersL.reshape(-1, 1, 2))
+            imgpointsR.append(cornersR.reshape(-1, 1, 2))
+        else:
+            print("🚫 Skipping pair due to missing corners\n")
 
     N_OK = len(objpoints)
     print(f"✅ Using {N_OK} valid pairs")
@@ -62,11 +98,7 @@ def main():
         return
 
     img_shape = imgL.shape[::-1]
-
-    K1 = np.eye(3)
-    D1 = np.zeros((4,1))
-    K2 = np.eye(3)
-    D2 = np.zeros((4,1))
+    K1, D1, K2, D2 = np.eye(3), np.zeros((4, 1)), np.eye(3), np.zeros((4, 1))
 
     print("\n--- Stereo Calibration ---")
     rms, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
@@ -85,8 +117,9 @@ def main():
     print("Translation (T):\n", T.ravel())
 
     # Compute per-camera quality
-    rvecsL, tvecsL = cv2.calibrateCamera(objpoints, imgpointsL, img_shape, None, None)[1:3]
-    rvecsR, tvecsR = cv2.calibrateCamera(objpoints, imgpointsR, img_shape, None, None)[1:3]
+    _, _, _, rvecsL, tvecsL = cv2.calibrateCamera(objpoints, imgpointsL, img_shape, None, None)
+    _, _, _, rvecsR, tvecsR = cv2.calibrateCamera(objpoints, imgpointsR, img_shape, None, None)
+
     errL = compute_reprojection_error(objpoints, imgpointsL, rvecsL, tvecsL, K1, D1)
     errR = compute_reprojection_error(objpoints, imgpointsR, rvecsR, tvecsR, K2, D2)
     print(f"\nMean reprojection error (Left): {errL:.4f}")
