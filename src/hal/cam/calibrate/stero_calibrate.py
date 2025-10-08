@@ -102,28 +102,18 @@ def main():
 
     print("\n--- Stereo Calibration (Fisheye) ---")
 
-    # 1. Calibrate left normally
-    rmsL, K1, D1, rvecsL, tvecsL = cv2.fisheye.calibrate(
-        objpoints, imgpointsL, img_shape, None, None,
-        flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC, criteria=criteria)
+    # Fisheye stereo calibration
+    rms, K1, D1, K2, D2, R, T = cv2.fisheye.stereoCalibrate(
+        objpoints,
+        imgpointsL,
+        imgpointsR,
+        K1, D1, K2, D2,
+        img_shape,
+        criteria=criteria,
+        flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC
+    )
 
-    # 2. Use left’s intrinsics as starting point for right
-    rmsR, K2, D2, rvecsR, tvecsR = cv2.fisheye.calibrate(
-        objpoints, imgpointsR, img_shape, K1.copy(), D1.copy(),
-        flags=cv2.fisheye.CALIB_USE_INTRINSIC_GUESS, criteria=criteria)
-
-    # 3. Stereo calibration with fixed intrinsics
-    rmsStereo, K1, D1, K2, D2, R, T = cv2.fisheye.stereoCalibrate(
-        objpoints, imgpointsL, imgpointsR,
-        K1, D1, K2, D2, img_shape,
-        flags=cv2.fisheye.CALIB_FIX_INTRINSIC, criteria=criteria)
-
-
-
-    print(f"\nRMS reprojection error (fisheye stereo): {rmsStereo:.4f}")
-    print(f"Left camera RMS: {rmsL:.4f}")
-    print(f"Right camera RMS: {rmsR:.4f}")
-
+    print(f"\nRMS reprojection error (fisheye): {rms:.4f}")
     print("\nLeft Camera Intrinsics:\n", K1)
     print("Left Distortion Coefficients:\n", D1.ravel())
     print("\nRight Camera Intrinsics:\n", K2)
@@ -157,9 +147,8 @@ def main():
         R1=R1, R2=R2, P1=P1, P2=P2, Q=Q,
         leftMapX=leftMapX, leftMapY=leftMapY,
         rightMapX=rightMapX, rightMapY=rightMapY,
-        rmsL=rmsL, rmsR=rmsR, rmsStereo=rmsStereo
+        rms=rms
     )
-
 
     print(f"\n💾 Saved fisheye calibration to {out_file}")
     cv2.destroyAllWindows()
