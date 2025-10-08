@@ -85,11 +85,29 @@ def main():
         if retL and retR:
             cornersL = cv2.cornerSubPix(imgL, cornersL, (11, 11), (-1, -1), criteria)
             cornersR = cv2.cornerSubPix(imgR, cornersR, (11, 11), (-1, -1), criteria)
+
+
+            # --- Add this block ---
+            visL = cv2.cvtColor(imgL, cv2.COLOR_GRAY2BGR)
+            visR = cv2.cvtColor(imgR, cv2.COLOR_GRAY2BGR)
+            cv2.drawChessboardCorners(visL, CHECKERBOARD, cornersL, True)
+            cv2.drawChessboardCorners(visR, CHECKERBOARD, cornersR, True)
+
+            combo = np.hstack((visL, visR))
+            cv2.imshow("Detected Corners (L | R)", combo)
+            key = cv2.waitKey(300) & 0xFF
+            if key == ord('q'):
+                break
+            # ----------------------
+
             objpoints.append(objp.reshape(-1, 1, 3))
             imgpointsL.append(cornersL.reshape(-1, 1, 2))
             imgpointsR.append(cornersR.reshape(-1, 1, 2))
         else:
             print("🚫 Skipping pair due to missing corners\n")
+
+
+
 
     N_OK = len(objpoints)
     print(f"✅ Using {N_OK} valid pairs")
