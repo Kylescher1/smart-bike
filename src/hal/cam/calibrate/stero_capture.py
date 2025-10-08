@@ -38,8 +38,8 @@ def main():
                 print("⚠️ Failed to grab one or both frames.")
                 continue
 
-            previewL = cv2.resize(frameL, (1024, 960))
-            previewR = cv2.resize(frameR, (1024, 960))
+            previewL = cv2.resize(frameL, (800, 600))
+            previewR = cv2.resize(frameR, (800, 600))
             cv2.imshow("Left Camera", previewL)
             cv2.imshow("Right Camera", previewR)
 

@@ -7,7 +7,7 @@ import os
 CHECKERBOARD = (7, 10)   # inner corners (cols, rows)
 SQUARE_SIZE = 20.0       # mm
 
-criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
+criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 150, 0.5e-6)
 
 def compute_reprojection_error(objpoints, imgpoints, rvecs, tvecs, K, D):
     total_error = 0
@@ -119,15 +119,11 @@ def main():
     K1, D1, K2, D2 = np.eye(3), np.zeros((4, 1)), np.eye(3), np.zeros((4, 1))
 
     print("\n--- Stereo Calibration ---")
-    flags = (
-        cv2.CALIB_FIX_K3           # ignore 3rd radial term
-        + cv2.CALIB_ZERO_TANGENT_DIST  # disable tangential distortion
-    )
+
 
     rms, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
         objpoints, imgpointsL, imgpointsR,
         K1, D1, K2, D2, img_shape,
-        flags=flags,
         criteria=criteria
     )
 
