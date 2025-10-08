@@ -101,12 +101,14 @@ def main():
     K1, D1, K2, D2 = np.eye(3), np.zeros((4, 1)), np.eye(3), np.zeros((4, 1))
 
     print("\n--- Stereo Calibration ---")
+    flags = cv2.CALIB_FIX_K3 + cv2.CALIB_ZERO_TANGENT_DIST
     rms, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
-        objpoints, imgpointsL, imgpointsR,
-        K1, D1, K2, D2, img_shape,
-        flags=cv2.CALIB_RATIONAL_MODEL,
-        criteria=criteria
-    )
+    objpoints, imgpointsL, imgpointsR,
+    K1, D1, K2, D2, img_shape,
+    flags=flags,
+    criteria=criteria
+)
+
 
     print(f"\nRMS reprojection error: {rms:.4f}")
     print("\nLeft Camera Intrinsics:\n", K1)
