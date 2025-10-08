@@ -1,7 +1,7 @@
 # src/main.py
 import time, os, json, cv2, numpy as np, matplotlib.pyplot as plt
 from src.hal.cam.Camera import open_stereo_pair
-from src.hal.cam.calib import load_calibration
+from src.hal.cam..calibrate.calib import load_calibration
 from src.hal.cam.depth import rectify_pair, disparity_to_points
 
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "stereo_settings.json")

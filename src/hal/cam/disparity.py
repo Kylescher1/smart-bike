@@ -12,18 +12,18 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from src.hal.cam.depth import rectify_pair
-from src.hal.cam.calib import load_calibration
+from src.hal.cam.calibrate.calib import load_calibration
 from src.hal.cam.Camera import open_stereo_pair
 
 
 DEFAULT_SETTINGS = {
-    "numDisparities": 6,  # multiplied by 16 internally
-    "blockSize": 5,
+    "numDisparities": 4,  # multiplied by 16 internally
+    "blockSize": 16,
     "preFilterCap": 31,
-    "uniquenessRatio": 15,
-    "speckleWindowSize": 100,
-    "speckleRange": 32,
-    "disp12MaxDiff": 1,
+    "uniquenessRatio": 5,
+    "speckleWindowSize": 160,
+    "speckleRange": 7,
+    "disp12MaxDiff": 7,
     "medianBlurK": 0,
 }
 
@@ -73,7 +73,7 @@ def visualize_disparity(disp: np.ndarray, num_disp: int) -> np.ndarray:
     disp_vis = disp.copy()
     disp_vis[disp_vis < 0] = 0
     vis = np.clip(disp_vis / float(max(1, num_disp)) * 255.0, 0, 255).astype(np.uint8)
-    color = cv2.applyColorMap(vis, cv2.COLORMAP_JET)
+    color = cv2.applyColorMap(vis, cv2.COLORMAP_BONE)
     return color
 
 

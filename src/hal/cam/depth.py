@@ -1,7 +1,7 @@
 # src/hal/cam/depth.py
 import cv2, numpy as np
 from src.hal.cam.Camera import open_stereo_pair
-from src.hal.cam.calib import load_calibration
+from src.hal.cam.calibrate.calib import load_calibration
 
 
 DEFAULTS = {
