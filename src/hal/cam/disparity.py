@@ -1,6 +1,6 @@
 """
 Minimal disparity output script with interactive tuning.
-Adds crop and downSample sliders.
+Adds fine-grained downSample (10–100%) and crop sliders.
 Creates/loads disparity_settings.json in smart-bike root folder.
 Press 'q' to quit.
 """
@@ -22,8 +22,8 @@ DEFAULT_SETTINGS = {
     "speckleRange": 7,
     "disp12MaxDiff": 7,
     "medianBlurK": 0,
-    "downSample": 0,   # 0–3 (none, ½, ¼, ⅛)
-    "crop": 0          # pixels trimmed from edges
+    "downSample": 100,  # percentage (10–100)
+    "crop": 0           # pixels trimmed from edges
 }
 
 def load_settings():
@@ -47,8 +47,8 @@ def create_tuner_window(s):
     cv2.createTrackbar("uniquenessRatio", "Disparity Tuner", s["uniquenessRatio"], 50, nothing)
     cv2.createTrackbar("speckleRange", "Disparity Tuner", s["speckleRange"], 50, nothing)
     cv2.createTrackbar("medianBlurK", "Disparity Tuner", s["medianBlurK"], 7, nothing)
-    cv2.createTrackbar("downSample", "Disparity Tuner", s["downSample"], 3, nothing)
-    cv2.createTrackbar("crop", "Disparity Tuner", s["crop"], 200, nothing)
+    cv2.createTrackbar("downSample%", "Disparity Tuner", s["downSample"], 100, nothing)
+    cv2.createTrackbar("crop(px)", "Disparity Tuner", s["crop"], 200, nothing)
 
 def read_trackbar():
     s = {
@@ -60,8 +60,8 @@ def read_trackbar():
         "speckleWindowSize": 160,
         "disp12MaxDiff": 7,
         "medianBlurK": cv2.getTrackbarPos("medianBlurK", "Disparity Tuner"),
-        "downSample": cv2.getTrackbarPos("downSample", "Disparity Tuner"),
-        "crop": cv2.getTrackbarPos("crop", "Disparity Tuner")
+        "downSample": max(10, cv2.getTrackbarPos("downSample%", "Disparity Tuner")),  # enforce ≥10%
+        "crop": cv2.getTrackbarPos("crop(px)", "Disparity Tuner")
     }
     if s["medianBlurK"] % 2 == 0:
         s["medianBlurK"] = max(0, s["medianBlurK"] - 1)
@@ -95,9 +95,9 @@ def visualize_disparity(disp, num_disp):
     return cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
 
 def preprocess_images(grayL, grayR, s):
-    # downsample
-    if s["downSample"] > 0:
-        scale = 1.0 / (2 ** s["downSample"])
+    # fine-grained downsample (10–100%)
+    scale = max(0.1, s["downSample"] / 100.0)
+    if scale < 0.999:
         grayL = cv2.resize(grayL, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         grayR = cv2.resize(grayR, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     # crop edges
@@ -130,7 +130,10 @@ def main():
             disp, num_disp = compute_disparity_map(grayL, grayR, s)
             vis = visualize_disparity(disp, num_disp)
 
+            cv2.putText(vis, f"Scale={s['downSample']}%  Crop={s['crop']}px",
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
             cv2.imshow("Disparity (color)", vis)
+
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 save_settings(s)

@@ -1,12 +1,12 @@
 {
-  "numDisparities": 7,
+  "numDisparities": 6,
   "blockSize": 9,
-  "preFilterCap": 31,
-  "uniquenessRatio": 0,
+  "preFilterCap": 45,
+  "uniquenessRatio": 7,
   "speckleRange": 41,
   "speckleWindowSize": 160,
   "disp12MaxDiff": 7,
   "medianBlurK": 0,
-  "downSample": 1,
-  "crop": 0
+  "downSample": 50,
+  "crop": 63
 }
