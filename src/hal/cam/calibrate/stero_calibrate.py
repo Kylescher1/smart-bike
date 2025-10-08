@@ -126,7 +126,7 @@ def main():
         K1, D1, K2, D2,
         img_shape, R, T,
         flags=cv2.CALIB_ZERO_DISPARITY,
-        balance=0.7,
+        balance=0.0,
         fov_scale=1.2
     )
 
