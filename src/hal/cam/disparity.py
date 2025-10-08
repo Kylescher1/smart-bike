@@ -1,23 +1,20 @@
 """
-Minimal disparity output script.
-
-This file computes and displays the raw disparity map from the stereo pair.
-It is intentionally small and free of tuning UI or depth reprojecting.
-
-Usage: run the module. Press 'q' to quit.
+Minimal disparity output script with interactive tuning.
+Adds crop and downSample sliders.
+Creates/loads disparity_settings.json in smart-bike root folder.
+Press 'q' to quit.
 """
 
 from __future__ import annotations
-
-import cv2
-import numpy as np
+import cv2, json, os, numpy as np
 from src.hal.cam.depth import rectify_pair
 from src.hal.cam.calibrate.calib import load_calibration
 from src.hal.cam.Camera import open_stereo_pair
 
+SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "../../..", "disparity_settings.json")
 
 DEFAULT_SETTINGS = {
-    "numDisparities": 4,  # multiplied by 16 internally
+    "numDisparities": 4,
     "blockSize": 16,
     "preFilterCap": 31,
     "uniquenessRatio": 5,
@@ -25,90 +22,123 @@ DEFAULT_SETTINGS = {
     "speckleRange": 7,
     "disp12MaxDiff": 7,
     "medianBlurK": 0,
+    "downSample": 0,   # 0–3 (none, ½, ¼, ⅛)
+    "crop": 0          # pixels trimmed from edges
 }
 
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE) as f:
+            return {**DEFAULT_SETTINGS, **json.load(f)}
+    return DEFAULT_SETTINGS.copy()
 
-def compute_disparity_map(gray_left: np.ndarray, gray_right: np.ndarray, settings: dict | None = None) -> tuple[np.ndarray, int]:
-    """Compute raw disparity map (float32) and return (disparity, num_disparities).
+def save_settings(s):
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(s, f, indent=2)
 
-    The disparity values are returned in pixels (float32). Invalid/negative disparities
-    are left as-is (can be <= 0). For visualization use visualize_disparity.
-    """
-    s = (DEFAULT_SETTINGS.copy() if settings is None else {**DEFAULT_SETTINGS, **settings})
-    num_disp = 16 * max(1, int(s["numDisparities"]))
-    block = max(3, int(s["blockSize"]) | 1)
-    cn = 1
-    P1 = 8 * cn * block * block
-    P2 = 32 * cn * block * block
+def nothing(x): pass
 
+def create_tuner_window(s):
+    cv2.namedWindow("Disparity Tuner", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Disparity Tuner", 420, 400)
+    cv2.createTrackbar("numDisp", "Disparity Tuner", s["numDisparities"], 20, nothing)
+    cv2.createTrackbar("blockSize", "Disparity Tuner", s["blockSize"], 21, nothing)
+    cv2.createTrackbar("preFilterCap", "Disparity Tuner", s["preFilterCap"], 63, nothing)
+    cv2.createTrackbar("uniquenessRatio", "Disparity Tuner", s["uniquenessRatio"], 50, nothing)
+    cv2.createTrackbar("speckleRange", "Disparity Tuner", s["speckleRange"], 50, nothing)
+    cv2.createTrackbar("medianBlurK", "Disparity Tuner", s["medianBlurK"], 7, nothing)
+    cv2.createTrackbar("downSample", "Disparity Tuner", s["downSample"], 3, nothing)
+    cv2.createTrackbar("crop", "Disparity Tuner", s["crop"], 200, nothing)
+
+def read_trackbar():
+    s = {
+        "numDisparities": max(1, cv2.getTrackbarPos("numDisp", "Disparity Tuner")),
+        "blockSize": max(3, cv2.getTrackbarPos("blockSize", "Disparity Tuner") | 1),
+        "preFilterCap": cv2.getTrackbarPos("preFilterCap", "Disparity Tuner"),
+        "uniquenessRatio": cv2.getTrackbarPos("uniquenessRatio", "Disparity Tuner"),
+        "speckleRange": cv2.getTrackbarPos("speckleRange", "Disparity Tuner"),
+        "speckleWindowSize": 160,
+        "disp12MaxDiff": 7,
+        "medianBlurK": cv2.getTrackbarPos("medianBlurK", "Disparity Tuner"),
+        "downSample": cv2.getTrackbarPos("downSample", "Disparity Tuner"),
+        "crop": cv2.getTrackbarPos("crop", "Disparity Tuner")
+    }
+    if s["medianBlurK"] % 2 == 0:
+        s["medianBlurK"] = max(0, s["medianBlurK"] - 1)
+    return s
+
+def compute_disparity_map(gray_left, gray_right, settings):
+    num_disp = 16 * settings["numDisparities"]
+    blk = settings["blockSize"]
+    P1, P2 = 8 * blk * blk, 32 * blk * blk
     stereo = cv2.StereoSGBM_create(
         minDisparity=0,
         numDisparities=num_disp,
-        blockSize=block,
-        P1=P1,
-        P2=P2,
-        preFilterCap=int(s["preFilterCap"]),
-        uniquenessRatio=int(s["uniquenessRatio"]),
-        speckleWindowSize=int(s["speckleWindowSize"]),
-        speckleRange=int(s["speckleRange"]),
-        disp12MaxDiff=int(s["disp12MaxDiff"]),
-        mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
+        blockSize=blk,
+        P1=P1, P2=P2,
+        preFilterCap=settings["preFilterCap"],
+        uniquenessRatio=settings["uniquenessRatio"],
+        speckleWindowSize=settings["speckleWindowSize"],
+        speckleRange=settings["speckleRange"],
+        disp12MaxDiff=settings["disp12MaxDiff"],
+        mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY
     )
-
     disp = stereo.compute(gray_left, gray_right).astype(np.float32) / 16.0
-
-    if s.get("medianBlurK", 0) >= 3:
-        k = int(s["medianBlurK"])
-        if k % 2 == 0:
-            k -= 1
-        if k >= 3:
-            disp = cv2.medianBlur(disp, k)
-
+    k = settings["medianBlurK"]
+    if k >= 3:
+        disp = cv2.medianBlur(disp, k)
     return disp, num_disp
 
+def visualize_disparity(disp, num_disp):
+    disp_vis = np.clip(disp, 0, num_disp)
+    norm = (disp_vis / float(max(1, num_disp)) * 255).astype(np.uint8)
+    return cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
 
-def visualize_disparity(disp: np.ndarray, num_disp: int) -> np.ndarray:
-    """Return an 8-bit colorized visualization of disparity for display."""
-    # Normalize ignoring negative/invalid disparities
-    disp_vis = disp.copy()
-    disp_vis[disp_vis < 0] = 0
-    vis = np.clip(disp_vis / float(max(1, num_disp)) * 255.0, 0, 255).astype(np.uint8)
-    color = cv2.applyColorMap(vis, cv2.COLORMAP_BONE)
-    return color
+def preprocess_images(grayL, grayR, s):
+    # downsample
+    if s["downSample"] > 0:
+        scale = 1.0 / (2 ** s["downSample"])
+        grayL = cv2.resize(grayL, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        grayR = cv2.resize(grayR, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    # crop edges
+    c = s["crop"]
+    if c > 0:
+        h, w = grayL.shape[:2]
+        grayL = grayL[c:h - c, c:w - c]
+        grayR = grayR[c:h - c, c:w - c]
+    return grayL, grayR
 
-
-def main() -> None:
+def main():
     calib = load_calibration()
     left_cam, right_cam = open_stereo_pair()
+    s = load_settings()
+    create_tuner_window(s)
 
     try:
         while True:
             left = left_cam.read_frame()
             right = right_cam.read_frame()
             if left is None or right is None:
-                # camera may be warming up; skip until frames available
                 continue
 
             rectL, rectR = rectify_pair(left, right, calib)
-            grayL = cv2.cvtColor(rectL, cv2.COLOR_BGR2GRAY) if rectL.ndim == 3 else rectL
-            grayR = cv2.cvtColor(rectR, cv2.COLOR_BGR2GRAY) if rectR.ndim == 3 else rectR
+            grayL = cv2.cvtColor(rectL, cv2.COLOR_BGR2GRAY)
+            grayR = cv2.cvtColor(rectR, cv2.COLOR_BGR2GRAY)
 
-            disp, num_disp = compute_disparity_map(grayL, grayR)
-
+            s = read_trackbar()
+            grayL, grayR = preprocess_images(grayL, grayR, s)
+            disp, num_disp = compute_disparity_map(grayL, grayR, s)
             vis = visualize_disparity(disp, num_disp)
+
             cv2.imshow("Disparity (color)", vis)
-
-            # For some consumers it may be useful to see raw disparity as text (optional)
-            # cv2.imshow("Disparity (raw)", (disp / num_disp * 255).astype(np.uint8))
-
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
+                save_settings(s)
                 break
     finally:
         left_cam.close()
         right_cam.close()
         cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main()
