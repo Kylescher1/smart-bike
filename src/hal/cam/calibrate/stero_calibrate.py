@@ -1,3 +1,4 @@
+# src/hal/cam/calibrate/stereo_calibrate_fisheye.py
 import cv2
 import numpy as np
 import glob
@@ -7,37 +8,21 @@ import os
 CHECKERBOARD = (7, 10)   # inner corners (cols, rows)
 SQUARE_SIZE = 20.0       # mm
 
-criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 150, 0.5e-6)
-
-def compute_reprojection_error(objpoints, imgpoints, rvecs, tvecs, K, D):
-    total_error = 0
-    total_points = 0
-    for i in range(len(objpoints)):
-        imgpoints2, _ = cv2.projectPoints(objpoints[i], rvecs[i], tvecs[i], K, D)
-        error = cv2.norm(imgpoints[i], imgpoints2, cv2.NORM_L2)
-        total_error += error**2
-        total_points += len(objpoints[i])
-    return np.sqrt(total_error / total_points)
-
+criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 150, 1e-6)
 
 def check_camera_similarity(imgL, imgR, brightness_thresh=10, contrast_thresh=20, hist_thresh=0.5):
-    """Return True if the two images have similar size, brightness, and contrast."""
     if imgL.shape != imgR.shape:
         print("⚠️ Resolution mismatch")
         return False
-
     meanL, stdL = cv2.meanStdDev(imgL)
     meanR, stdR = cv2.meanStdDev(imgR)
-
     brightness_diff = abs(meanL[0][0] - meanR[0][0])
     contrast_diff = abs(stdL[0][0] - stdR[0][0])
-
     histL = cv2.calcHist([imgL], [0], None, [64], [0, 256])
     histR = cv2.calcHist([imgR], [0], None, [64], [0, 256])
     histL = cv2.normalize(histL, histL).flatten()
     histR = cv2.normalize(histR, histR).flatten()
     hist_corr = cv2.compareHist(histL, histR, cv2.HISTCMP_CORREL)
-
     if brightness_diff > brightness_thresh:
         print(f"⚠️ Brightness mismatch ({brightness_diff:.1f})")
         return False
@@ -47,7 +32,6 @@ def check_camera_similarity(imgL, imgR, brightness_thresh=10, contrast_thresh=20
     if hist_corr < hist_thresh:
         print(f"⚠️ Histogram mismatch (corr={hist_corr:.2f})")
         return False
-
     return True
 
 
@@ -57,8 +41,8 @@ def main():
     data_dir = os.path.join(base_dir, "data")
     os.makedirs(data_dir, exist_ok=True)
 
-    objp = np.zeros((CHECKERBOARD[0]*CHECKERBOARD[1], 3), np.float32)
-    objp[:, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
+    objp = np.zeros((1, CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
+    objp[0, :, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
     objp *= SQUARE_SIZE
 
     objpoints, imgpointsL, imgpointsR = [], [], []
@@ -73,7 +57,6 @@ def main():
         if imgL is None or imgR is None:
             print("⚠️ Could not read one of the images")
             continue
-
         if not check_camera_similarity(imgL, imgR):
             print("🚫 Skipping this pair due to mismatch\n")
             continue
@@ -86,50 +69,51 @@ def main():
             cornersL = cv2.cornerSubPix(imgL, cornersL, (11, 11), (-1, -1), criteria)
             cornersR = cv2.cornerSubPix(imgR, cornersR, (11, 11), (-1, -1), criteria)
 
-
-            # --- Add this block ---
             visL = cv2.cvtColor(imgL, cv2.COLOR_GRAY2BGR)
             visR = cv2.cvtColor(imgR, cv2.COLOR_GRAY2BGR)
             cv2.drawChessboardCorners(visL, CHECKERBOARD, cornersL, True)
             cv2.drawChessboardCorners(visR, CHECKERBOARD, cornersR, True)
-
             combo = np.hstack((visL, visR))
             cv2.imshow("Detected Corners (L | R)", combo)
             key = cv2.waitKey(300) & 0xFF
             if key == ord('q'):
                 break
-            # ----------------------
 
-            objpoints.append(objp.reshape(-1, 1, 3))
-            imgpointsL.append(cornersL.reshape(-1, 1, 2))
-            imgpointsR.append(cornersR.reshape(-1, 1, 2))
+            objpoints.append(objp)
+            imgpointsL.append(cornersL.reshape(1, -1, 2))
+            imgpointsR.append(cornersR.reshape(1, -1, 2))
         else:
             print("🚫 Skipping pair due to missing corners\n")
-
-
-
 
     N_OK = len(objpoints)
     print(f"✅ Using {N_OK} valid pairs")
     if N_OK < 5:
         print("❌ Not enough valid pairs")
+        cv2.destroyAllWindows()
         return
 
     img_shape = imgL.shape[::-1]
-    K1, D1, K2, D2 = np.eye(3), np.zeros((4, 1)), np.eye(3), np.zeros((4, 1))
 
-    print("\n--- Stereo Calibration ---")
+    # Initialize intrinsics
+    K1 = np.eye(3)
+    D1 = np.zeros((4, 1))
+    K2 = np.eye(3)
+    D2 = np.zeros((4, 1))
 
+    print("\n--- Stereo Calibration (Fisheye) ---")
 
-    rms, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
-        objpoints, imgpointsL, imgpointsR,
-        K1, D1, K2, D2, img_shape,
-        criteria=criteria
+    # Fisheye stereo calibration
+    rms, K1, D1, K2, D2, R, T = cv2.fisheye.stereoCalibrate(
+        objpoints,
+        imgpointsL,
+        imgpointsR,
+        K1, D1, K2, D2,
+        img_shape,
+        criteria=criteria,
+        flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC
     )
 
-
-
-    print(f"\nRMS reprojection error: {rms:.4f}")
+    print(f"\nRMS reprojection error (fisheye): {rms:.4f}")
     print("\nLeft Camera Intrinsics:\n", K1)
     print("Left Distortion Coefficients:\n", D1.ravel())
     print("\nRight Camera Intrinsics:\n", K2)
@@ -137,23 +121,38 @@ def main():
     print("\nRotation (R):\n", R)
     print("Translation (T):\n", T.ravel())
 
-    # Compute per-camera quality
-    _, _, _, rvecsL, tvecsL = cv2.calibrateCamera(objpoints, imgpointsL, img_shape, None, None)
-    _, _, _, rvecsR, tvecsR = cv2.calibrateCamera(objpoints, imgpointsR, img_shape, None, None)
+    # Stereo rectification (fisheye)
+    R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(
+        K1, D1, K2, D2,
+        img_shape, R, T,
+        flags=cv2.CALIB_ZERO_DISPARITY,
+        balance=0.7,
+        fov_scale=1.2
+    )
 
-    errL = compute_reprojection_error(objpoints, imgpointsL, rvecsL, tvecsL, K1, D1)
-    errR = compute_reprojection_error(objpoints, imgpointsR, rvecsR, tvecsR, K2, D2)
-    print(f"\nMean reprojection error (Left): {errL:.4f}")
-    print(f"Mean reprojection error (Right): {errR:.4f}")
+    leftMapX, leftMapY = cv2.fisheye.initUndistortRectifyMap(
+        K1, D1, R1, P1, img_shape, cv2.CV_32FC1
+    )
+    rightMapX, rightMapY = cv2.fisheye.initUndistortRectifyMap(
+        K2, D2, R2, P2, img_shape, cv2.CV_32FC1
+    )
 
+    # Save calibration
     out_file = os.path.join(data_dir, "stereo_calib.npz")
-    np.savez_compressed(out_file,
+    np.savez_compressed(
+        out_file,
         imageSize=img_shape,
         K1=K1, D1=D1, K2=K2, D2=D2,
-        R=R, T=T, E=E, F=F,
-        rms=rms, errL=errL, errR=errR
+        R=R, T=T,
+        R1=R1, R2=R2, P1=P1, P2=P2, Q=Q,
+        leftMapX=leftMapX, leftMapY=leftMapY,
+        rightMapX=rightMapX, rightMapY=rightMapY,
+        rms=rms
     )
-    print(f"\n💾 Saved calibration with quality metrics to {out_file}")
+
+    print(f"\n💾 Saved fisheye calibration to {out_file}")
+    cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()

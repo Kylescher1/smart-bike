@@ -6,8 +6,8 @@ from typing import Optional, Dict
 # Centralized configuration
 CAMERA_CONFIG: Dict[str, int | str] = {
     "backend": cv2.CAP_V4L2,
-    "width": 1600,
-    "height": 1200,
+    "width": 1980,
+    "height": 1020,
     "fps": 60,
     "fourcc": "MJPG",  # string form for clarity
 }
