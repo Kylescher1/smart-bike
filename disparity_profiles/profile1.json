@@ -1,19 +1,20 @@
 {
   "numDisparities": 3,
-  "blockSize": 7,
+  "blockSize": 19,
   "preFilterCap": 48,
   "uniquenessRatio": 0,
   "speckleRange": 41,
   "speckleWindowSize": 160,
   "disp12MaxDiff": 7,
   "medianBlurK": 0,
-  "downSample": 51,
-  "crop": 66,
+  "downSample": 63,
+  "crop": 0,
   "useMorph": 1,
-  "morphIter": 2,
+  "morphIter": 1,
   "useBilateral": 1,
-  "bilateralStrength": 9,
+  "bilateralStrength": 8,
   "useWLS": 0,
   "wlsLambda": 1810,
-  "wlsSigma": 2.3
+  "wlsSigma": 2.3,
+  "profileName": "profile1"
 }

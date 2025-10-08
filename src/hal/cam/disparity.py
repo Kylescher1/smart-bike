@@ -1,17 +1,23 @@
 """
-Minimal disparity output script with interactive tuning.
-Adds fine-grained downSample (10–100%) and crop sliders.
-Creates/loads disparity_settings.json in smart-bike root folder.
-Press 'q' to quit.
+Disparity tuner with fine-grained scaling, cropping, filters, and profiles.
+Press:
+  q – quit and save current settings
+  s – save profile
+  l – load profile
+Profiles are saved in ./disparity_profiles/<name>.json
 """
 
 from __future__ import annotations
 import cv2, json, os, numpy as np
+import cv2.ximgproc as xip
 from src.hal.cam.depth import rectify_pair
 from src.hal.cam.calibrate.calib import load_calibration
 from src.hal.cam.Camera import open_stereo_pair
 
-SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "../../..", "disparity_settings.json")
+ROOT = os.path.join(os.path.dirname(__file__), "../../..")
+SETTINGS_FILE = os.path.join(ROOT, "disparity_settings.json")
+PROFILE_DIR = os.path.join(ROOT, "disparity_profiles")
+os.makedirs(PROFILE_DIR, exist_ok=True)
 
 DEFAULT_SETTINGS = {
     "numDisparities": 4,
@@ -22,8 +28,17 @@ DEFAULT_SETTINGS = {
     "speckleRange": 7,
     "disp12MaxDiff": 7,
     "medianBlurK": 0,
-    "downSample": 100,  # percentage (10–100)
-    "crop": 0           # pixels trimmed from edges
+    "downSample": 100,
+    "crop": 0,
+    # filters
+    "useMorph": 1,
+    "morphIter": 1,
+    "useBilateral": 1,
+    "bilateralStrength": 8,
+    "useWLS": 0,
+    "wlsLambda": 4000,
+    "wlsSigma": 1.0,
+    "profileName": "default"
 }
 
 def load_settings():
@@ -36,32 +51,62 @@ def save_settings(s):
     with open(SETTINGS_FILE, "w") as f:
         json.dump(s, f, indent=2)
 
+def save_profile(s):
+    path = os.path.join(PROFILE_DIR, f"{s['profileName']}.json")
+    with open(path, "w") as f:
+        json.dump(s, f, indent=2)
+    print(f"✅ Saved profile: {path}")
+
+def load_profile(name):
+    path = os.path.join(PROFILE_DIR, f"{name}.json")
+    if not os.path.exists(path):
+        print(f"⚠️ Profile '{name}' not found.")
+        return None
+    with open(path) as f:
+        return {**DEFAULT_SETTINGS, **json.load(f)}
+
 def nothing(x): pass
 
 def create_tuner_window(s):
     cv2.namedWindow("Disparity Tuner", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Disparity Tuner", 420, 400)
+    cv2.resizeWindow("Disparity Tuner", 480, 600)
+    # Core SGBM
     cv2.createTrackbar("numDisp", "Disparity Tuner", s["numDisparities"], 20, nothing)
     cv2.createTrackbar("blockSize", "Disparity Tuner", s["blockSize"], 21, nothing)
+    cv2.createTrackbar("uniqueness", "Disparity Tuner", s["uniquenessRatio"], 50, nothing)
     cv2.createTrackbar("preFilterCap", "Disparity Tuner", s["preFilterCap"], 63, nothing)
-    cv2.createTrackbar("uniquenessRatio", "Disparity Tuner", s["uniquenessRatio"], 50, nothing)
     cv2.createTrackbar("speckleRange", "Disparity Tuner", s["speckleRange"], 50, nothing)
     cv2.createTrackbar("medianBlurK", "Disparity Tuner", s["medianBlurK"], 7, nothing)
     cv2.createTrackbar("downSample%", "Disparity Tuner", s["downSample"], 100, nothing)
     cv2.createTrackbar("crop(px)", "Disparity Tuner", s["crop"], 200, nothing)
+    # Filters
+    cv2.createTrackbar("useMorph", "Disparity Tuner", s["useMorph"], 1, nothing)
+    cv2.createTrackbar("morphIter", "Disparity Tuner", s["morphIter"], 3, nothing)
+    cv2.createTrackbar("useBilateral", "Disparity Tuner", s["useBilateral"], 1, nothing)
+    cv2.createTrackbar("bilateralStrength", "Disparity Tuner", s["bilateralStrength"], 20, nothing)
+    cv2.createTrackbar("useWLS", "Disparity Tuner", s["useWLS"], 1, nothing)
+    cv2.createTrackbar("wlsLambda", "Disparity Tuner", s["wlsLambda"], 10000, nothing)
+    cv2.createTrackbar("wlsSigmaX10", "Disparity Tuner", int(s["wlsSigma"] * 10), 50, nothing)
 
 def read_trackbar():
     s = {
         "numDisparities": max(1, cv2.getTrackbarPos("numDisp", "Disparity Tuner")),
         "blockSize": max(3, cv2.getTrackbarPos("blockSize", "Disparity Tuner") | 1),
         "preFilterCap": cv2.getTrackbarPos("preFilterCap", "Disparity Tuner"),
-        "uniquenessRatio": cv2.getTrackbarPos("uniquenessRatio", "Disparity Tuner"),
+        "uniquenessRatio": cv2.getTrackbarPos("uniqueness", "Disparity Tuner"),
         "speckleRange": cv2.getTrackbarPos("speckleRange", "Disparity Tuner"),
         "speckleWindowSize": 160,
         "disp12MaxDiff": 7,
         "medianBlurK": cv2.getTrackbarPos("medianBlurK", "Disparity Tuner"),
-        "downSample": max(10, cv2.getTrackbarPos("downSample%", "Disparity Tuner")),  # enforce ≥10%
-        "crop": cv2.getTrackbarPos("crop(px)", "Disparity Tuner")
+        "downSample": max(10, cv2.getTrackbarPos("downSample%", "Disparity Tuner")),
+        "crop": cv2.getTrackbarPos("crop(px)", "Disparity Tuner"),
+        "useMorph": cv2.getTrackbarPos("useMorph", "Disparity Tuner"),
+        "morphIter": cv2.getTrackbarPos("morphIter", "Disparity Tuner"),
+        "useBilateral": cv2.getTrackbarPos("useBilateral", "Disparity Tuner"),
+        "bilateralStrength": cv2.getTrackbarPos("bilateralStrength", "Disparity Tuner"),
+        "useWLS": cv2.getTrackbarPos("useWLS", "Disparity Tuner"),
+        "wlsLambda": cv2.getTrackbarPos("wlsLambda", "Disparity Tuner"),
+        "wlsSigma": cv2.getTrackbarPos("wlsSigmaX10", "Disparity Tuner") / 10.0
     }
     if s["medianBlurK"] % 2 == 0:
         s["medianBlurK"] = max(0, s["medianBlurK"] - 1)
@@ -84,23 +129,28 @@ def compute_disparity_map(gray_left, gray_right, settings):
         mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY
     )
     disp = stereo.compute(gray_left, gray_right).astype(np.float32) / 16.0
-    k = settings["medianBlurK"]
-    if k >= 3:
-        disp = cv2.medianBlur(disp, k)
+    if settings["medianBlurK"] >= 3:
+        disp = cv2.medianBlur(disp, settings["medianBlurK"])
     return disp, num_disp
 
-def visualize_disparity(disp, num_disp):
-    disp_vis = np.clip(disp, 0, num_disp)
-    norm = (disp_vis / float(max(1, num_disp)) * 255).astype(np.uint8)
-    return cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
+def post_filter_disparity(disp, grayL, s):
+    if s["useMorph"]:
+        disp = cv2.morphologyEx(disp, cv2.MORPH_CLOSE, np.ones((3,3),np.uint8), iterations=s["morphIter"])
+    if s["useBilateral"] and s["bilateralStrength"] > 0:
+        b = s["bilateralStrength"]
+        disp = cv2.bilateralFilter(disp, 5, b, b)
+    if s["useWLS"] and s["wlsLambda"] > 0:
+        wls = xip.createDisparityWLSFilterGeneric(False)
+        wls.setLambda(float(s["wlsLambda"]))
+        wls.setSigmaColor(float(s["wlsSigma"]))
+        disp = wls.filter(disp, grayL)
+    return disp
 
 def preprocess_images(grayL, grayR, s):
-    # fine-grained downsample (10–100%)
     scale = max(0.1, s["downSample"] / 100.0)
     if scale < 0.999:
         grayL = cv2.resize(grayL, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         grayR = cv2.resize(grayR, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-    # crop edges
     c = s["crop"]
     if c > 0:
         h, w = grayL.shape[:2]
@@ -108,11 +158,17 @@ def preprocess_images(grayL, grayR, s):
         grayR = grayR[c:h - c, c:w - c]
     return grayL, grayR
 
+def visualize_disparity(disp, num_disp):
+    disp_vis = np.clip(disp, 0, num_disp)
+    norm = (disp_vis / float(max(1, num_disp)) * 255).astype(np.uint8)
+    return cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
+
 def main():
     calib = load_calibration()
     left_cam, right_cam = open_stereo_pair()
     s = load_settings()
     create_tuner_window(s)
+    print("Press 's' to save current profile, 'l' to load one, 'q' to quit.")
 
     try:
         while True:
@@ -128,14 +184,29 @@ def main():
             s = read_trackbar()
             grayL, grayR = preprocess_images(grayL, grayR, s)
             disp, num_disp = compute_disparity_map(grayL, grayR, s)
-            vis = visualize_disparity(disp, num_disp)
+            disp = post_filter_disparity(disp, grayL, s)
 
-            cv2.putText(vis, f"Scale={s['downSample']}%  Crop={s['crop']}px",
+            vis = visualize_disparity(disp, num_disp)
+            cv2.putText(vis, f"Profile={s.get('profileName','default')} | DS={s['downSample']}% | Crop={s['crop']}px",
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
+            cv2.putText(vis, f"Filters: M{'✔' if s['useMorph'] else '✖'}  B{'✔' if s['useBilateral'] else '✖'}  W{'✔' if s['useWLS'] else '✖'}",
+                        (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
             cv2.imshow("Disparity (color)", vis)
 
             key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
+            if key == ord("s"):
+                name = input("Enter profile name to save: ").strip()
+                if name:
+                    s["profileName"] = name
+                    save_profile(s)
+            elif key == ord("l"):
+                name = input("Enter profile name to load: ").strip()
+                prof = load_profile(name)
+                if prof:
+                    s = prof
+                    save_settings(s)
+                    create_tuner_window(s)
+            elif key == ord("q"):
                 save_settings(s)
                 break
     finally:
