@@ -237,25 +237,55 @@ def rectify_pair(left, right, calib):
     rectR = cv2.remap(right, rightMapX, rightMapY, cv2.INTER_LINEAR)
     return rectL, rectR
 
-
-def remove_void_rows(disp, threshold=0.95, min_neighbors=5):
+def remove_void_rows(disp, low_cut=0, high_cut=300, show_fft=True):
     """
-    Remove rows that are mostly void (zeros) or sparsely populated with valid disparity.
+    Apply a 2D FFT band-pass filter to the disparity map.
+    Removes large voids (low freq) and scattered noise (high freq).
+    Optionally displays FFT magnitude spectrum.
+
     Args:
         disp: disparity map (float32)
-        threshold: fraction of zeros above which a row is removed (0–1)
-        min_neighbors: minimum valid pixels per row to keep it
+        low_cut: low frequency cutoff in pixels
+        high_cut: high frequency cutoff in pixels
+        show_fft: if True, display FFT magnitude image
     Returns:
-        disparity map with removed or zeroed rows
+        Filtered disparity map (float32)
     """
-    mask = disp > 0
-    h, w = mask.shape
-    for y in range(h):
-        valid_count = np.count_nonzero(mask[y])
-        if valid_count < min_neighbors or valid_count / w < (1 - threshold):
-            disp[y, :] = 0
-    return disp
+    d = disp.copy()
+    d[d <= 0] = 0
+    if np.all(d == 0):
+        return d
 
+    f = np.fft.fft2(d)
+    fshift = np.fft.fftshift(f)
+    h, w = d.shape
+    cy, cx = h // 2, w // 2
+
+    Y, X = np.ogrid[:h, :w]
+    dist = np.sqrt((X - cx)**2 + (Y - cy)**2)
+    mask = (dist >= low_cut) & (dist <= high_cut)
+
+    # Apply mask and inverse transform
+    fshift_filtered = fshift * mask
+    f_ishift = np.fft.ifftshift(fshift_filtered)
+    filtered = np.real(np.fft.ifft2(f_ishift))
+    filtered[disp <= 0] = 0
+    filtered = np.clip(filtered, 0, np.max(filtered))
+
+    # Visualization
+    if show_fft:
+        mag = np.log(np.abs(fshift) + 1)
+        mag_norm = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        mag_color = cv2.applyColorMap(mag_norm, cv2.COLORMAP_TWILIGHT)
+        cv2.imshow("FFT Spectrum", mag_color)
+
+        # also show masked version
+        mag_masked = np.log(np.abs(fshift_filtered) + 1)
+        mag_masked_norm = cv2.normalize(mag_masked, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        mag_masked_color = cv2.applyColorMap(mag_masked_norm, cv2.COLORMAP_TWILIGHT)
+        cv2.imshow("FFT Spectrum (Filtered)", mag_masked_color)
+
+    return filtered
 
 def main():
     calib = load_calibration()
@@ -266,8 +296,8 @@ def main():
 
     try:
         while True:
-            left = left_cam.read_frame()
-            right = right_cam.read_frame()
+            left = right_cam.read_frame()
+            right = left_cam.read_frame()
             if left is None or right is None:
                 continue
 
