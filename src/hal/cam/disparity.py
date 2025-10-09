@@ -8,6 +8,7 @@ Profiles are saved in ./disparity_profiles/<name>.json
 """
 
 from __future__ import annotations
+from turtle import right
 import cv2, json, os, numpy as np
 import cv2.ximgproc as xip
 from src.hal.cam.depth import rectify_pair
@@ -225,6 +226,13 @@ def visualize_disparity(disp, num_disp, far_enhance=50):
     # apply colormap
     norm = (disp_vis * 255).astype(np.uint8)
     color = cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
+
+def rectify_pair(left, right, calib):
+    leftMapX, leftMapY, rightMapX, rightMapY, _, _ = calib
+    rectL = cv2.remap(left, leftMapX, leftMapY, cv2.INTER_LINEAR)
+    rectR = cv2.remap(right, rightMapX, rightMapY, cv2.INTER_LINEAR)
+    return rectL, rectR
+
 
 
 
