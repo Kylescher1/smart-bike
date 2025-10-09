@@ -121,6 +121,19 @@ def read_trackbar():
         s["medianBlurK"] = max(0, s["medianBlurK"] - 1)
     return s
 
+def preprocess_images(grayL, grayR, s):
+    scale = max(0.1, s["downSample"] / 100.0)
+    if scale < 0.999:
+        grayL = cv2.resize(grayL, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        grayR = cv2.resize(grayR, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    c = s["crop"]
+    if c > 0:
+        h, w = grayL.shape[:2]
+        grayL = grayL[c:h - c, c:w - c]
+        grayR = grayR[c:h - c, c:w - c]
+    return grayL, grayR
+
+
 def compute_disparity_map(gray_left, gray_right, settings):
     num_disp = 16 * settings["numDisparities"]
     blk = settings["blockSize"]
@@ -142,7 +155,7 @@ def compute_disparity_map(gray_left, gray_right, settings):
         disp = cv2.medianBlur(disp, settings["medianBlurK"])
     return disp, num_disp
 
-def post_filter_disparity(disp, grayL, s):
+def post_filter_strong(disp, grayL, s):
     if s["useMorph"]:
         disp = cv2.morphologyEx(disp, cv2.MORPH_CLOSE, np.ones((3,3),np.uint8), iterations=s["morphIter"])
     if s["useBilateral"] and s["bilateralStrength"] > 0:
@@ -155,19 +168,41 @@ def post_filter_disparity(disp, grayL, s):
         disp = wls.filter(disp, grayL)
     return disp
 
-def preprocess_images(grayL, grayR, s):
-    scale = max(0.1, s["downSample"] / 100.0)
-    if scale < 0.999:
-        grayL = cv2.resize(grayL, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        grayR = cv2.resize(grayR, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-    c = s["crop"]
-    if c > 0:
-        h, w = grayL.shape[:2]
-        grayL = grayL[c:h - c, c:w - c]
-        grayR = grayR[c:h - c, c:w - c]
-    return grayL, grayR
+def post_filter_weak(disp, s):
+    """Post-filter disparity: remove very near/high-disparity pixels and
+    perform iterative neighborhood cleanup to remove weakly-connected remnants.
 
-def visualize_disparity(disp, num_disp, far_enhance=50, near_cutoff=0):
+    Args:
+        disp: disparity map (numpy array, float)
+        s: settings dict (expects key 'nearCutoff')
+
+    Returns:
+        Filtered disparity map (same shape/type as input)
+    """
+    # remove close objects (high disparity, high pass filter)
+    if s.get("nearCutoff", 0) > 0:
+        cutoff = s["nearCutoff"]
+        disp[disp > cutoff] = 0
+
+    # --- Iterative neighborhood cleanup ---
+    mask = (disp > 0).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+
+    # repeat a few rounds to remove weakly connected remnants
+    for _ in range(3):
+        neighbor_count = cv2.filter2D(mask, -1, kernel)
+        # remove pixels with too few valid neighbors (≤3 of 8)
+        isolated = (neighbor_count <= 3) & (mask == 1)
+        if not np.any(isolated):
+            break
+        mask[isolated] = 0
+
+    disp[mask == 0] = 0
+    # --- end cleanup ---
+
+    return disp
+
+def visualize_disparity(disp, num_disp, far_enhance=50):
     # clamp to valid range
     disp = np.clip(disp, 0, num_disp)
 
@@ -190,13 +225,6 @@ def visualize_disparity(disp, num_disp, far_enhance=50, near_cutoff=0):
     # apply colormap
     norm = (disp_vis * 255).astype(np.uint8)
     color = cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
-
-    # optional near-cutoff overlay (darken near pixels)
-    if near_cutoff > 0:
-        mask = disp > (num_disp * (near_cutoff / 200.0))
-        color[mask] = (color[mask] * 0.3).astype(np.uint8)
-
-    return color
 
 
 
@@ -221,39 +249,16 @@ def main():
             s = read_trackbar()
             grayL, grayR = preprocess_images(grayL, grayR, s)
             disp, num_disp = compute_disparity_map(grayL, grayR, s)
-            disp = post_filter_disparity(disp, grayL, s)
-            # Low-pass filter to remove near (high disparity) objects
-            near_cutoff = s.get("nearCutoff", 0)
-            if near_cutoff > 0:
-                threshold = num_disp * (near_cutoff / 200.0)
-                disp[disp > threshold] = 0
 
+            # postfilter-strong: bilateral, WLS, etc.
+            disp = post_filter_strong(disp, grayL, s)
 
-            # remove close objects (high disparity)
-            if s["nearCutoff"] > 0:
-                cutoff = s["nearCutoff"]
-                disp[disp > cutoff] = 0
+            # postfilter-weak: remove very-near pixels and cleanup small remnants
+            disp = post_filter_weak(disp, s)
 
-            # --- Iterative neighborhood cleanup ---
-            mask = (disp > 0).astype(np.uint8)
-            kernel = np.ones((3, 3), np.uint8)
+            # visualize
+            vis = visualize_disparity(disp, num_disp, s["farEnhance"])
 
-            # repeat a few rounds to remove weakly connected remnants
-            for _ in range(3):
-                neighbor_count = cv2.filter2D(mask, -1, kernel)
-                # remove pixels with too few valid neighbors (≤3 of 8)
-                isolated = (neighbor_count <= 3) & (mask == 1)
-                if not np.any(isolated):
-                    break
-                mask[isolated] = 0
-
-            disp[mask == 0] = 0
-            # --- end cleanup ---
-
-
-
-
-            vis = visualize_disparity(disp, num_disp, s["farEnhance"], s["nearCutoff"])
 
             cv2.putText(vis, f"Profile={s.get('profileName','default')} | DS={s['downSample']}% | Crop={s['crop']}px",
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
@@ -262,6 +267,8 @@ def main():
             cv2.imshow("Disparity (color)", vis)
 
             key = cv2.waitKey(1) & 0xFF
+
+            #  Save/load profiles, and quit
             if key == ord("s"):
                 name = input("Enter profile name to save: ").strip()
                 if name:
@@ -277,6 +284,8 @@ def main():
             elif key == ord("q"):
                 save_settings(s)
                 break
+
+    # Handle cleanup on exit
     finally:
         left_cam.close()
         right_cam.close()
