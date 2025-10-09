@@ -167,11 +167,37 @@ def preprocess_images(grayL, grayR, s):
         grayR = grayR[c:h - c, c:w - c]
     return grayL, grayR
 
-def visualize_disparity(disp, num_disp, far_enhance=50):
-    shift = np.clip(far_enhance / 200.0, 0.0, 1.0)
-    disp_vis = np.clip(disp * (1.0 - shift), 0, num_disp)
-    norm = (disp_vis / float(max(1, num_disp)) * 255).astype(np.uint8)
-    return cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
+def visualize_disparity(disp, num_disp, far_enhance=50, near_cutoff=0):
+    # clamp to valid range
+    disp = np.clip(disp, 0, num_disp)
+
+    # normalize window shift: 0–200 slider → bias toward far field
+    # far_enhance=0 → normal contrast
+    # far_enhance=200 → focus only on far (low disparity)
+    bias = np.clip(far_enhance / 200.0, 0.0, 1.0)
+
+    # compute percentile window
+    valid = disp[disp > 0]
+    if valid.size > 0:
+        low = np.percentile(valid, bias * 80)  # start window deeper into low disparities
+        high = np.percentile(valid, 100 - bias * 10)
+        if high <= low:
+            high = low + 1
+        disp_vis = np.clip((disp - low) / (high - low), 0, 1)
+    else:
+        disp_vis = np.zeros_like(disp)
+
+    # apply colormap
+    norm = (disp_vis * 255).astype(np.uint8)
+    color = cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
+
+    # optional near-cutoff overlay (darken near pixels)
+    if near_cutoff > 0:
+        mask = disp > (num_disp * (near_cutoff / 200.0))
+        color[mask] = (color[mask] * 0.3).astype(np.uint8)
+
+    return color
+
 
 
 def main():
@@ -196,6 +222,12 @@ def main():
             grayL, grayR = preprocess_images(grayL, grayR, s)
             disp, num_disp = compute_disparity_map(grayL, grayR, s)
             disp = post_filter_disparity(disp, grayL, s)
+            # Low-pass filter to remove near (high disparity) objects
+            near_cutoff = s.get("nearCutoff", 0)
+            if near_cutoff > 0:
+                threshold = num_disp * (near_cutoff / 200.0)
+                disp[disp > threshold] = 0
+
 
             # remove close objects (high disparity)
             if s["nearCutoff"] > 0:
@@ -204,7 +236,8 @@ def main():
 
 
 
-            vis = visualize_disparity(disp, num_disp, s["farEnhance"])
+            vis = visualize_disparity(disp, num_disp, s["farEnhance"], s["nearCutoff"])
+
             cv2.putText(vis, f"Profile={s.get('profileName','default')} | DS={s['downSample']}% | Crop={s['crop']}px",
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
             cv2.putText(vis, f"Filters: M{'✔' if s['useMorph'] else '✖'}  B{'✔' if s['useBilateral'] else '✖'}  W{'✔' if s['useWLS'] else '✖'}",
