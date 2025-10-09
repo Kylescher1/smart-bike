@@ -7,7 +7,7 @@
   "speckleWindowSize": 160,
   "disp12MaxDiff": 7,
   "medianBlurK": 1,
-  "downSample": 63,
+  "downSample": 72,
   "crop": 77,
   "useMorph": 1,
   "morphIter": 3,
@@ -15,5 +15,7 @@
   "bilateralStrength": 0,
   "useWLS": 1,
   "wlsLambda": 6259,
+  "farEnhance": 8,
+  "nearCutoff": 69,
   "wlsSigma": 0.7
 }

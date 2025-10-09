@@ -31,6 +31,7 @@ DEFAULT_SETTINGS = {
     "downSample": 100,
     "crop": 0,
     "farEnhance": 50,
+    "nearCutoff": 0,
     # filters
     "useMorph": 1,
     "morphIter": 1,
@@ -89,6 +90,8 @@ def create_tuner_window(s):
     cv2.createTrackbar("wlsLambda", "Disparity Tuner", s["wlsLambda"], 10000, nothing)
     cv2.createTrackbar("wlsSigmaX10", "Disparity Tuner", int(s["wlsSigma"] * 10), 50, nothing)
     cv2.createTrackbar("farEnhance", "Disparity Tuner", s.get("farEnhance", 50), 200, nothing)
+    cv2.createTrackbar("nearCutoff", "Disparity Tuner", s.get("nearCutoff", 0), 200, nothing)
+
 
 
 def read_trackbar():
@@ -110,6 +113,8 @@ def read_trackbar():
         "useWLS": cv2.getTrackbarPos("useWLS", "Disparity Tuner"),
         "wlsLambda": cv2.getTrackbarPos("wlsLambda", "Disparity Tuner"),
         "farEnhance": cv2.getTrackbarPos("farEnhance", "Disparity Tuner"),
+        "nearCutoff": cv2.getTrackbarPos("nearCutoff", "Disparity Tuner"),
+
         "wlsSigma": cv2.getTrackbarPos("wlsSigmaX10", "Disparity Tuner") / 10.0
     }
     if s["medianBlurK"] % 2 == 0:
@@ -191,6 +196,13 @@ def main():
             grayL, grayR = preprocess_images(grayL, grayR, s)
             disp, num_disp = compute_disparity_map(grayL, grayR, s)
             disp = post_filter_disparity(disp, grayL, s)
+
+            # remove close objects (high disparity)
+            if s["nearCutoff"] > 0:
+                cutoff = s["nearCutoff"]
+                disp[disp > cutoff] = 0
+
+
 
             vis = visualize_disparity(disp, num_disp, s["farEnhance"])
             cv2.putText(vis, f"Profile={s.get('profileName','default')} | DS={s['downSample']}% | Crop={s['crop']}px",
