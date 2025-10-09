@@ -1,6 +1,7 @@
 {
+  "minDisparity": 5,
   "numDisparities": 6,
-  "blockSize": 3,
+  "blockSize": 15,
   "preFilterCap": 48,
   "uniquenessRatio": 15,
   "speckleRange": 41,
@@ -15,7 +16,7 @@
   "bilateralStrength": 0,
   "useWLS": 1,
   "wlsLambda": 2889,
-  "farEnhance": 0,
-  "nearCutoff": 154,
+  "farEnhance": 13,
+  "nearCutoff": 12,
   "wlsSigma": 0.7
 }

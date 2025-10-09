@@ -229,6 +229,7 @@ def visualize_disparity(disp, num_disp, far_enhance=50):
     # apply colormap
     norm = (disp_vis * 255).astype(np.uint8)
     color = cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
+    return color
 
 def rectify_pair(left, right, calib):
     leftMapX, leftMapY, rightMapX, rightMapY, _, _ = calib
@@ -236,6 +237,24 @@ def rectify_pair(left, right, calib):
     rectR = cv2.remap(right, rightMapX, rightMapY, cv2.INTER_LINEAR)
     return rectL, rectR
 
+
+def remove_void_rows(disp, threshold=0.95, min_neighbors=5):
+    """
+    Remove rows that are mostly void (zeros) or sparsely populated with valid disparity.
+    Args:
+        disp: disparity map (float32)
+        threshold: fraction of zeros above which a row is removed (0–1)
+        min_neighbors: minimum valid pixels per row to keep it
+    Returns:
+        disparity map with removed or zeroed rows
+    """
+    mask = disp > 0
+    h, w = mask.shape
+    for y in range(h):
+        valid_count = np.count_nonzero(mask[y])
+        if valid_count < min_neighbors or valid_count / w < (1 - threshold):
+            disp[y, :] = 0
+    return disp
 
 
 def main():
@@ -265,6 +284,9 @@ def main():
 
             # postfilter-weak: remove very-near pixels and cleanup small remnants
             disp = post_filter_weak(disp, s)
+
+            disp = remove_void_rows(disp)
+
 
             # visualize
             vis = visualize_disparity(disp, num_disp, s["farEnhance"])
