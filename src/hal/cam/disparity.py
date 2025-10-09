@@ -30,6 +30,7 @@ DEFAULT_SETTINGS = {
     "medianBlurK": 0,
     "downSample": 100,
     "crop": 0,
+    "farEnhance": 50,
     # filters
     "useMorph": 1,
     "morphIter": 1,
@@ -87,6 +88,8 @@ def create_tuner_window(s):
     cv2.createTrackbar("useWLS", "Disparity Tuner", s["useWLS"], 1, nothing)
     cv2.createTrackbar("wlsLambda", "Disparity Tuner", s["wlsLambda"], 10000, nothing)
     cv2.createTrackbar("wlsSigmaX10", "Disparity Tuner", int(s["wlsSigma"] * 10), 50, nothing)
+    cv2.createTrackbar("farEnhance", "Disparity Tuner", s.get("farEnhance", 50), 200, nothing)
+
 
 def read_trackbar():
     s = {
@@ -106,6 +109,7 @@ def read_trackbar():
         "bilateralStrength": cv2.getTrackbarPos("bilateralStrength", "Disparity Tuner"),
         "useWLS": cv2.getTrackbarPos("useWLS", "Disparity Tuner"),
         "wlsLambda": cv2.getTrackbarPos("wlsLambda", "Disparity Tuner"),
+        "farEnhance": cv2.getTrackbarPos("farEnhance", "Disparity Tuner"),
         "wlsSigma": cv2.getTrackbarPos("wlsSigmaX10", "Disparity Tuner") / 10.0
     }
     if s["medianBlurK"] % 2 == 0:
@@ -158,10 +162,12 @@ def preprocess_images(grayL, grayR, s):
         grayR = grayR[c:h - c, c:w - c]
     return grayL, grayR
 
-def visualize_disparity(disp, num_disp):
-    disp_vis = np.clip(disp, 0, num_disp)
+def visualize_disparity(disp, num_disp, far_enhance=50):
+    shift = np.clip(far_enhance / 200.0, 0.0, 1.0)
+    disp_vis = np.clip(disp * (1.0 - shift), 0, num_disp)
     norm = (disp_vis / float(max(1, num_disp)) * 255).astype(np.uint8)
     return cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
+
 
 def main():
     calib = load_calibration()
@@ -186,7 +192,7 @@ def main():
             disp, num_disp = compute_disparity_map(grayL, grayR, s)
             disp = post_filter_disparity(disp, grayL, s)
 
-            vis = visualize_disparity(disp, num_disp)
+            vis = visualize_disparity(disp, num_disp, s["farEnhance"])
             cv2.putText(vis, f"Profile={s.get('profileName','default')} | DS={s['downSample']}% | Crop={s['crop']}px",
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
             cv2.putText(vis, f"Filters: M{'✔' if s['useMorph'] else '✖'}  B{'✔' if s['useBilateral'] else '✖'}  W{'✔' if s['useWLS'] else '✖'}",

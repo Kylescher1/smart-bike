@@ -15,5 +15,6 @@
   "bilateralStrength": 0,
   "useWLS": 1,
   "wlsLambda": 6259,
-  "wlsSigma": 0.7
+  "wlsSigma": 0.7,
+  "profileName": "wls2"
 }
