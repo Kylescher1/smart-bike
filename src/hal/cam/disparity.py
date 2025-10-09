@@ -234,6 +234,23 @@ def main():
                 cutoff = s["nearCutoff"]
                 disp[disp > cutoff] = 0
 
+            # --- Iterative neighborhood cleanup ---
+            mask = (disp > 0).astype(np.uint8)
+            kernel = np.ones((3, 3), np.uint8)
+
+            # repeat a few rounds to remove weakly connected remnants
+            for _ in range(3):
+                neighbor_count = cv2.filter2D(mask, -1, kernel)
+                # remove pixels with too few valid neighbors (≤3 of 8)
+                isolated = (neighbor_count <= 3) & (mask == 1)
+                if not np.any(isolated):
+                    break
+                mask[isolated] = 0
+
+            disp[mask == 0] = 0
+            # --- end cleanup ---
+
+
 
 
             vis = visualize_disparity(disp, num_disp, s["farEnhance"], s["nearCutoff"])
