@@ -11,7 +11,6 @@ from __future__ import annotations
 from turtle import right
 import cv2, json, os, numpy as np
 import cv2.ximgproc as xip
-from src.hal.cam.depth import rectify_pair
 from src.hal.cam.calibrate.calib import load_calibration
 from src.hal.cam.Camera import open_stereo_pair
 
@@ -21,6 +20,7 @@ PROFILE_DIR = os.path.join(ROOT, "disparity_profiles")
 os.makedirs(PROFILE_DIR, exist_ok=True)
 
 DEFAULT_SETTINGS = {
+    "minDisparity": 0,
     "numDisparities": 4,
     "blockSize": 16,
     "preFilterCap": 31,
@@ -74,6 +74,7 @@ def create_tuner_window(s):
     cv2.namedWindow("Disparity Tuner", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Disparity Tuner", 480, 600)
     # Core SGBM
+    cv2.createTrackbar("minDisp", "Disparity Tuner", s["minDisparity"], 100, nothing)
     cv2.createTrackbar("numDisp", "Disparity Tuner", s["numDisparities"], 20, nothing)
     cv2.createTrackbar("blockSize", "Disparity Tuner", s["blockSize"], 21, nothing)
     cv2.createTrackbar("uniqueness", "Disparity Tuner", s["uniquenessRatio"], 50, nothing)
@@ -97,6 +98,7 @@ def create_tuner_window(s):
 
 def read_trackbar():
     s = {
+        "minDisparity": cv2.getTrackbarPos("minDisp", "Disparity Tuner"),
         "numDisparities": max(1, cv2.getTrackbarPos("numDisp", "Disparity Tuner")),
         "blockSize": max(3, cv2.getTrackbarPos("blockSize", "Disparity Tuner") | 1),
         "preFilterCap": cv2.getTrackbarPos("preFilterCap", "Disparity Tuner"),
@@ -136,11 +138,12 @@ def preprocess_images(grayL, grayR, s):
 
 
 def compute_disparity_map(gray_left, gray_right, settings):
+    min_disp = settings["minDisparity"]
     num_disp = 16 * settings["numDisparities"]
     blk = settings["blockSize"]
     P1, P2 = 8 * blk * blk, 32 * blk * blk
     stereo = cv2.StereoSGBM_create(
-        minDisparity=0,
+        minDisparity=min_disp,
         numDisparities=num_disp,
         blockSize=blk,
         P1=P1, P2=P2,
@@ -232,7 +235,6 @@ def rectify_pair(left, right, calib):
     rectL = cv2.remap(left, leftMapX, leftMapY, cv2.INTER_LINEAR)
     rectR = cv2.remap(right, rightMapX, rightMapY, cv2.INTER_LINEAR)
     return rectL, rectR
-
 
 
 
