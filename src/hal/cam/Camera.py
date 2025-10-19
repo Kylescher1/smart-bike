@@ -6,8 +6,8 @@ from typing import Optional, Dict
 # Centralized configuration
 CAMERA_CONFIG: Dict[str, int | str] = {
     "backend": cv2.CAP_V4L2,
-    "width": 1980,
-    "height": 1020,
+    "width": 1024,
+    "height": 768,
     "fps": 60,
     "fourcc": "MJPG",  # string form for clarity
 }
@@ -73,7 +73,7 @@ if __name__ == "__main__":
     try:
         # Override config here if needed
         stereo_config = CAMERA_CONFIG.copy()
-        stereo_config.update({"width": 800, "height": 600, "fps": 90})
+        stereo_config.update({"width": 1024, "height": 768, "fps": 90})
 
         left, right = open_stereo_pair(config=stereo_config)
         while True:

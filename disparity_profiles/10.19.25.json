@@ -18,5 +18,6 @@
   "wlsLambda": 6704,
   "farEnhance": 0,
   "nearCutoff": 77,
-  "wlsSigma": 0.8
+  "wlsSigma": 0.8,
+  "profileName": "10.19.25"
 }
