@@ -13,7 +13,7 @@ import cv2, json, os, numpy as np
 import cv2.ximgproc as xip
 from src.hal.cam.calibrate.calib import load_calibration
 from src.hal.cam.Camera import open_stereo_pair
-
+from datetime import datetime
 import threading, time
 
 ROOT = os.path.join(os.path.dirname(__file__), "../../..")
@@ -310,6 +310,12 @@ def main():
     create_tuner_window(s)
     print("Press 's' to save current profile, 'l' to load one, 'q' to quit.")
 
+    IMAGES_DIR = os.path.join(ROOT, "images")
+    os.makedirs(IMAGES_DIR, exist_ok=True)
+    SAVE_EVERY_SEC = 2.0
+    last_save = time.perf_counter()
+
+
     try:
         while True:
             tracker = PerfTracker()
@@ -348,6 +354,27 @@ def main():
             tracker.mark("vis")
 
             vis_display = cv2.resize(vis, (1920, 1080))
+
+            # periodic capture to ROOT
+            now = time.perf_counter()  # define timestamp for this iteration
+
+            if now - last_save >= SAVE_EVERY_SEC:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                L = np.ascontiguousarray(left.copy())
+                R = np.ascontiguousarray(right.copy())
+                V = np.ascontiguousarray(vis.copy())
+                D = disp.copy()  # npy can handle non-contiguous, copy for thread-safety
+
+                try:
+                    cv2.imwrite(os.path.join(IMAGES_DIR, f"left_{ts}.png"),  L, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+                    cv2.imwrite(os.path.join(IMAGES_DIR, f"right_{ts}.png"), R, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+                    cv2.imwrite(os.path.join(IMAGES_DIR, f"disp_vis_{ts}.png"), V, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+                    np.save(os.path.join(IMAGES_DIR, f"disp_{ts}.npy"), D)
+                except Exception as e:
+                    print("save error:", e)
+
+                last_save = now
 
 
 
