@@ -1,22 +1,34 @@
 # src/hal/cam/Camera.py
 import cv2
-from typing import Optional
+from typing import Optional, Dict
+
+
+# Centralized configuration
+CAMERA_CONFIG: Dict[str, int | str] = {
+    "backend": cv2.CAP_V4L2,
+    "width": 1024,
+    "height": 768,
+    "fps": 60,
+    "fourcc": "MJPG",  # string form for clarity
+}
+
 
 class Camera:
-    def __init__(self, index: int, backend: int = cv2.CAP_V4L2,
-                 width: int = 1024, height: int = 768, fps: int = 30):
+    def __init__(self, index: int, config: Dict[str, int | str] = CAMERA_CONFIG):
         self.index = index
-        self.backend = backend
-        self.width = width
-        self.height = height
-        self.fps = fps
+        self.backend = config["backend"]
+        self.width = config["width"]
+        self.height = config["height"]
+        self.fps = config["fps"]
+        self.fourcc = config["fourcc"]
         self.cap: Optional[cv2.VideoCapture] = None
 
     def open(self):
         self.cap = cv2.VideoCapture(self.index, self.backend)
         if not self.cap.isOpened():
             raise RuntimeError(f"[Camera {self.index}] Failed to open.")
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FPS, self.fps)
@@ -32,7 +44,7 @@ class Camera:
         return frame if ret else None
 
 
-def open_stereo_pair(max_index: int = 10):
+def open_stereo_pair(max_index: int = 10, config: Dict[str, int | str] = CAMERA_CONFIG):
     """
     Try all /dev/video indices up to `max_index` and open the first two that work.
     Returns (left, right) Camera objects.
@@ -40,7 +52,7 @@ def open_stereo_pair(max_index: int = 10):
     opened = []
     for idx in range(max_index):
         try:
-            cam = Camera(index=idx, backend=cv2.CAP_V4L2, width=800, height=600, fps=90)
+            cam = Camera(index=idx, config=config)
             cam.open()
             print(f"✅ Opened camera {idx}")
             opened.append(cam)
@@ -50,7 +62,6 @@ def open_stereo_pair(max_index: int = 10):
             pass
 
     if len(opened) < 2:
-        # clean up any partial opens
         for cam in opened:
             cam.close()
         raise RuntimeError("❌ Could not find two working cameras.")
@@ -60,7 +71,11 @@ def open_stereo_pair(max_index: int = 10):
 
 if __name__ == "__main__":
     try:
-        left, right = open_stereo_pair()
+        # Override config here if needed
+        stereo_config = CAMERA_CONFIG.copy()
+        stereo_config.update({"width": 1024, "height": 768, "fps": 90})
+
+        left, right = open_stereo_pair(config=stereo_config)
         while True:
             frameL = left.read_frame()
             frameR = right.read_frame()

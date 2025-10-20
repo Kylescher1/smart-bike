@@ -1,0 +1,22 @@
+{
+  "numDisparities": 10,
+  "blockSize": 3,
+  "preFilterCap": 48,
+  "uniquenessRatio": 15,
+  "speckleRange": 41,
+  "speckleWindowSize": 160,
+  "disp12MaxDiff": 7,
+  "medianBlurK": 1,
+  "downSample": 82,
+  "crop": 77,
+  "useMorph": 1,
+  "morphIter": 3,
+  "useBilateral": 1,
+  "bilateralStrength": 0,
+  "useWLS": 1,
+  "wlsLambda": 2889,
+  "farEnhance": 0,
+  "nearCutoff": 38,
+  "wlsSigma": 0.7,
+  "profileName": "wls3"
+}

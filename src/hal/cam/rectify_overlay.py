@@ -44,6 +44,7 @@ def main():
             # add epipolar lines
             overlay = draw_epilines(overlay, step=40)
 
+            overlay = cv2.resize(overlay, (800, 600))
             cv2.imshow("Rectification Overlay", overlay)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
