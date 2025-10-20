@@ -1,0 +1,4 @@
+python -m src.hal.cam.depth_tuner
+python -m src.hal.cam.rectify_overlay
+python -m src.hal.cam.disparity
+v4l2-ctl -d /dev/video1 --list-formats-ext

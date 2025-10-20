@@ -1,0 +1,14 @@
+{
+  "numDisparities": 4,
+  "blockSize": 7,
+  "preFilterCap": 4,
+  "uniquenessRatio": 0,
+  "speckleWindowSize": 200,
+  "speckleRange": 5,
+  "disp12MaxDiff": 7,
+  "medianBlurK": 5,
+  "alpha": 7,
+  "minDistance": 0,
+  "maxDepth": 18,
+  "farEnhance": 38
+}
