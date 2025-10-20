@@ -14,9 +14,9 @@
   "morphIter": 0,
   "useBilateral": 0,
   "bilateralStrength": 0,
-  "useWLS": 0,
-  "wlsLambda": 6704,
+  "useWLS": 1,
+  "wlsLambda": 3259,
   "farEnhance": 0,
-  "nearCutoff": 77,
-  "wlsSigma": 0.8
+  "nearCutoff": 168,
+  "wlsSigma": 2.1
 }

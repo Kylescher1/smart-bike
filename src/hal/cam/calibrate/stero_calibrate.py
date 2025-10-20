@@ -10,7 +10,7 @@ SQUARE_SIZE = 20.0       # mm
 
 criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 150, 1e-6)
 
-def check_camera_similarity(imgL, imgR, brightness_thresh=10, contrast_thresh=20, hist_thresh=0.5):
+def check_camera_similarity(imgL, imgR, brightness_thresh=30, contrast_thresh=20, hist_thresh=0.15):
     if imgL.shape != imgR.shape:
         print("⚠️ Resolution mismatch")
         return False
