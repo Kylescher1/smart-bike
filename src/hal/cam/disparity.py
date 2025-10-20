@@ -14,10 +14,28 @@ import cv2.ximgproc as xip
 from src.hal.cam.calibrate.calib import load_calibration
 from src.hal.cam.Camera import open_stereo_pair
 
+import threading, time
+
 ROOT = os.path.join(os.path.dirname(__file__), "../../..")
 SETTINGS_FILE = os.path.join(ROOT, "disparity_settings.json")
 PROFILE_DIR = os.path.join(ROOT, "disparity_profiles")
 os.makedirs(PROFILE_DIR, exist_ok=True)
+
+class PerfTracker:
+    def __init__(self):
+        self.times = {}
+        self.last = time.perf_counter()
+
+    def mark(self, label):
+        now = time.perf_counter()
+        self.times[label] = (now - self.last) * 1000  # ms
+        self.last = now
+
+    def summary(self):
+        total = sum(self.times.values())
+        parts = " | ".join(f"{k}:{v:.1f}ms" for k,v in self.times.items())
+        return f"{parts} | total:{total:.1f}ms"
+
 
 DEFAULT_SETTINGS = {
     "minDisparity": 0,
@@ -256,28 +274,64 @@ def remove_void_rows(disp, threshold=0.95, min_neighbors=5):
             disp[y, :] = 0
     return disp
 
+class ThreadedCamera:
+    def __init__(self, cam):
+        self.cam = cam
+        self.frame = None
+        self.lock = threading.Lock()
+        self.running = True
+        t = threading.Thread(target=self._update, daemon=True)
+        t.start()
+
+    def _update(self):
+        while self.running:
+            f = self.cam.read_frame()
+            if f is not None:
+                with self.lock:
+                    self.frame = f
+            else:
+                time.sleep(0.005)
+
+    def get(self):
+        with self.lock:
+            return self.frame
+
+    def close(self):
+        self.running = False
+        self.cam.close()
+
 
 def main():
     calib = load_calibration()
-    left_cam, right_cam = open_stereo_pair()
+    left_cam_raw, right_cam_raw = open_stereo_pair()
+    left_cam = ThreadedCamera(left_cam_raw)
+    right_cam = ThreadedCamera(right_cam_raw)
     s = load_settings()
     create_tuner_window(s)
     print("Press 's' to save current profile, 'l' to load one, 'q' to quit.")
 
     try:
         while True:
-            left = left_cam.read_frame()
-            right = right_cam.read_frame()
+            tracker = PerfTracker()
+            left = left_cam.get()
+            right = right_cam.get()
+            tracker.mark("capture")
+
             if left is None or right is None:
+                time.sleep(0.001)
                 continue
 
             rectL, rectR = rectify_pair(left, right, calib)
+            tracker.mark("rectify")
             grayL = cv2.cvtColor(rectL, cv2.COLOR_BGR2GRAY)
             grayR = cv2.cvtColor(rectR, cv2.COLOR_BGR2GRAY)
 
             s = read_trackbar()
             grayL, grayR = preprocess_images(grayL, grayR, s)
+            tracker.mark("preproc")
+
             disp, num_disp = compute_disparity_map(grayL, grayR, s)
+            tracker.mark("sgbm")
 
             # postfilter-strong: bilateral, WLS, etc.
             disp = post_filter_strong(disp, grayL, s)
@@ -286,17 +340,19 @@ def main():
             disp = post_filter_weak(disp, s)
 
             disp = remove_void_rows(disp)
+            tracker.mark("filter")
 
 
             # visualize
             vis = visualize_disparity(disp, num_disp, s["farEnhance"])
-
+            tracker.mark("vis")
 
             cv2.putText(vis, f"Profile={s.get('profileName','default')} | DS={s['downSample']}% | Crop={s['crop']}px",
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
             cv2.putText(vis, f"Filters: M{'✔' if s['useMorph'] else '✖'}  B{'✔' if s['useBilateral'] else '✖'}  W{'✔' if s['useWLS'] else '✖'}",
                         (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
             cv2.imshow("Disparity (color)", vis)
+            print(tracker.summary())
 
             key = cv2.waitKey(1) & 0xFF
 
