@@ -312,7 +312,7 @@ def main():
 
     IMAGES_DIR = os.path.join(ROOT, "images")
     os.makedirs(IMAGES_DIR, exist_ok=True)
-    SAVE_EVERY_SEC = 5.0
+    SAVE_EVERY_SEC = 0.5
     last_save = time.perf_counter()
 
 
