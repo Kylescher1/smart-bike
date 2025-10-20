@@ -236,8 +236,8 @@ def visualize_disparity(disp, num_disp, far_enhance=50):
     # compute percentile window
     valid = disp[disp > 0]
     if valid.size > 0:
-        low = np.percentile(valid, bias * 80)  # start window deeper into low disparities
-        high = np.percentile(valid, 100 - bias * 10)
+        low = np.percentile(valid, (1 - bias) * 80)
+        high = np.percentile(valid, 100 - (1 - bias) * 10)
         if high <= low:
             high = low + 1
         disp_vis = np.clip((disp - low) / (high - low), 0, 1)
@@ -246,7 +246,7 @@ def visualize_disparity(disp, num_disp, far_enhance=50):
 
     # apply colormap
     norm = (disp_vis * 255).astype(np.uint8)
-    color = cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
+    color = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
     return color
 
 def rectify_pair(left, right, calib):
@@ -347,11 +347,15 @@ def main():
             vis = visualize_disparity(disp, num_disp, s["farEnhance"])
             tracker.mark("vis")
 
+            vis_display = cv2.resize(vis, (1920, 1080))
+
+
+
             cv2.putText(vis, f"Profile={s.get('profileName','default')} | DS={s['downSample']}% | Crop={s['crop']}px",
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
             cv2.putText(vis, f"Filters: M{'✔' if s['useMorph'] else '✖'}  B{'✔' if s['useBilateral'] else '✖'}  W{'✔' if s['useWLS'] else '✖'}",
                         (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
-            cv2.imshow("Disparity (color)", vis)
+            cv2.imshow("Disparity (color)", vis_display)
             print(tracker.summary())
 
             key = cv2.waitKey(1) & 0xFF
