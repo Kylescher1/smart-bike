@@ -9,9 +9,9 @@ from collections import deque
 import matplotlib.cm as cm  # Import colormap module
 
 # --- Configuration ---
-LIDAR_PORT = "COM6"
+LIDAR_PORT = "/dev/ttyUSB1"
 BAUDRATE = 460800
-BUFFER_SIZE = 800  # You can tune this value
+BUFFER_SIZE = 600  # You can tune this value
 MAX_DISTANCE_MM = 8000
 
 # --- Global variables ---
@@ -70,7 +70,7 @@ def update_plot(frame, scatter_artist, colormap):
         return scatter_artist,
 
     # Extract all angle, distance, and quality values from the list of dictionaries
-    angles_deg = [d['a_deg'] for d in scan_data_copy]
+    angles_deg = [(90-d['a_deg']) for d in scan_data_copy]
     distances_mm = [d['d_mm'] for d in scan_data_copy]
     quality_values = [d['q'] for d in scan_data_copy]
 
@@ -141,7 +141,7 @@ def main():
 
         ax.set_title(f"RPLidar Scan (Quality Map)", pad=20)
         ax.set_rlim(0, MAX_DISTANCE_MM)
-        #ax.set_rlim(0, 3500)
+        ax.set_rlim(0, 3500)
         ax.grid(True)
 
         # Add a color bar to show the quality scale
