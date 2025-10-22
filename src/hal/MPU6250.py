@@ -10,27 +10,24 @@ class MPU9250Serial:
         self.timeout = timeout
         self.ser = None
         self.log_file = log_file
+        self.start_time = None
 
     def connect(self):
-        """Open serial port."""
         try:
             self.ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
             time.sleep(2)
             print(f"Connected to {self.port}")
         except serial.SerialException as e:
-            print(f"Failed to connect to {self.port}: {e}")
+            print(f"Failed to connect: {e}")
             self.ser = None
 
     def disconnect(self):
-        """Close serial connection."""
         if self.ser and self.ser.is_open:
             self.ser.close()
             print("Disconnected.")
 
     def read_data(self):
-        """Read and parse one line of data."""
         if not self.ser or not self.ser.is_open:
-            print("Serial not open. Call connect() first.")
             return None
 
         try:
@@ -49,42 +46,44 @@ class MPU9250Serial:
         if match:
             ax, ay, az, gx, gy, gz = map(float, match.groups())
             return {"ax": ax, "ay": ay, "az": az, "gx": gx, "gy": gy, "gz": gz}
-        else:
-            print("Unparsed:", line)
-            return None
+        return None
 
-    def log_data(self):
-        """Log sensor data to CSV, overwriting each run."""
-        with open(self.log_file, "w", newline="") as f:
+    def log_data(self, duration_s=10):
+        """Logs data at ~1 kHz for the specified duration in seconds."""
+        if not self.ser or not self.ser.is_open:
+            print("Serial not connected.")
+            return
+
+        self.start_time = time.time()
+        end_time = self.start_time + duration_s
+        sample_interval = 1.0 / 1000.0  # 1 kHz
+
+        with open(self.log_file, mode="w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["timestamp", "ax", "ay", "az", "gx", "gy", "gz"])
-            print(f"Logging to {self.log_file}")
+            writer.writerow(["Time(s)", "Ax(g)", "Ay(g)", "Az(g)", "Gx(°/s)", "Gy(°/s)", "Gz(°/s)"])
 
-            try:
-                while True:
-                    data = self.read_data()
-                    if data:
-                        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-                        writer.writerow([
-                            timestamp,
-                            data["ax"], data["ay"], data["az"],
-                            data["gx"], data["gy"], data["gz"]
-                        ])
-                        f.flush()
-                        print(
-                            f"{timestamp} | "
-                            f"Accel (g): {data['ax']:.3f}, {data['ay']:.3f}, {data['az']:.3f} | "
-                            f"Gyro (°/s): {data['gx']:.3f}, {data['gy']:.3f}, {data['gz']:.3f}"
-                        )
-                    time.sleep(0.25)
-            except KeyboardInterrupt:
-                print("\nLogging stopped.")
+            next_sample_time = self.start_time
+            while time.time() < end_time:
+                data = self.read_data()
+                if data:
+                    timestamp = time.time() - self.start_time
+                    writer.writerow([
+                        f"{timestamp:.6f}",
+                        data["ax"], data["ay"], data["az"],
+                        data["gx"], data["gy"], data["gz"]
+                    ])
+                next_sample_time += sample_interval
+                sleep_time = next_sample_time - time.time()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+        print(f"Logging complete. Saved to {self.log_file}")
 
 
 if __name__ == "__main__":
     sensor = MPU9250Serial()
     sensor.connect()
     try:
-        sensor.log_data()
+        sensor.log_data(duration_s=60*10)  # change duration as needed
     finally:
         sensor.disconnect()

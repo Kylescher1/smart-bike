@@ -9,7 +9,7 @@ from collections import deque
 import matplotlib.cm as cm  # Import colormap module
 
 # --- Configuration ---
-LIDAR_PORT = "/dev/ttyUSB1"
+LIDAR_PORT = "/dev/ttyUSB0"
 BAUDRATE = 460800
 BUFFER_SIZE = 600  # You can tune this value
 MAX_DISTANCE_MM = 8000
