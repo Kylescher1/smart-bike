@@ -411,11 +411,13 @@ def save_outputs(
 # ---------------------------
 # Main application
 # ---------------------------
-def run(preview: bool,
+def run(args,
+        preview: bool,
         tuner: bool,
         save_interval_s: float,
         out_dir: str,
         jpeg_quality: int) -> None:
+
 
     # Load calibration and open cameras
     calib = load_calibration()
@@ -490,7 +492,7 @@ def run(preview: bool,
 
             # Periodic save
             now = time.perf_counter()
-            if now - last_save >= save_interval_s:
+            if args.saveframes and (now - last_save >= save_interval_s):
                 ts = timestamp()
                 save_outputs(
                     out_dir=out_dir,
@@ -501,7 +503,7 @@ def run(preview: bool,
                     num_disp=num_disp,
                     settings=params,
                     jpeg_quality=jpeg_quality,
-                    save_vis_jpg=preview  # store a quick vis only when previewing
+                    save_vis_jpg=preview
                 )
                 last_save = now
                 tracker.mark("save")
@@ -564,6 +566,9 @@ def parse_args():
     p.add_argument("--jpeg-quality", type=int, default=85, help="JPEG quality 1..100. Default 85")
     p.add_argument("--profile", type=str,
                    help="Profile name to load from ./disparity_profiles (optional)")
+    p.add_argument("--saveframes", action="store_true",
+               help="Enable saving of .jpg and .npz outputs. Default off for max performance.")
+
     return p.parse_args()
 
 
@@ -571,9 +576,11 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     run(
+        args,
         preview=args.preview,
         tuner=args.tuner,
         save_interval_s=max(0.01, args.save_interval),
         out_dir=args.out,
         jpeg_quality=int(np.clip(args.jpeg_quality, 1, 100))
     )
+

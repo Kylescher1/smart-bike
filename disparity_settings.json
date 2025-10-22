@@ -8,7 +8,7 @@
   "speckleRange": 9,
   "disp12MaxDiff": 7,
   "medianBlurK": 0,
-  "downSample": 66,
+  "downSample": 56,
   "crop": 115,
   "farEnhance": 200,
   "nearCutoff": 72,
