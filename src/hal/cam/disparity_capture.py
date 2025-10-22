@@ -99,6 +99,18 @@ class ThreadedCamera:
         self.cam.close()
 
 
+from queue import Queue
+
+save_queue = Queue(maxsize=4)
+
+def save_worker():
+    while True:
+        item = save_queue.get()
+        if item is None:  # shutdown signal
+            break
+        save_outputs(**item)
+        save_queue.task_done()
+
 # ---------------------------
 # Disparity computation utils
 # ---------------------------
@@ -427,6 +439,9 @@ def run(args,
 
     params = load_settings()
 
+    save_thread = threading.Thread(target=save_worker, daemon=True)
+    save_thread.start()
+
     # Backward-compatibility: convert old key names if needed
     if "numDisparitiesK" not in params and "numDisparities" in params:
         # old tuner stored raw disparity count multiplier (4, 8, etc.)
@@ -494,19 +509,19 @@ def run(args,
             now = time.perf_counter()
             if args.saveframes and (now - last_save >= save_interval_s):
                 ts = timestamp()
-                save_outputs(
-                    out_dir=out_dir,
-                    ts=ts,
-                    left_bgr=rectL_color,
-                    right_bgr=rectR_color,
-                    disp=disp,
-                    num_disp=num_disp,
-                    settings=params,
-                    jpeg_quality=jpeg_quality,
-                    save_vis_jpg=preview
-                )
+                save_queue.put({
+                    "out_dir": out_dir,
+                    "ts": ts,
+                    "left_bgr": rectL_color.copy(),
+                    "right_bgr": rectR_color.copy(),
+                    "disp": disp.copy(),
+                    "num_disp": num_disp,
+                    "settings": params.copy(),
+                    "jpeg_quality": jpeg_quality,
+                    "save_vis_jpg": preview
+                })
                 last_save = now
-                tracker.mark("save")
+
 
             # Optional live preview
             if preview:
@@ -536,8 +551,8 @@ def run(args,
 
     except KeyboardInterrupt:
         pass
-    finally:
 
+    finally:
         # Persist last-used disparity settings
         try:
             save_settings(params)
@@ -545,13 +560,26 @@ def run(args,
         except Exception as e:
             print("Warning: could not save settings:", e)
 
+        # ---- Saving thread shutdown ----
+        try:
+            save_queue.put(None)  # signal worker to stop
+            save_thread.join(timeout=5)
+            print("Background save thread stopped.")
+        except Exception as e:
+            print("Warning: could not join save thread:", e)
+
         # Cleanup
-        left_cam.close()
-        right_cam.close()
+        try:
+            left_cam.close()
+            right_cam.close()
+        except Exception as e:
+            print("Warning: could not close cameras:", e)
+
         try:
             cv2.destroyAllWindows()
         except Exception:
             pass
+
 
 
 # ---------------------------

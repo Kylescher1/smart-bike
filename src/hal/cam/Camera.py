@@ -8,7 +8,7 @@ CAMERA_CONFIG: Dict[str, int | str] = {
     "backend": cv2.CAP_V4L2,
     "width": 1024,
     "height": 768,
-    "fps": 60,
+    "fps": 90,
     "fourcc": "MJPG",  # string form for clarity
 }
 
