@@ -84,6 +84,6 @@ if __name__ == "__main__":
     sensor = MPU9250Serial()
     sensor.connect()
     try:
-        sensor.log_data(duration_s=60*10)  # change duration as needed
+        sensor.log_data(duration_s=1000)  # change duration as needed
     finally:
         sensor.disconnect()
