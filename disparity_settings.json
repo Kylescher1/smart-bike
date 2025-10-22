@@ -8,7 +8,7 @@
   "speckleWindowSize": 160,
   "disp12MaxDiff": 7,
   "medianBlurK": 0,
-  "downSample": 59,
+  "downSample": 39,
   "crop": 88,
   "useMorph": 0,
   "morphIter": 0,
