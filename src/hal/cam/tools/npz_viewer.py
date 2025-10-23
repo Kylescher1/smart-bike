@@ -29,8 +29,11 @@ if not fp or not fp.exists() or fp.is_dir():
 
 # Load contents
 data = np.load(str(fp), allow_pickle=True)
-disp = data.get("disp")
+# Load depth or disparity array
+depth = data.get("depth")
+disp = data.get("disp") if "disp" in data else depth  # fallback for compatibility
 num_disp = int(data.get("num_disp", 0)) if "num_disp" in data else None
+
 
 # Parse settings JSON
 settings = None
@@ -52,16 +55,25 @@ print(json.dumps(settings, indent=2) if settings else "(none)")
 
 # Visualization
 if disp is not None:
-    # Normalize disparity for viewing
-    valid = disp > 0
-    if np.any(valid):
-        dmin, dmax = np.percentile(disp[valid], [2, 98])
-    else:
-        dmin, dmax = 0, 1
-    disp_norm = np.clip((disp - dmin) / (dmax - dmin), 0, 1)
-    disp_color = cv2.applyColorMap((disp_norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    arr = disp
+    title = "Disparity Map"
+elif depth is not None:
+    arr = depth
+    title = "Depth Map"
+else:
+    print("No disparity or depth data found in file.")
+    sys.exit(0)
 
-    cv2.imshow("Disparity Map", disp_color)
-    print("\nPress any key to close.")
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+# Normalize and display
+valid = arr > 0
+if np.any(valid):
+    dmin, dmax = np.percentile(arr[valid], [2, 98])
+else:
+    dmin, dmax = 0, 1
+arr_norm = np.clip((arr - dmin) / (dmax - dmin), 0, 1)
+color = cv2.applyColorMap((arr_norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
+
+cv2.imshow(title, color)
+print("\nPress any key to close.")
+cv2.waitKey(0)
+cv2.destroyAllWindows()

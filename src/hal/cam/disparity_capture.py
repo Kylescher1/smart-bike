@@ -212,15 +212,31 @@ def compute_disparity_map(gray_left: np.ndarray,
 def disparity_to_depth_opencv(disp: np.ndarray, calib):
     """
     Convert disparity to real-world depth (Z in meters) using calibration reprojection matrix Q.
-    Expects calib to include Q as the 5th element of the tuple returned by load_calibration().
+    Expects Q as the last element in the calibration tuple.
     """
-    # calib = (leftMapX, leftMapY, rightMapX, rightMapY, Q, extras)
-    Q = calib[4]
+    Q = calib[-1]  # last element, not calib[4]
+
+    if not isinstance(Q, np.ndarray):
+        Q = np.array(Q, dtype=np.float64)
+    else:
+        Q = Q.astype(np.float64)
+
+    if Q.shape != (4, 4):
+        raise ValueError(f"Invalid Q shape: expected (4,4), got {Q.shape}")
+
+    points_3d = cv2.reprojectImageTo3D(disp, Q, handleMissingValues=True)
+    depth = points_3d[:, :, 2]
+    depth[~np.isfinite(depth)] = 0.0
+    return depth
+
+
+
     # 3D reprojected points: shape (H, W, 3)
     points_3d = cv2.reprojectImageTo3D(disp, Q, handleMissingValues=True)
     depth = points_3d[:, :, 2]  # Z coordinate in meters
     depth[~np.isfinite(depth)] = 0.0
     return depth
+
 
 
 def preprocess_images(grayL: np.ndarray, grayR: np.ndarray, s: dict):
@@ -389,48 +405,22 @@ def timestamp() -> str:
 def save_outputs(
     out_dir: str,
     ts: str,
-    left_bgr: np.ndarray,
-    right_bgr: np.ndarray,
     depth: np.ndarray,
     num_disp: int,
-    settings: dict,
-    jpeg_quality: int,
-    save_vis_jpg: bool
+    settings: dict
 ) -> None:
     """
-    Save synchronized pair + depth. JPEG for images, NPZ for disparity.
+    Save only the calibrated depth map (.npz).
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    # Left/Right compressed JPEGs
-    cv2.imwrite(
-        os.path.join(out_dir, f"left_{ts}.jpg"),
-        left_bgr,
-        [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)]
-    )
-    cv2.imwrite(
-        os.path.join(out_dir, f"right_{ts}.jpg"),
-        right_bgr,
-        [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)]
-    )
-
-    # Lossless disparity with metadata
-    # Use compressed npz to reduce disk bandwidth while preserving exact values
     np.savez_compressed(
         os.path.join(out_dir, f"depthmap_{ts}.npz"),
-        depth=disp.astype(np.float32),  # now holds meters
+        depth=depth.astype(np.float32),  # holds depth in meters
         num_disp=int(num_disp),
         settings=json.dumps(settings)
     )
 
-    # Optional visualization image for quick glance
-    if save_vis_jpg:
-        vis = visualize_disparity(disp, num_disp, int(settings.get("farEnhance", 50)))
-        cv2.imwrite(
-            os.path.join(out_dir, f"disp_vis_{ts}.jpg"),
-            vis,
-            [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)]
-        )
 
 
 # ---------------------------
@@ -529,14 +519,11 @@ def run(args,
                 save_queue.put({
                     "out_dir": out_dir,
                     "ts": ts,
-                    "left_bgr": rectL_color.copy(),
-                    "right_bgr": rectR_color.copy(),
-                    "depth": disp.copy(),
+                    "depth": depth.copy(),
                     "num_disp": num_disp,
-                    "settings": params.copy(),
-                    "jpeg_quality": jpeg_quality,
-                    "save_vis_jpg": preview
+                    "settings": params.copy()
                 })
+
                 last_save = now
 
 
