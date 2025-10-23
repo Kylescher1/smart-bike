@@ -1,23 +1,29 @@
 import cv2
+import numpy as np
 
-# Load image in grayscale
+# Load grayscale image
 img = cv2.imread("right_015.PNG", cv2.IMREAD_GRAYSCALE)
-if img is None:
-    raise FileNotFoundError("Image not found.")
+blur = cv2.GaussianBlur(img, (5, 5), 1.4)
+edges = cv2.Canny(blur, 80, 160)
 
-# Create window and trackbars for thresholds
-cv2.namedWindow("Edges")
-cv2.createTrackbar("Low", "Edges", 50, 255, lambda x: None)
-cv2.createTrackbar("High", "Edges", 150, 255, lambda x: None)
+# Close small gaps in edges
+kernel = np.ones((3, 3), np.uint8)
+closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-while True:
-    low = cv2.getTrackbarPos("Low", "Edges")
-    high = cv2.getTrackbarPos("High", "Edges")
-    blur = cv2.GaussianBlur(img, (5, 5), 1.4)
-    edges = cv2.Canny(blur, low, high)
-    cv2.imshow("Edges", edges)
+# Invert edges to prepare for connected components
+inv = cv2.bitwise_not(closed)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+# Label connected regions
+num_labels, labels = cv2.connectedComponents(inv)
 
+# Map each label to color
+label_hue = np.uint8(179 * labels / np.max(labels))
+blank_ch = 255 * np.ones_like(label_hue)
+segmented = cv2.merge([label_hue, blank_ch, blank_ch])
+segmented = cv2.cvtColor(segmented, cv2.COLOR_HSV2BGR)
+segmented[label_hue == 0] = 0
+
+cv2.imshow("Edges", edges)
+cv2.imshow("Segmented", segmented)
+cv2.waitKey(0)
 cv2.destroyAllWindows()
