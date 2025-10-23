@@ -209,6 +209,20 @@ def compute_disparity_map(gray_left: np.ndarray,
     disp = stereo.compute(gray_left, gray_right).astype(np.float32) / 16.0
     return disp, num_disp
 
+def disparity_to_depth_opencv(disp: np.ndarray, calib):
+    """
+    Convert disparity to real-world depth (Z in meters) using calibration reprojection matrix Q.
+    Expects calib to include Q as the 5th element of the tuple returned by load_calibration().
+    """
+    # calib = (leftMapX, leftMapY, rightMapX, rightMapY, Q, extras)
+    Q = calib[4]
+    # 3D reprojected points: shape (H, W, 3)
+    points_3d = cv2.reprojectImageTo3D(disp, Q, handleMissingValues=True)
+    depth = points_3d[:, :, 2]  # Z coordinate in meters
+    depth[~np.isfinite(depth)] = 0.0
+    return depth
+
+
 def preprocess_images(grayL: np.ndarray, grayR: np.ndarray, s: dict):
     """
     Apply downsampling and cropping before disparity computation.
@@ -248,7 +262,6 @@ def post_filter_strong(disp: np.ndarray,
         out = wls.filter(out, guide_gray)
 
     return out
-
 
 def post_filter_weak(disp: np.ndarray, s: dict) -> np.ndarray:
     """
@@ -378,7 +391,7 @@ def save_outputs(
     ts: str,
     left_bgr: np.ndarray,
     right_bgr: np.ndarray,
-    disp: np.ndarray,
+    depth: np.ndarray,
     num_disp: int,
     settings: dict,
     jpeg_quality: int,
@@ -404,10 +417,10 @@ def save_outputs(
     # Lossless disparity with metadata
     # Use compressed npz to reduce disk bandwidth while preserving exact values
     np.savez_compressed(
-        os.path.join(out_dir, f"depth_{ts}.npz"),
-        disp=disp.astype(np.float32),
+        os.path.join(out_dir, f"depthmap_{ts}.npz"),
+        depth=disp.astype(np.float32),  # now holds meters
         num_disp=int(num_disp),
-        settings=json.dumps(settings)  # store as JSON string for portability
+        settings=json.dumps(settings)
     )
 
     # Optional visualization image for quick glance
@@ -505,6 +518,10 @@ def run(args,
             disp = post_filter_weak(disp, params)
             tracker.mark("filters")
 
+            # Convert disparity to depth
+            depth = disparity_to_depth_opencv(disp, calib)
+            tracker.mark("depth_convert")
+
             # Periodic save
             now = time.perf_counter()
             if args.saveframes and (now - last_save >= save_interval_s):
@@ -514,7 +531,7 @@ def run(args,
                     "ts": ts,
                     "left_bgr": rectL_color.copy(),
                     "right_bgr": rectR_color.copy(),
-                    "disp": disp.copy(),
+                    "depth": disp.copy(),
                     "num_disp": num_disp,
                     "settings": params.copy(),
                     "jpeg_quality": jpeg_quality,
