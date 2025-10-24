@@ -30,6 +30,7 @@ import argparse
 import threading
 import numpy as np
 from datetime import datetime
+from queue import Queue
 
 # Optional ximgproc WLS post-filter
 try:
@@ -41,6 +42,42 @@ except Exception:
 # Project-specific imports (must exist in your environment)
 from src.hal.cam.calibrate.calib import load_calibration
 from src.hal.cam.Camera import open_stereo_pair
+
+
+# ---------------------------
+# Constants and Configuration
+# ---------------------------
+ROOT = os.path.join(os.path.dirname(__file__), "../../..")
+SETTINGS_FILE = os.path.join(ROOT, "disparity_settings.json")
+PROFILE_DIR = os.path.join(ROOT, "disparity_profiles")
+os.makedirs(PROFILE_DIR, exist_ok=True)
+
+DEFAULT_SETTINGS = {
+    "minDisparity": 0,
+    "numDisparitiesK": 4,
+    "blockSize": 16,
+    "preFilterCap": 31,
+    "uniquenessRatio": 5,
+    "speckleWindowSize": 160,
+    "speckleRange": 7,
+    "disp12MaxDiff": 7,
+    "medianBlurK": 0,
+    "downSample": 100,
+    "crop": 0,
+    "farEnhance": 50,
+    "nearCutoff": 0,
+    "useMorph": 1,
+    "morphIter": 1,
+    "useBilateral": 1,
+    "bilateralStrength": 8,
+    "useWLS": 0,
+    "wlsLambda": 4000,
+    "wlsSigma": 1.0,
+    "profileName": "default"
+}
+
+# Global save queue for background saving
+save_queue = Queue(maxsize=4)
 
 
 # ---------------------------
@@ -99,10 +136,6 @@ class ThreadedCamera:
         self.cam.close()
 
 
-from queue import Queue
-
-save_queue = Queue(maxsize=4)
-
 def save_worker():
     while True:
         item = save_queue.get()
@@ -111,49 +144,22 @@ def save_worker():
         save_outputs(**item)
         save_queue.task_done()
 
+
 # ---------------------------
 # Disparity computation utils
 # ---------------------------
-ROOT = os.path.join(os.path.dirname(__file__), "../../..")
-SETTINGS_FILE = os.path.join(ROOT, "disparity_settings.json")
-PROFILE_DIR = os.path.join(ROOT, "disparity_profiles")
-os.makedirs(PROFILE_DIR, exist_ok=True)
 
-DEFAULT_SETTINGS = {
-    "minDisparity": 0,
-    "numDisparities": 4,
-    "blockSize": 16,
-    "preFilterCap": 31,
-    "uniquenessRatio": 5,
-    "speckleWindowSize": 160,
-    "speckleRange": 7,
-    "disp12MaxDiff": 7,
-    "medianBlurK": 0,
-    "downSample": 100,
-    "crop": 0,
-    "farEnhance": 50,
-    "nearCutoff": 0,
-    "useMorph": 1,
-    "morphIter": 1,
-    "useBilateral": 1,
-    "bilateralStrength": 8,
-    "useWLS": 0,
-    "wlsLambda": 4000,
-    "wlsSigma": 1.0,
-    "profileName": "default"
-}
-
-def load_settings():
+def load_settings() -> dict:
     if os.path.exists(SETTINGS_FILE):
         with open(SETTINGS_FILE) as f:
             return {**DEFAULT_SETTINGS, **json.load(f)}
     return DEFAULT_SETTINGS.copy()
 
-def save_settings(s):
+def save_settings(s: dict) -> None:
     with open(SETTINGS_FILE, "w") as f:
         json.dump(s, f, indent=2)
 
-def load_profile(name):
+def load_profile(name: str) -> dict | None:
     path = os.path.join(PROFILE_DIR, f"{name}.json")
     if not os.path.exists(path):
         print(f"⚠️ Profile '{name}' not found.")
@@ -228,15 +234,6 @@ def disparity_to_depth_opencv(disp: np.ndarray, calib):
     depth = points_3d[:, :, 2]
     depth[~np.isfinite(depth)] = 0.0
     return depth
-
-
-
-    # 3D reprojected points: shape (H, W, 3)
-    points_3d = cv2.reprojectImageTo3D(disp, Q, handleMissingValues=True)
-    depth = points_3d[:, :, 2]  # Z coordinate in meters
-    depth[~np.isfinite(depth)] = 0.0
-    return depth
-
 
 
 def preprocess_images(grayL: np.ndarray, grayR: np.ndarray, s: dict):
@@ -430,8 +427,7 @@ def run(args,
         preview: bool,
         tuner: bool,
         save_interval_s: float,
-        out_dir: str,
-        jpeg_quality: int) -> None:
+        out_dir: str) -> None:
 
 
     # Load calibration and open cameras
@@ -589,7 +585,7 @@ def run(args,
 # ---------------------------
 # CLI
 # ---------------------------
-def parse_args():
+def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Full-resolution stereo disparity capture with periodic saving.")
     p.add_argument("--preview", action="store_true", help="Enable live preview window. Default off.")
     p.add_argument("--tuner", action="store_true", help="Enable tuner UI for SGBM and filters. Default off.")
@@ -604,15 +600,18 @@ def parse_args():
     return p.parse_args()
 
 
-
-if __name__ == "__main__":
+def main() -> None:
+    """Main entry point for the disparity capture application."""
     args = parse_args()
     run(
         args,
         preview=args.preview,
         tuner=args.tuner,
         save_interval_s=max(0.01, args.save_interval),
-        out_dir=args.out,
-        jpeg_quality=int(np.clip(args.jpeg_quality, 1, 100))
+        out_dir=args.out
     )
+
+
+if __name__ == "__main__":
+    main()
 
