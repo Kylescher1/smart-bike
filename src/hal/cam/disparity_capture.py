@@ -102,7 +102,7 @@ class PerfTracker:
     def summary(self) -> str:
         total = sum(self.times.values())
         parts = " | ".join(f"{k}:{v:.1f}ms" for k, v in self.times.items())
-        return f"{parts} | total:{total:.1f}ms"
+        return f"{parts} | total:{total:.1f}ms | fps:{1000/total:.1f}"
 
 
 # ---------------------------
@@ -140,6 +140,59 @@ class ThreadedCamera:
         except Exception:
             pass
         self.cam.close()
+
+
+class StereoSGBMCache:
+    """Cache StereoSGBM objects to avoid recreating them every frame."""
+    def __init__(self):
+        self.stereo = None
+        self.last_params = None
+    
+    def get_or_create(self, params: dict) -> cv2.StereoSGBM:
+        """Get cached stereo object or create new one if parameters changed."""
+        current_params = (
+            params["minDisparity"],
+            params["numDisparitiesK"],
+            params["blockSize"],
+            params["preFilterCap"],
+            params["uniquenessRatio"],
+            params["speckleWindowSize"],
+            params["speckleRange"],
+            params["disp12MaxDiff"]
+        )
+        
+        if self.stereo is None or self.last_params != current_params:
+            min_disp = int(params["minDisparity"])
+            num_disp = 16 * max(1, int(params["numDisparitiesK"]))
+            block_size = ensure_odd(int(params["blockSize"]))
+            
+            P1 = 8 * block_size * block_size
+            P2 = 32 * block_size * block_size
+            
+            self.stereo = cv2.StereoSGBM_create(
+                minDisparity=min_disp,
+                numDisparities=num_disp,
+                blockSize=block_size,
+                P1=P1, P2=P2,
+                preFilterCap=int(params["preFilterCap"]),
+                uniquenessRatio=int(params["uniquenessRatio"]),
+                speckleWindowSize=int(params["speckleWindowSize"]),
+                speckleRange=int(params["speckleRange"]),
+                disp12MaxDiff=int(params["disp12MaxDiff"]),
+                mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY
+            )
+            self.last_params = current_params
+        
+        return self.stereo
+
+
+class RectificationCache:
+    """Cache unpacked rectification maps to avoid tuple unpacking overhead."""
+    def __init__(self, calib):
+        self.leftMapX = calib[0]
+        self.leftMapY = calib[1]
+        self.rightMapX = calib[2]
+        self.rightMapY = calib[3]
 
 
 def save_worker():
@@ -182,42 +235,25 @@ def ensure_odd(n: int, min_val: int = 3) -> int:
 
 def rectify_pair(left_bgr: np.ndarray,
                  right_bgr: np.ndarray,
-                 calib):
+                 rect_cache: RectificationCache):
     """
     Remap color frames using precomputed rectification maps.
     """
-    leftMapX, leftMapY, rightMapX, rightMapY, _, _ = calib
-    rectL = cv2.remap(left_bgr, leftMapX, leftMapY, cv2.INTER_LINEAR)
-    rectR = cv2.remap(right_bgr, rightMapX, rightMapY, cv2.INTER_LINEAR)
+    rectL = cv2.remap(left_bgr, rect_cache.leftMapX, rect_cache.leftMapY, cv2.INTER_LINEAR)
+    rectR = cv2.remap(right_bgr, rect_cache.rightMapX, rect_cache.rightMapY, cv2.INTER_LINEAR)
     return rectL, rectR
 
 
 def compute_disparity_map(gray_left: np.ndarray,
                           gray_right: np.ndarray,
-                          s: dict):
+                          s: dict,
+                          stereo_cache: StereoSGBMCache):
     """
-    StereoSGBM disparity at full resolution. Returns (disp_float32, num_disp_int).
+    StereoSGBM disparity computation with cached stereo object.
+    Returns (disp_float32, num_disp_int).
     """
-    min_disp = int(s["minDisparity"])
+    stereo = stereo_cache.get_or_create(s)
     num_disp = 16 * max(1, int(s["numDisparitiesK"]))
-    block_size = ensure_odd(int(s["blockSize"]))
-
-    P1 = 8 * block_size * block_size
-    P2 = 32 * block_size * block_size
-
-    stereo = cv2.StereoSGBM_create(
-        minDisparity=min_disp,
-        numDisparities=num_disp,
-        blockSize=block_size,
-        P1=P1, P2=P2,
-        preFilterCap=int(s["preFilterCap"]),
-        uniquenessRatio=int(s["uniquenessRatio"]),
-        speckleWindowSize=int(s["speckleWindowSize"]),
-        speckleRange=int(s["speckleRange"]),
-        disp12MaxDiff=int(s["disp12MaxDiff"]),
-        mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY
-    )
-
     disp = stereo.compute(gray_left, gray_right).astype(np.float32) / 16.0
     return disp, num_disp
 
@@ -484,6 +520,10 @@ def run(args,
 
     params = load_settings()
 
+    # Initialize performance caches
+    stereo_cache = StereoSGBMCache()
+    rect_cache = RectificationCache(calib)
+
     save_thread = threading.Thread(target=save_worker, daemon=True)
     save_thread.start()
 
@@ -527,7 +567,7 @@ def run(args,
                 continue
 
             # Rectify full-resolution color
-            rectL_color, rectR_color = rectify_pair(left, right, calib)
+            rectL_color, rectR_color = rectify_pair(left, right, rect_cache)
             tracker.mark("rectify")
 
             # Convert to grayscale for disparity
@@ -543,7 +583,7 @@ def run(args,
             tracker.mark("preproc")
 
             # Compute disparity at full resolution
-            disp, num_disp = compute_disparity_map(grayL, grayR, params)
+            disp, num_disp = compute_disparity_map(grayL, grayR, params, stereo_cache)
             tracker.mark("sgbm")
 
             # Post-filters
