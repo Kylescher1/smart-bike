@@ -1,0 +1,706 @@
+#!/usr/bin/env python3
+"""
+disparity_capture.py
+
+Single-file stereo capture + disparity pipeline with consistent full-resolution frames.
+
+Features:
+- Uses camera-native resolution everywhere (no downsampling, no cropping).
+- Automatically scales calibration parameters when downsampling/cropping is applied.
+- Saves synchronized outputs every 150 ms:
+    - Compressed left/right images (.jpg)
+    - Full-fidelity disparity map (.npz) with metadata
+    - Optional colorized disparity visualization (.jpg) when preview enabled
+- Optional live preview window (off by default; enable with --preview).
+- Optional tuner UI for SGBM parameters (off by default; enable with --tuner).
+
+Calibration Scaling:
+- When images are downsampled or cropped, the reprojection matrix Q is automatically
+  scaled to maintain accurate depth calculations.
+- This ensures depth measurements remain accurate regardless of image preprocessing.
+
+Dependencies:
+- OpenCV (cv2), NumPy
+- Your project's calibration and camera utilities:
+    - src.hal.cam.calibrate.calib.load_calibration
+    - src.hal.cam.Camera.open_stereo_pair
+"""
+
+from __future__ import annotations
+
+import os
+import cv2
+import json
+import time
+import argparse
+import threading
+import numpy as np
+from datetime import datetime
+from queue import Queue
+
+# Optional ximgproc WLS post-filter
+try:
+    import cv2.ximgproc as xip  # type: ignore
+    HAS_XIMGPROC = True
+except Exception:
+    HAS_XIMGPROC = False
+
+# Project-specific imports (must exist in your environment)
+from src.hal.cam.calibrate.calib import load_calibration
+from src.hal.cam.Camera import open_stereo_pair
+
+
+# ---------------------------
+# Constants and Configuration
+# ---------------------------
+ROOT = os.path.join(os.path.dirname(__file__), "../../..")
+SETTINGS_FILE = os.path.join(ROOT, "disparity_settings.json")
+PROFILE_DIR = os.path.join(ROOT, "disparity_profiles")
+os.makedirs(PROFILE_DIR, exist_ok=True)
+
+DEFAULT_SETTINGS = {
+    "minDisparity": 0,
+    "numDisparitiesK": 4,
+    "blockSize": 16,
+    "preFilterCap": 31,
+    "uniquenessRatio": 5,
+    "speckleWindowSize": 160,
+    "speckleRange": 7,
+    "disp12MaxDiff": 7,
+    "medianBlurK": 0,
+    "downSample": 100,
+    "crop": 0,
+    "farEnhance": 50,
+    "nearCutoff": 0,
+    "useMorph": 1,
+    "morphIter": 1,
+    "useBilateral": 1,
+    "bilateralStrength": 8,
+    "useWLS": 0,
+    "wlsLambda": 4000,
+    "wlsSigma": 1.0,
+    "profileName": "default"
+}
+
+# Global save queue for background saving
+save_queue = Queue(maxsize=4)
+
+
+# ---------------------------
+# Utility: performance tracker
+# ---------------------------
+class PerfTracker:
+    def __init__(self) -> None:
+        self.times = {}
+        self.last = time.perf_counter()
+
+    def mark(self, label: str) -> None:
+        now = time.perf_counter()
+        self.times[label] = (now - self.last) * 1000.0  # ms
+        self.last = now
+
+    def summary(self) -> str:
+        total = sum(self.times.values())
+        parts = " | ".join(f"{k}:{v:.1f}ms" for k, v in self.times.items())
+        return f"{parts} | total:{total:.1f}ms | fps:{1000/total:.1f}"
+
+
+# ---------------------------
+# Camera threading wrapper
+# ---------------------------
+class ThreadedCamera:
+    """
+    Continuous background grab. get() returns the most recent frame.
+    """
+    def __init__(self, cam) -> None:
+        self.cam = cam
+        self.frame = None
+        self.lock = threading.Lock()
+        self.running = True
+        self.th = threading.Thread(target=self._update, daemon=True)
+        self.th.start()
+
+    def _update(self) -> None:
+        while self.running:
+            f = self.cam.read_frame()
+            if f is not None:
+                with self.lock:
+                    self.frame = f
+            else:
+                time.sleep(0.002)
+
+    def get(self):
+        with self.lock:
+            return self.frame
+
+    def close(self) -> None:
+        self.running = False
+        try:
+            self.th.join(timeout=0.5)
+        except Exception:
+            pass
+        self.cam.close()
+
+
+class StereoSGBMCache:
+    """Cache StereoSGBM objects to avoid recreating them every frame."""
+    def __init__(self):
+        self.stereo = None
+        self.last_params = None
+    
+    def get_or_create(self, params: dict) -> cv2.StereoSGBM:
+        """Get cached stereo object or create new one if parameters changed."""
+        current_params = (
+            params["minDisparity"],
+            params["numDisparitiesK"],
+            params["blockSize"],
+            params["preFilterCap"],
+            params["uniquenessRatio"],
+            params["speckleWindowSize"],
+            params["speckleRange"],
+            params["disp12MaxDiff"]
+        )
+        
+        if self.stereo is None or self.last_params != current_params:
+            min_disp = int(params["minDisparity"])
+            num_disp = 16 * max(1, int(params["numDisparitiesK"]))
+            block_size = ensure_odd(int(params["blockSize"]))
+            
+            P1 = 8 * block_size * block_size
+            P2 = 32 * block_size * block_size
+            
+            self.stereo = cv2.StereoSGBM_create(
+                minDisparity=min_disp,
+                numDisparities=num_disp,
+                blockSize=block_size,
+                P1=P1, P2=P2,
+                preFilterCap=int(params["preFilterCap"]),
+                uniquenessRatio=int(params["uniquenessRatio"]),
+                speckleWindowSize=int(params["speckleWindowSize"]),
+                speckleRange=int(params["speckleRange"]),
+                disp12MaxDiff=int(params["disp12MaxDiff"]),
+                mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY
+            )
+            self.last_params = current_params
+        
+        return self.stereo
+
+
+class RectificationCache:
+    """Cache unpacked rectification maps to avoid tuple unpacking overhead."""
+    def __init__(self, calib):
+        self.leftMapX = calib[0]
+        self.leftMapY = calib[1]
+        self.rightMapX = calib[2]
+        self.rightMapY = calib[3]
+
+
+def save_worker():
+    while True:
+        item = save_queue.get()
+        if item is None:  # shutdown signal
+            break
+        save_outputs(**item)
+        save_queue.task_done()
+
+
+# ---------------------------
+# Disparity computation utils
+# ---------------------------
+
+def load_settings() -> dict:
+    if os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE) as f:
+            return {**DEFAULT_SETTINGS, **json.load(f)}
+    return DEFAULT_SETTINGS.copy()
+
+def save_settings(s: dict) -> None:
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(s, f, indent=2)
+
+def load_profile(name: str) -> dict | None:
+    path = os.path.join(PROFILE_DIR, f"{name}.json")
+    if not os.path.exists(path):
+        print(f"⚠️ Profile '{name}' not found.")
+        return None
+    with open(path) as f:
+        return {**DEFAULT_SETTINGS, **json.load(f)}
+
+
+
+def ensure_odd(n: int, min_val: int = 3) -> int:
+    n = max(min_val, n)
+    return n if (n % 2 == 1) else (n + 1)
+
+
+def rectify_pair(left_bgr: np.ndarray,
+                 right_bgr: np.ndarray,
+                 rect_cache: RectificationCache):
+    """
+    Remap color frames using precomputed rectification maps.
+    """
+    rectL = cv2.remap(left_bgr, rect_cache.leftMapX, rect_cache.leftMapY, cv2.INTER_LINEAR)
+    rectR = cv2.remap(right_bgr, rect_cache.rightMapX, rect_cache.rightMapY, cv2.INTER_LINEAR)
+    return rectL, rectR
+
+
+def compute_disparity_map(gray_left: np.ndarray,
+                          gray_right: np.ndarray,
+                          s: dict,
+                          stereo_cache: StereoSGBMCache):
+    """
+    StereoSGBM disparity computation with cached stereo object.
+    Returns (disp_float32, num_disp_int).
+    """
+    stereo = stereo_cache.get_or_create(s)
+    num_disp = 16 * max(1, int(s["numDisparitiesK"]))
+    disp = stereo.compute(gray_left, gray_right).astype(np.float32) / 16.0
+    return disp, num_disp
+
+def scale_calibration_for_downsampling(calib, scale_factor: float, crop_pixels: int = 0):
+    """
+    Scale calibration parameters for downsampled and cropped images.
+    
+    Args:
+        calib: Original calibration tuple (leftMapX, leftMapY, rightMapX, rightMapY, imageSize, Q)
+        scale_factor: Downsampling scale factor (e.g., 0.5 for 50% size)
+        crop_pixels: Number of pixels cropped from each edge
+        
+    Returns:
+        Scaled calibration tuple with adjusted Q matrix
+    """
+    leftMapX, leftMapY, rightMapX, rightMapY, imageSize, Q = calib
+    
+    # Create a copy of Q to avoid modifying the original
+    Q_scaled = Q.copy().astype(np.float64)
+    
+    if scale_factor != 1.0 or crop_pixels > 0:
+        # Scale the focal length and principal point in Q matrix
+        # Q[0,3] = -fx * cx, Q[1,3] = -fy * cy, Q[2,3] = fx, Q[3,2] = -fx * baseline
+        # We need to scale fx, fy, cx, cy by the scale factor
+        
+        # Extract and scale focal lengths and principal points
+        fx = Q_scaled[2, 3] * scale_factor
+        fy = Q_scaled[2, 3] * scale_factor  # Assuming fx = fy for stereo
+        cx = Q_scaled[0, 3] / Q_scaled[2, 3] * scale_factor - crop_pixels
+        cy = Q_scaled[1, 3] / Q_scaled[2, 3] * scale_factor - crop_pixels
+        
+        # Update Q matrix with scaled parameters
+        Q_scaled[0, 3] = -fx * cx
+        Q_scaled[1, 3] = -fy * cy  
+        Q_scaled[2, 3] = fx
+        # Q[3,2] (baseline) remains unchanged as it's in world units
+        
+    return (leftMapX, leftMapY, rightMapX, rightMapY, imageSize, Q_scaled)
+
+
+def disparity_to_depth_opencv(disp: np.ndarray, calib):
+    """
+    Convert disparity to real-world depth (Z in meters) using calibration reprojection matrix Q.
+    Expects Q as the last element in the calibration tuple.
+    """
+    Q = calib[-1]  # last element, not calib[4]
+
+    if not isinstance(Q, np.ndarray):
+        Q = np.array(Q, dtype=np.float64)
+    else:
+        Q = Q.astype(np.float64)
+
+    if Q.shape != (4, 4):
+        raise ValueError(f"Invalid Q shape: expected (4,4), got {Q.shape}")
+
+    points_3d = cv2.reprojectImageTo3D(disp, Q, handleMissingValues=True)
+    depth = points_3d[:, :, 2]
+    depth[~np.isfinite(depth)] = 0.0
+    return depth
+
+
+def preprocess_images(grayL: np.ndarray, grayR: np.ndarray, s: dict) -> tuple[np.ndarray, np.ndarray, float, int]:
+    """
+    Apply downsampling and cropping before disparity computation.
+    
+    Returns:
+        Tuple of (processed_left, processed_right, scale_factor, crop_pixels)
+    """
+    scale = max(0.1, s.get("downSample", 100) / 100.0)
+    if scale < 0.999:
+        grayL = cv2.resize(grayL, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        grayR = cv2.resize(grayR, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    c = int(s.get("crop", 0))
+    if c > 0:
+        h, w = grayL.shape[:2]
+        grayL = grayL[c:h - c, c:w - c]
+        grayR = grayR[c:h - c, c:w - c]
+    return grayL, grayR, scale, c
+
+
+def post_filter_strong(disp: np.ndarray,
+                       guide_gray: np.ndarray,
+                       s: dict) -> np.ndarray:
+    """
+    Optional morphological closing, bilateral smoothing, and WLS (if available).
+    """
+    out = disp
+    if s.get("useMorph", 1):
+        out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8),
+                               iterations=int(s.get("morphIter", 1)))
+
+    if s.get("useBilateral", 1) and int(s.get("bilateralStrength", 0)) > 0:
+        b = int(s["bilateralStrength"])
+        # Bilateral on float disparity; OpenCV supports this if data is CV_32F
+        out = cv2.bilateralFilter(out, 5, b, b)
+
+    if s.get("useWLS", 0) and HAS_XIMGPROC and int(s.get("wlsLambda", 0)) > 0:
+        wls = xip.createDisparityWLSFilterGeneric(False)
+        wls.setLambda(float(s["wlsLambda"]))
+        wls.setSigmaColor(float(s.get("wlsSigma", 1.0)))
+        out = wls.filter(out, guide_gray)
+
+    return out
+
+def post_filter_weak(disp: np.ndarray, s: dict) -> np.ndarray:
+    """
+    Remove very near pixels (large disparity) and clean isolated noise.
+    """
+    out = disp.copy()
+
+    # Cutoff for very near objects
+    near_cut = float(s.get("nearCutoff", 0))
+    if near_cut > 0:
+        out[out > near_cut] = 0.0
+
+    # Remove isolated remnants by neighborhood tally
+    mask = (out > 0).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    for _ in range(3):
+        neighbors = cv2.filter2D(mask, -1, kernel)
+        isolated = (neighbors <= 3) & (mask == 1)
+        if not np.any(isolated):
+            break
+        mask[isolated] = 0
+
+    out[mask == 0] = 0.0
+    return out
+
+
+def visualize_disparity(disp: np.ndarray,
+                        num_disp: int,
+                        far_enhance: int = 50) -> np.ndarray:
+    """
+    Colorized visualization tuned towards far field when far_enhance > 0.
+    Returns BGR uint8 image.
+    """
+    disp = np.clip(disp, 0, num_disp).astype(np.float32)
+
+    valid = disp[disp > 0]
+    if valid.size > 0:
+        bias = np.clip(far_enhance / 200.0, 0.0, 1.0)
+        low = np.percentile(valid, (1 - bias) * 80)
+        high = np.percentile(valid, 100 - (1 - bias) * 10)
+        if high <= low:
+            high = low + 1.0
+        vis = np.clip((disp - low) / (high - low), 0.0, 1.0)
+    else:
+        vis = np.zeros_like(disp)
+
+    norm = (vis * 255.0).astype(np.uint8)
+    color = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
+    return color
+
+
+# ---------------------------
+# Optional tuner UI
+# ---------------------------
+def nothing(_):  # trackbar callback
+    pass
+
+
+def create_tuner_window(params: dict) -> None:
+    """
+    Creates a window with trackbars controlling SGBM and filter parameters.
+    """
+    cv2.namedWindow("Disparity Tuner", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Disparity Tuner", 420, 480)
+
+    cv2.createTrackbar("minDisp", "Disparity Tuner", int(params["minDisparity"]), 64, nothing)
+    cv2.createTrackbar("numDispK", "Disparity Tuner", int(params["numDisparitiesK"]), 32, nothing)
+    cv2.createTrackbar("blockSize", "Disparity Tuner", int(params["blockSize"]), 31, nothing)
+    cv2.createTrackbar("uniqueness", "Disparity Tuner", int(params["uniquenessRatio"]), 50, nothing)
+    cv2.createTrackbar("preFilterCap", "Disparity Tuner", int(params["preFilterCap"]), 63, nothing)
+    cv2.createTrackbar("speckleRange", "Disparity Tuner", int(params["speckleRange"]), 50, nothing)
+
+    cv2.createTrackbar("useMorph", "Disparity Tuner", int(params["useMorph"]), 1, nothing)
+    cv2.createTrackbar("morphIter", "Disparity Tuner", int(params["morphIter"]), 3, nothing)
+    cv2.createTrackbar("useBilateral", "Disparity Tuner", int(params["useBilateral"]), 1, nothing)
+    cv2.createTrackbar("bilatStr", "Disparity Tuner", int(params["bilateralStrength"]), 32, nothing)
+    cv2.createTrackbar("useWLS", "Disparity Tuner", int(params["useWLS"]), 1, nothing)
+    cv2.createTrackbar("wlsLambda", "Disparity Tuner", int(params["wlsLambda"]), 10000, nothing)
+    cv2.createTrackbar("wlsSigmaX10", "Disparity Tuner", int(params["wlsSigma"] * 10), 50, nothing)
+
+    cv2.createTrackbar("farEnh", "Disparity Tuner", int(params["farEnhance"]), 200, nothing)
+    cv2.createTrackbar("nearCut", "Disparity Tuner", int(params["nearCutoff"]), 200, nothing)
+
+    cv2.createTrackbar("downSample%", "Disparity Tuner", int(params.get("downSample", 100)), 100, nothing)
+    cv2.createTrackbar("crop(px)", "Disparity Tuner", int(params.get("crop", 0)), 200, nothing)
+
+
+
+def read_tuner_params() -> dict:
+    """
+    Read current trackbar values into a parameter dict.
+    """
+    s = {
+        "minDisparity": cv2.getTrackbarPos("minDisp", "Disparity Tuner"),
+        "numDisparitiesK": max(1, cv2.getTrackbarPos("numDispK", "Disparity Tuner")),
+        "blockSize": ensure_odd(cv2.getTrackbarPos("blockSize", "Disparity Tuner")),
+        "preFilterCap": cv2.getTrackbarPos("preFilterCap", "Disparity Tuner"),
+        "uniquenessRatio": cv2.getTrackbarPos("uniqueness", "Disparity Tuner"),
+        "speckleRange": cv2.getTrackbarPos("speckleRange", "Disparity Tuner"),
+        "speckleWindowSize": 160,
+        "disp12MaxDiff": 7,
+        "useMorph": cv2.getTrackbarPos("useMorph", "Disparity Tuner"),
+        "morphIter": cv2.getTrackbarPos("morphIter", "Disparity Tuner"),
+        "useBilateral": cv2.getTrackbarPos("useBilateral", "Disparity Tuner"),
+        "bilateralStrength": cv2.getTrackbarPos("bilatStr", "Disparity Tuner"),
+        "useWLS": cv2.getTrackbarPos("useWLS", "Disparity Tuner"),
+        "wlsLambda": cv2.getTrackbarPos("wlsLambda", "Disparity Tuner"),
+        "wlsSigma": cv2.getTrackbarPos("wlsSigmaX10", "Disparity Tuner") / 10.0,
+        "farEnhance": cv2.getTrackbarPos("farEnh", "Disparity Tuner"),
+        "nearCutoff": cv2.getTrackbarPos("nearCut", "Disparity Tuner"),
+        "downSample": max(10, cv2.getTrackbarPos("downSample%", "Disparity Tuner")),
+        "crop": cv2.getTrackbarPos("crop(px)", "Disparity Tuner"),
+
+    }
+    return s
+
+
+# ---------------------------
+# Saving utilities
+# ---------------------------
+def timestamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # ms precision
+
+
+def save_outputs(
+    out_dir: str,
+    ts: str,
+    depth: np.ndarray,
+    num_disp: int,
+    settings: dict
+) -> None:
+    """
+    Save only the calibrated depth map (.npz).
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    np.savez_compressed(
+        os.path.join(out_dir, f"depthmap_{ts}.npz"),
+        depth=depth.astype(np.float32),  # holds depth in meters
+        num_disp=int(num_disp),
+        settings=json.dumps(settings)
+    )
+
+
+
+# ---------------------------
+# Main application
+# ---------------------------
+def run(args,
+        preview: bool,
+        tuner: bool,
+        save_interval_s: float,
+        out_dir: str) -> None:
+
+
+    # Load calibration and open cameras
+    calib = load_calibration()
+    left_cam_raw, right_cam_raw = open_stereo_pair()
+    left_cam = ThreadedCamera(left_cam_raw)
+    right_cam = ThreadedCamera(right_cam_raw)
+
+    params = load_settings()
+
+    # Initialize performance caches
+    stereo_cache = StereoSGBMCache()
+    rect_cache = RectificationCache(calib)
+
+    save_thread = threading.Thread(target=save_worker, daemon=True)
+    save_thread.start()
+
+    # Backward-compatibility: convert old key names if needed
+    if "numDisparitiesK" not in params and "numDisparities" in params:
+        # old tuner stored raw disparity count multiplier (4, 8, etc.)
+        params["numDisparitiesK"] = params.pop("numDisparities")
+
+    # Optionally override with a saved profile
+    if args.profile:
+        prof = load_profile(args.profile)
+        if prof:
+            # same normalization for loaded profile
+            if "numDisparitiesK" not in prof and "numDisparities" in prof:
+                prof["numDisparitiesK"] = prof.pop("numDisparities")
+            params = prof
+            print(f"Loaded profile: {args.profile}")
+        else:
+            print(f"Profile '{args.profile}' not found. Using last saved settings.")
+
+    # UI initialization (off by default)
+    if tuner:
+        create_tuner_window(params)
+
+    if preview:
+        cv2.namedWindow("Disparity Preview", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Disparity Preview", 1280, 720)
+
+    last_save = time.perf_counter()
+
+    try:
+        while True:
+            tracker = PerfTracker()
+
+            # Capture most recent frames
+            left = left_cam.get()
+            right = right_cam.get()
+            tracker.mark("capture")
+            if left is None or right is None:
+                time.sleep(0.001)
+                continue
+
+            # Rectify full-resolution color
+            rectL_color, rectR_color = rectify_pair(left, right, rect_cache)
+            tracker.mark("rectify")
+
+            # Convert to grayscale for disparity
+            grayL = cv2.cvtColor(rectL_color, cv2.COLOR_BGR2GRAY)
+            grayR = cv2.cvtColor(rectR_color, cv2.COLOR_BGR2GRAY)
+            tracker.mark("grayscale")
+            
+            # Update params from tuner if enabled
+            if tuner:
+                params = {**params, **read_tuner_params()}
+            
+            grayL, grayR, scale_factor, crop_pixels = preprocess_images(grayL, grayR, params)
+            tracker.mark("preproc")
+
+            # Compute disparity at full resolution
+            disp, num_disp = compute_disparity_map(grayL, grayR, params, stereo_cache)
+            tracker.mark("sgbm")
+
+            # Post-filters
+            disp = post_filter_strong(disp, grayL, params)
+            disp = post_filter_weak(disp, params)
+            tracker.mark("filters")
+
+            # Scale calibration for downsampled/cropped images
+            scaled_calib = scale_calibration_for_downsampling(calib, scale_factor, crop_pixels)
+            
+            # Convert disparity to depth using scaled calibration
+            depth = disparity_to_depth_opencv(disp, scaled_calib)
+            tracker.mark("depth_convert")
+
+            # Periodic save
+            now = time.perf_counter()
+            if args.saveframes and (now - last_save >= save_interval_s):
+                ts = timestamp()
+                save_queue.put({
+                    "out_dir": out_dir,
+                    "ts": ts,
+                    "depth": depth.copy(),
+                    "num_disp": num_disp,
+                    "settings": params.copy()
+                })
+
+                last_save = now
+
+
+            # Optional live preview
+            if preview:
+                vis = visualize_disparity(disp, num_disp, int(params.get("farEnhance", 50)))
+                # Fit window for display only; underlying data remains full-res
+                h, w = vis.shape[:2]
+                target_w = 1280
+                scale = target_w / float(w)
+                vis_display = cv2.resize(vis, (target_w, int(h * scale)), interpolation=cv2.INTER_AREA)
+
+                # HUD text
+                txt = f"numDisp={num_disp}  blk={params['blockSize']}  uniq={params['uniquenessRatio']}  " \
+                      f"bilat={'Y' if params['useBilateral'] else 'N'}  WLS={'Y' if params['useWLS'] and HAS_XIMGPROC else 'N'}"
+                cv2.putText(vis_display, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+                cv2.imshow("Disparity Preview", vis_display)
+                # Allow key handling only when preview/tuner windows exist
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+            else:
+                # Headless: tiny sleep to avoid pegging CPU
+                time.sleep(0.001)
+
+            # Log performance summary to stdout
+            print(tracker.summary())
+
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+        # Persist last-used disparity settings
+        try:
+            save_settings(params)
+            print("Settings saved to disparity_settings.json")
+        except Exception as e:
+            print("Warning: could not save settings:", e)
+
+        # ---- Saving thread shutdown ----
+        try:
+            save_queue.put(None)  # signal worker to stop
+            save_thread.join(timeout=5)
+            print("Background save thread stopped.")
+        except Exception as e:
+            print("Warning: could not join save thread:", e)
+
+        # Cleanup
+        try:
+            left_cam.close()
+            right_cam.close()
+        except Exception as e:
+            print("Warning: could not close cameras:", e)
+
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+
+
+
+# ---------------------------
+# CLI
+# ---------------------------
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Full-resolution stereo disparity capture with periodic saving.")
+    p.add_argument("--preview", action="store_true", help="Enable live preview window. Default off.")
+    p.add_argument("--tuner", action="store_true", help="Enable tuner UI for SGBM and filters. Default off.")
+    p.add_argument("--save-interval", type=float, default=0.15, help="Save interval in seconds. Default 0.15 (150 ms).")
+    p.add_argument("--out", type=str, default="./images", help="Output directory. Default ./images")
+    p.add_argument("--jpeg-quality", type=int, default=85, help="JPEG quality 1..100. Default 85")
+    p.add_argument("--profile", type=str,
+                   help="Profile name to load from ./disparity_profiles (optional)")
+    p.add_argument("--saveframes", action="store_true",
+               help="Enable saving of .jpg and .npz outputs. Default off for max performance.")
+
+    return p.parse_args()
+
+
+def main() -> None:
+    """Main entry point for the disparity capture application."""
+    args = parse_args()
+    run(
+        args,
+        preview=args.preview,
+        tuner=args.tuner,
+        save_interval_s=max(0.01, args.save_interval),
+        out_dir=args.out
+    )
+
+
+if __name__ == "__main__":
+    main()
