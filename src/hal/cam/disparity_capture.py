@@ -6,6 +6,7 @@ Single-file stereo capture + disparity pipeline with consistent full-resolution 
 
 Features:
 - Uses camera-native resolution everywhere (no downsampling, no cropping).
+- Automatically scales calibration parameters when downsampling/cropping is applied.
 - Saves synchronized outputs every 150 ms:
     - Compressed left/right images (.jpg)
     - Full-fidelity disparity map (.npz) with metadata
@@ -13,9 +14,14 @@ Features:
 - Optional live preview window (off by default; enable with --preview).
 - Optional tuner UI for SGBM parameters (off by default; enable with --tuner).
 
+Calibration Scaling:
+- When images are downsampled or cropped, the reprojection matrix Q is automatically
+  scaled to maintain accurate depth calculations.
+- This ensures depth measurements remain accurate regardless of image preprocessing.
+
 Dependencies:
 - OpenCV (cv2), NumPy
-- Your project’s calibration and camera utilities:
+- Your project's calibration and camera utilities:
     - src.hal.cam.calibrate.calib.load_calibration
     - src.hal.cam.Camera.open_stereo_pair
 """
@@ -215,6 +221,43 @@ def compute_disparity_map(gray_left: np.ndarray,
     disp = stereo.compute(gray_left, gray_right).astype(np.float32) / 16.0
     return disp, num_disp
 
+def scale_calibration_for_downsampling(calib, scale_factor: float, crop_pixels: int = 0):
+    """
+    Scale calibration parameters for downsampled and cropped images.
+    
+    Args:
+        calib: Original calibration tuple (leftMapX, leftMapY, rightMapX, rightMapY, imageSize, Q)
+        scale_factor: Downsampling scale factor (e.g., 0.5 for 50% size)
+        crop_pixels: Number of pixels cropped from each edge
+        
+    Returns:
+        Scaled calibration tuple with adjusted Q matrix
+    """
+    leftMapX, leftMapY, rightMapX, rightMapY, imageSize, Q = calib
+    
+    # Create a copy of Q to avoid modifying the original
+    Q_scaled = Q.copy().astype(np.float64)
+    
+    if scale_factor != 1.0 or crop_pixels > 0:
+        # Scale the focal length and principal point in Q matrix
+        # Q[0,3] = -fx * cx, Q[1,3] = -fy * cy, Q[2,3] = fx, Q[3,2] = -fx * baseline
+        # We need to scale fx, fy, cx, cy by the scale factor
+        
+        # Extract and scale focal lengths and principal points
+        fx = Q_scaled[2, 3] * scale_factor
+        fy = Q_scaled[2, 3] * scale_factor  # Assuming fx = fy for stereo
+        cx = Q_scaled[0, 3] / Q_scaled[2, 3] * scale_factor - crop_pixels
+        cy = Q_scaled[1, 3] / Q_scaled[2, 3] * scale_factor - crop_pixels
+        
+        # Update Q matrix with scaled parameters
+        Q_scaled[0, 3] = -fx * cx
+        Q_scaled[1, 3] = -fy * cy  
+        Q_scaled[2, 3] = fx
+        # Q[3,2] (baseline) remains unchanged as it's in world units
+        
+    return (leftMapX, leftMapY, rightMapX, rightMapY, imageSize, Q_scaled)
+
+
 def disparity_to_depth_opencv(disp: np.ndarray, calib):
     """
     Convert disparity to real-world depth (Z in meters) using calibration reprojection matrix Q.
@@ -236,9 +279,12 @@ def disparity_to_depth_opencv(disp: np.ndarray, calib):
     return depth
 
 
-def preprocess_images(grayL: np.ndarray, grayR: np.ndarray, s: dict):
+def preprocess_images(grayL: np.ndarray, grayR: np.ndarray, s: dict) -> tuple[np.ndarray, np.ndarray, float, int]:
     """
     Apply downsampling and cropping before disparity computation.
+    
+    Returns:
+        Tuple of (processed_left, processed_right, scale_factor, crop_pixels)
     """
     scale = max(0.1, s.get("downSample", 100) / 100.0)
     if scale < 0.999:
@@ -249,7 +295,7 @@ def preprocess_images(grayL: np.ndarray, grayR: np.ndarray, s: dict):
         h, w = grayL.shape[:2]
         grayL = grayL[c:h - c, c:w - c]
         grayR = grayR[c:h - c, c:w - c]
-    return grayL, grayR
+    return grayL, grayR, scale, c
 
 
 def post_filter_strong(disp: np.ndarray,
@@ -488,12 +534,13 @@ def run(args,
             grayL = cv2.cvtColor(rectL_color, cv2.COLOR_BGR2GRAY)
             grayR = cv2.cvtColor(rectR_color, cv2.COLOR_BGR2GRAY)
             tracker.mark("grayscale")
-            grayL, grayR = preprocess_images(grayL, grayR, params)
-            tracker.mark("preproc")
-
+            
             # Update params from tuner if enabled
             if tuner:
                 params = {**params, **read_tuner_params()}
+            
+            grayL, grayR, scale_factor, crop_pixels = preprocess_images(grayL, grayR, params)
+            tracker.mark("preproc")
 
             # Compute disparity at full resolution
             disp, num_disp = compute_disparity_map(grayL, grayR, params)
@@ -504,8 +551,11 @@ def run(args,
             disp = post_filter_weak(disp, params)
             tracker.mark("filters")
 
-            # Convert disparity to depth
-            depth = disparity_to_depth_opencv(disp, calib)
+            # Scale calibration for downsampled/cropped images
+            scaled_calib = scale_calibration_for_downsampling(calib, scale_factor, crop_pixels)
+            
+            # Convert disparity to depth using scaled calibration
+            depth = disparity_to_depth_opencv(disp, scaled_calib)
             tracker.mark("depth_convert")
 
             # Periodic save
