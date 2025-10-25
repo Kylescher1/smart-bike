@@ -1,6 +1,8 @@
 import os
 import cv2
 from datetime import datetime
+import json
+import numpy as np
 # Stereo depth capture main loop for Smart Bike HAL camera.
 # - Grabs frames from a calibrated stereo pair
 # - Runs disparity/depth via DisparityDepthCapture
@@ -48,6 +50,15 @@ def visualize_disparity(disp, num_disp, *, colormap: str = "jet", far_enhance: i
     else:
         return cv2.applyColorMap(norm, cv2.COLORMAP_JET)
 
+def save_depth_npz(path: str, depth, num_disp: int, settings_json: str | None) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    payload = {
+        "depth": np.asarray(depth, dtype=np.float32),
+        "num_disp": int(num_disp),
+        "settings": settings_json if settings_json is not None else json.dumps({})
+    }
+    np.savez_compressed(path, **payload)
+
 def main() -> None:
     # Load stereo rectification + Q matrix from calibration files.
     calib = load_calibration()
@@ -84,7 +95,8 @@ def main() -> None:
             if SAVE:
                 os.makedirs(OUT_DIR, exist_ok=True)
                 path = os.path.join(OUT_DIR, f"depth_{ts()}.npz")
-                engine.save_npz(path, res["depth"], res["num_disp"], res["meta"])
+                settings_json = res.get("meta", {}).get("settings_snapshot")
+                save_depth_npz(path, res["depth"], res["num_disp"], settings_json)
 
     # Always release cameras and close any OpenCV windows.
     finally:

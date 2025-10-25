@@ -356,30 +356,8 @@ def read_tuner_params() -> dict:
 
 
 # ---------------------------
-# Saving utilities
+# (Saving utilities moved to Vision.py)
 # ---------------------------
-def timestamp() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # ms precision
-
-
-def save_outputs(
-    out_dir: str,
-    ts: str,
-    depth: np.ndarray,
-    num_disp: int,
-    settings: dict
-) -> None:
-    """
-    Save calibrated depth map (.npz). Kept for convenience; class also exposes save_npz().
-    """
-    os.makedirs(out_dir, exist_ok=True)
-
-    np.savez_compressed(
-        os.path.join(out_dir, f"depthmap_{ts}.npz"),
-        depth=depth.astype(np.float32),
-        num_disp=int(num_disp),
-        settings=json.dumps(settings)
-    )
 
 
 # ---------------------------
@@ -533,15 +511,6 @@ class DisparityDepthCapture:
             "num_disp": int(num_disp),
             "meta": meta,
         }
-
-    def save_npz(self, path: str, depth: np.ndarray, num_disp: int, meta: dict | None = None) -> None:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        payload = {
-            "depth": depth.astype(np.float32),
-            "num_disp": int(num_disp),
-            "settings": json.dumps(self.settings if meta is None else json.loads(meta.get("settings_snapshot", json.dumps(self.settings))))
-        }
-        np.savez_compressed(path, **payload)
 
 
 
