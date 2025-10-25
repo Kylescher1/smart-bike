@@ -8,7 +8,7 @@ from datetime import datetime
 
 from src.hal.cam.Camera import open_stereo_pair
 from src.hal.cam.calibrate.calib import load_calibration
-from src.hal.cam.Depth import DisparityDepthCapture
+from src.hal.cam.depth_processor import DisparityDepthCapture
 
 # Toggle live visualization of disparity (non-blocking UI). Press 'q' to quit.
 PREVIEW = False
@@ -19,6 +19,34 @@ OUT_DIR = "./images"
 # Timestamp helper for filenames (ms precision)
 def ts() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+
+def visualize_disparity(disp, num_disp, *, colormap: str = "jet", far_enhance: int = 50):
+    """
+    Colorized visualization tuned towards far field when far_enhance > 0.
+    Returns a BGR uint8 image.
+    """
+    import numpy as np
+
+    d = np.clip(disp, 0, num_disp).astype(np.float32)
+    valid = d[d > 0]
+    if valid.size > 0:
+        import numpy as np  # local to keep Vision lightweight on import
+        bias = max(0.0, min(1.0, far_enhance / 200.0))
+        low = float(np.percentile(valid, (1 - bias) * 80))
+        high = float(np.percentile(valid, 100 - (1 - bias) * 10))
+        if high <= low:
+            high = low + 1.0
+        vis = np.clip((d - low) / (high - low), 0.0, 1.0)
+    else:
+        vis = np.zeros_like(d)
+
+    norm = (vis * 255.0).astype(np.uint8)
+    if colormap == "bw":
+        return cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)
+    elif colormap == "bone":
+        return cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
+    else:
+        return cv2.applyColorMap(norm, cv2.COLORMAP_JET)
 
 def main() -> None:
     # Load stereo rectification + Q matrix from calibration files.
@@ -46,7 +74,8 @@ def main() -> None:
 
             # Optional on-screen preview of disparity for quick checks.
             if PREVIEW:
-                vis = engine.visualize(res["disp"], res["num_disp"])
+                far = engine.get_settings().get("farEnhance", 50)
+                vis = visualize_disparity(res["disp"], res["num_disp"], colormap="jet", far_enhance=far)
                 cv2.imshow("Depth", vis)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break

@@ -543,33 +543,6 @@ class DisparityDepthCapture:
         }
         np.savez_compressed(path, **payload)
 
-    def visualize(self, disp: np.ndarray, num_disp: int | None = None) -> np.ndarray:
-        """
-        Colorized visualization using the current colormap setting.
-        Returns a BGR uint8 image.
-        """
-        if num_disp is None:
-            num_disp = 16 * max(1, int(self.settings.get("numDisparitiesK", 4)))
-
-        d = np.clip(disp, 0, num_disp).astype(np.float32)
-        valid = d[d > 0]
-        if valid.size > 0:
-            bias = np.clip(self.settings.get("farEnhance", 50) / 200.0, 0.0, 1.0)
-            low = np.percentile(valid, (1 - bias) * 80)
-            high = np.percentile(valid, 100 - (1 - bias) * 10)
-            if high <= low:
-                high = low + 1.0
-            vis = np.clip((d - low) / (high - low), 0.0, 1.0)
-        else:
-            vis = np.zeros_like(d)
-
-        norm = (vis * 255.0).astype(np.uint8)
-        if self._colormap == "bw":
-            return cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)
-        elif self._colormap == "bone":
-            return cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
-        else:
-            return cv2.applyColorMap(norm, cv2.COLORMAP_JET)
 
 
 
