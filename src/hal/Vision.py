@@ -11,6 +11,7 @@ import numpy as np
 from src.hal.cam.Camera import open_stereo_pair
 from src.hal.cam.calibrate.calib import load_calibration
 from src.hal.cam.depth_processor import DisparityDepthCapture
+from concurrent.futures import ThreadPoolExecutor
 
 # Toggle live visualization of disparity (non-blocking UI). Press 'q' to quit.
 PREVIEW = False
@@ -70,33 +71,50 @@ def main() -> None:
 
     try:
         # Main acquisition/processing loop
-        while True:
-            # Read the latest frames (BGR) from each camera.
-            frameL = left.read_frame()
-            frameR = right.read_frame()
-            # If a frame is missing, keep the UI responsive and retry.
-            if frameL is None or frameR is None:
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
-                continue
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            # Prime first concurrent reads
+            left_fut = ex.submit(left.read_frame)
+            right_fut = ex.submit(right.read_frame)
+            process_fut = None
 
-            # Core computation: returns {'depth','disp','num_disp','meta'}
-            res = engine.process(frameL, frameR)
+            while True:
+                # Read the latest frames (BGR) from each camera concurrently.
+                frameL = left_fut.result()
+                frameR = right_fut.result()
 
-            # Optional on-screen preview of disparity for quick checks.
-            if PREVIEW:
-                far = engine.get_settings().get("farEnhance", 50)
-                vis = visualize_disparity(res["disp"], res["num_disp"], colormap="jet", far_enhance=far)
-                cv2.imshow("Depth", vis)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
+                # If a frame is missing, keep the UI responsive and retry.
+                if frameL is None or frameR is None:
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
+                    # Re-prime read futures and continue
+                    left_fut = ex.submit(left.read_frame)
+                    right_fut = ex.submit(right.read_frame)
+                    continue
 
-            # Optional save of calibrated depth results to disk.
-            if SAVE:
-                os.makedirs(OUT_DIR, exist_ok=True)
-                path = os.path.join(OUT_DIR, f"depth_{ts()}.npz")
-                settings_json = res.get("meta", {}).get("settings_snapshot")
-                save_depth_npz(path, res["depth"], res["num_disp"], settings_json)
+                # Core computation: returns {'depth','disp','num_disp','meta'}
+                process_fut = ex.submit(engine.process, frameL, frameR)
+
+                # Immediately start next reads to overlap with processing
+                left_fut = ex.submit(left.read_frame)
+                right_fut = ex.submit(right.read_frame)
+
+                # Wait for processing result
+                res = process_fut.result()
+
+                # Optional on-screen preview of disparity for quick checks.
+                if PREVIEW:
+                    far = engine.get_settings().get("farEnhance", 50)
+                    vis = visualize_disparity(res["disp"], res["num_disp"], colormap="jet", far_enhance=far)
+                    cv2.imshow("Depth", vis)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
+
+                # Optional save of calibrated depth results to disk.
+                if SAVE:
+                    os.makedirs(OUT_DIR, exist_ok=True)
+                    path = os.path.join(OUT_DIR, f"depth_{ts()}.npz")
+                    settings_json = res.get("meta", {}).get("settings_snapshot")
+                    save_depth_npz(path, res["depth"], res["num_disp"], settings_json)
 
     # Always release cameras and close any OpenCV windows.
     finally:
