@@ -1,126 +1,105 @@
-import os
+"""High level vision orchestrator for the Smart Bike pipeline."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, Tuple
+
 import cv2
-from datetime import datetime
-import json
 import numpy as np
-# Stereo depth capture main loop for Smart Bike HAL camera.
-# - Grabs frames from a calibrated stereo pair
-# - Runs disparity/depth via DisparityDepthCapture
-# - Optionally previews a colorized disparity and/or saves depth as NPZ
 
-from src.hal.cam.Camera import open_stereo_pair
-from src.hal.cam.calibrate.calib import load_calibration
-from src.hal.cam.depth_processor import DisparityDepthCapture
-from concurrent.futures import ThreadPoolExecutor
+from .cam.Camera import Camera, DEFAULT_CAMERA_CONFIG
+from .cam.depth_processor import DepthProcessor, DepthResult
+from .cam.stereo_capture import capture_stereo_pair
 
-# Toggle live visualization of disparity (non-blocking UI). Press 'q' to quit.
-PREVIEW = False
-# Toggle saving depth outputs to OUT_DIR as compressed NPZ files.
-SAVE = False
-OUT_DIR = "./images"
 
-# Timestamp helper for filenames (ms precision)
-def ts() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+def default_calibration_file() -> Path:
+    return Path(__file__).resolve().parent / "cam" / "calibrate" / "data" / "stereo_calib.npz"
 
-def visualize_disparity(disp, num_disp, *, colormap: str = "jet", far_enhance: int = 50):
-    """
-    Colorized visualization tuned towards far field when far_enhance > 0.
-    Returns a BGR uint8 image.
-    """
-    import numpy as np
 
-    d = np.clip(disp, 0, num_disp).astype(np.float32)
-    valid = d[d > 0]
-    if valid.size > 0:
-        import numpy as np  # local to keep Vision lightweight on import
-        bias = max(0.0, min(1.0, far_enhance / 200.0))
-        low = float(np.percentile(valid, (1 - bias) * 80))
-        high = float(np.percentile(valid, 100 - (1 - bias) * 10))
-        if high <= low:
-            high = low + 1.0
-        vis = np.clip((d - low) / (high - low), 0.0, 1.0)
-    else:
-        vis = np.zeros_like(d)
+def _default_camera_config() -> dict:
+    return DEFAULT_CAMERA_CONFIG.copy()
 
-    norm = (vis * 255.0).astype(np.uint8)
-    if colormap == "bw":
-        return cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)
-    elif colormap == "bone":
-        return cv2.applyColorMap(norm, cv2.COLORMAP_BONE)
-    else:
-        return cv2.applyColorMap(norm, cv2.COLORMAP_JET)
 
-def save_depth_npz(path: str, depth, num_disp: int, settings_json: str | None) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    payload = {
-        "depth": np.asarray(depth, dtype=np.float32),
-        "num_disp": int(num_disp),
-        "settings": settings_json if settings_json is not None else json.dumps({})
-    }
-    np.savez_compressed(path, **payload)
+def _default_output_dir() -> Path:
+    return Path("./data/depth_maps")
 
-def main() -> None:
-    # Load stereo rectification + Q matrix from calibration files.
-    calib = load_calibration()
-    # Processing engine: handles rectification, disparity, filters, depth.
-    engine = DisparityDepthCapture(calibration=calib, default_profile="CDR")
 
-    # Open left/right camera handles (no compute here; just I/O wrappers).
-    left, right = open_stereo_pair()
+@dataclass
+class VisionSystem:
+    """Owns the stereo cameras and depth pipeline."""
 
-    try:
-        # Main acquisition/processing loop
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            # Prime first concurrent reads
-            left_fut = ex.submit(left.read_frame)
-            right_fut = ex.submit(right.read_frame)
-            process_fut = None
+    calibration_file: Path = field(default_factory=default_calibration_file)
+    output_dir: Path = field(default_factory=_default_output_dir)
+    camera_config: dict = field(default_factory=_default_camera_config)
+    left_index: int = 0
+    right_index: int = 1
+    object_distance_threshold_mm: float = 1500.0
 
-            while True:
-                # Read the latest frames (BGR) from each camera concurrently.
-                frameL = left_fut.result()
-                frameR = right_fut.result()
+    def __post_init__(self) -> None:
+        self.left_camera = Camera(self.left_index, self.camera_config, name="left")
+        self.right_camera = Camera(self.right_index, self.camera_config, name="right")
+        self.depth_processor: Optional[DepthProcessor] = None
 
-                # If a frame is missing, keep the UI responsive and retry.
-                if frameL is None or frameR is None:
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
-                    # Re-prime read futures and continue
-                    left_fut = ex.submit(left.read_frame)
-                    right_fut = ex.submit(right.read_frame)
-                    continue
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+    def open(self) -> None:
+        self.left_camera.open_camera()
+        self.right_camera.open_camera()
+        self.depth_processor = DepthProcessor(
+            calibration_file=self.calibration_file, output_dir=self.output_dir
+        )
 
-                # Core computation: returns {'depth','disp','num_disp','meta'}
-                process_fut = ex.submit(engine.process, frameL, frameR)
+    def close(self) -> None:
+        self.left_camera.close_camera()
+        self.right_camera.close_camera()
+        self.depth_processor = None
 
-                # Immediately start next reads to overlap with processing
-                left_fut = ex.submit(left.read_frame)
-                right_fut = ex.submit(right.read_frame)
+    # ------------------------------------------------------------------
+    # Capture utilities
+    # ------------------------------------------------------------------
+    def capture_frames(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        if not (self.left_camera.grab_frame() and self.right_camera.grab_frame()):
+            return None
+        left_frame = self.left_camera.retrieve_frame()
+        right_frame = self.right_camera.retrieve_frame()
+        if left_frame is None or right_frame is None:
+            return None
+        return left_frame, right_frame
 
-                # Wait for processing result
-                res = process_fut.result()
+    def capture_and_save(self, output_dir: str | Path) -> Tuple[Path, Path]:
+        return capture_stereo_pair(self.left_camera, self.right_camera, output_dir)
 
-                # Optional on-screen preview of disparity for quick checks.
-                if PREVIEW:
-                    far = engine.get_settings().get("farEnhance", 50)
-                    vis = visualize_disparity(res["disp"], res["num_disp"], colormap="jet", far_enhance=far)
-                    cv2.imshow("Depth", vis)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
+    # ------------------------------------------------------------------
+    # Processing utilities
+    # ------------------------------------------------------------------
+    def compute_depth(self, left: np.ndarray, right: np.ndarray) -> DepthResult:
+        if self.depth_processor is None:
+            raise RuntimeError("VisionSystem must be opened before computing depth.")
+        return self.depth_processor.process(left, right)
 
-                # Optional save of calibrated depth results to disk.
-                if SAVE:
-                    os.makedirs(OUT_DIR, exist_ok=True)
-                    path = os.path.join(OUT_DIR, f"depth_{ts()}.npz")
-                    settings_json = res.get("meta", {}).get("settings_snapshot")
-                    save_depth_npz(path, res["depth"], res["num_disp"], settings_json)
+    @staticmethod
+    def edge_map_from_depth(depth_map: np.ndarray) -> np.ndarray:
+        if depth_map.size == 0:
+            return np.zeros_like(depth_map, dtype=np.uint8)
+        depth = depth_map.astype(np.float32)
+        if not np.any(depth):
+            return np.zeros_like(depth_map, dtype=np.uint8)
+        norm = cv2.normalize(depth, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+        norm = norm.astype(np.uint8)
+        return cv2.Canny(norm, 75, 150)
 
-    # Always release cameras and close any OpenCV windows.
-    finally:
-        left.close()
-        right.close()
-        cv2.destroyAllWindows()
+    def is_object_close(self, depth_map: np.ndarray) -> bool:
+        if depth_map.size == 0:
+            return False
+        valid = depth_map[np.isfinite(depth_map) & (depth_map > 0)]
+        if valid.size == 0:
+            return False
+        return float(np.min(valid)) <= self.object_distance_threshold_mm
 
-if __name__ == "__main__":
-    main()
+    def warn_rider(self) -> None:
+        print("⚠️  Object detected close to the rider!", flush=True)
+
+
+__all__ = ["VisionSystem", "default_calibration_file"]

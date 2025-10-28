@@ -1,107 +1,46 @@
-# src/main.py
-import time, os, json, cv2, numpy as np, matplotlib.pyplot as plt
-from src.hal.cam.Camera import open_stereo_pair
-from src.hal.cam..calibrate.calib import load_calibration
-from src.hal.cam.depth import rectify_pair, disparity_to_points
+"""Entry point for the Smart Bike vision pipeline."""
+from __future__ import annotations
 
-SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "stereo_settings.json")
+import time
 
-DEFAULTS = {
-    "numDisparities": 6,
-    "blockSize": 5,
-    "preFilterCap": 31,
-    "uniquenessRatio": 15,
-    "speckleWindowSize": 100,
-    "speckleRange": 32,
-    "disp12MaxDiff": 1
-}
+import cv2
 
-def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            return json.load(open(SETTINGS_FILE))
-        except Exception:
-            pass
-    return DEFAULTS.copy()
-
-def setup_system():
-    calib = load_calibration()
-    left, right = open_stereo_pair()
-    if not left or not right:
-        raise RuntimeError("❌ Could not open stereo cameras")
-
-    s = load_settings()
-    numDisp = 16 * max(1, s.get("numDisparities", 6))
-    matcher = cv2.StereoSGBM_create(
-        minDisparity=0,
-        numDisparities=numDisp,
-        blockSize=max(3, s.get("blockSize", 5) | 1),
-        preFilterCap=s.get("preFilterCap", 31),
-        uniquenessRatio=s.get("uniquenessRatio", 15),
-        speckleWindowSize=s.get("speckleWindowSize", 100),
-        speckleRange=s.get("speckleRange", 32),
-        disp12MaxDiff=s.get("disp12MaxDiff", 1),
-        mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY
-    )
-    return calib, left, right, matcher, numDisp
-
-def compute_points(left, right, calib, matcher, numDisp):
-    L, R = left.read_frame(), right.read_frame()
-    if L is None or R is None:
-        return None, None
-    rectL, rectR = rectify_pair(L, R, calib)
-    gL, gR = cv2.cvtColor(rectL, cv2.COLOR_BGR2GRAY), cv2.cvtColor(rectR, cv2.COLOR_BGR2GRAY)
-    disp = matcher.compute(gL, gR).astype("float32") / 16.0
-    disp = np.clip(disp, 0, numDisp)
-    points = disparity_to_points(disp, calib)
-    return disp, points
-
-def visualize(disp, points, numDisp, scatter, ax):
-    # Depth map
-    vis = (disp / numDisp * 255).astype(np.uint8)
-    color_vis = cv2.applyColorMap(vis, cv2.COLORMAP_JET)
-    cv2.imshow("Depth Map", color_vis)
-
-    # Top-down: X (left/right), Z (forward up to 15 m)
-    mask = (
-        np.isfinite(points[:,:,2]) &
-        (points[:,:,2] > 0) &
-        (points[:,:,2] <= 1500)   # trim at 15 m
-    )
-    pts = points[mask]
-    if len(pts) > 0:
-        sample = pts[::800]
-        scatter.set_offsets(np.c_[sample[:,0], sample[:,2]])
-        plt.draw()
-        plt.pause(0.001)
+from src.hal.Vision import VisionSystem, default_calibration_file
 
 
+def main() -> None:
+    calibration_path = default_calibration_file()
+    vision = VisionSystem(calibration_file=calibration_path)
 
-
-def main():
-    calib, left, right, matcher, numDisp = setup_system()
-
-    # prepare matplotlib scatter
-    plt.ion()
-    fig, ax = plt.subplots()
-    sc = ax.scatter([], [], s=1)
-    ax.set_xlabel("X (m left/right)")
-    ax.set_ylabel("Z (m forward)")
-    ax.set_xlim(-2000, 2000)
-    ax.set_ylim(200, 2000)
+    vision.open()
+    print("✅ Vision system initialised. Press Ctrl+C to stop.")
 
     try:
         while True:
-            disp, points = compute_points(left, right, calib, matcher, numDisp)
-            if disp is not None:
-                visualize(disp, points, numDisp, sc, ax)  # <-- pass ax too
-            if cv2.waitKey(1) & 0xFF in (ord('q'), 27):
-                break
-            time.sleep(0.15)
+            frames = vision.capture_frames()
+            if frames is None:
+                continue
 
+            left_frame, right_frame = frames
+            depth_result = vision.compute_depth(left_frame, right_frame)
+            edge_map = VisionSystem.edge_map_from_depth(depth_result.depth_map)
+
+            if edge_map.size:
+                cv2.imshow("Depth edges", edge_map)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+
+            if vision.is_object_close(depth_result.depth_map):
+                vision.warn_rider()
+
+            time.sleep(0.01)
+    except KeyboardInterrupt:
+        print("⏹️  Vision loop interrupted by user.")
     finally:
-        left.close(); right.close()
+        vision.close()
         cv2.destroyAllWindows()
+        print("👋 Vision system shut down.")
+
 
 if __name__ == "__main__":
     main()
