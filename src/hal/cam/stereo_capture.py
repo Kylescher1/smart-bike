@@ -9,7 +9,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from typing import Tuple
-
+import argparse
+import shutil
 import cv2
 
 from .Camera import Camera
@@ -26,10 +27,7 @@ def capture_stereo_pair(
     prefix: str | None = None,
     ext: str = "png",
 ) -> Tuple[Path, Path]:
-    """Capture a synchronised stereo pair and save them to ``output_dir``.
-
-    Returns the file paths of the saved left/right frames.
-    """
+    """Capture a synchronised stereo pair and save them to ``output_dir``."""
     if not left.is_open() or not right.is_open():
         raise RuntimeError("Both cameras must be opened before capturing.")
 
@@ -54,3 +52,51 @@ def capture_stereo_pair(
         raise IOError(f"Failed to save right frame to {right_path}")
 
     return left_path, right_path
+
+
+if __name__ == "__main__":
+    from src.hal.cam.Camera import open_stereo_pair
+    from src.hal.cam.stereo_capture import capture_stereo_pair
+
+    parser = argparse.ArgumentParser(description="Stereo capture tool")
+    parser.add_argument(
+        "-rmp",
+        action="store_true",
+        help="Remove all existing images in the stereo_pairs folder before starting",
+    )
+    args = parser.parse_args()
+
+    output_dir = Path("src/hal/cam/calibrate/data/stereo_pairs")
+
+    # Remove previous images if requested
+    if args.rmp and output_dir.exists():
+        print(f"🧹 Removing all files in {output_dir.resolve()}")
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Open both cameras
+    left, right = open_stereo_pair()
+
+    try:
+        cv2.namedWindow("Left", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("Right", cv2.WINDOW_NORMAL)
+
+        while True:
+            lf = left.get_frame()
+            rf = right.get_frame()
+            if lf is None or rf is None:
+                continue
+
+            cv2.imshow("Left", lf)
+            cv2.imshow("Right", rf)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("s"):
+                capture_stereo_pair(left, right, output_dir)
+                print(f"Saved stereo pair to {output_dir.resolve()}")
+            elif key == ord("q"):
+                break
+    finally:
+        left.close()
+        right.close()
+        cv2.destroyAllWindows()
