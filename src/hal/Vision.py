@@ -32,8 +32,8 @@ class VisionSystem:
     calibration_file: Path = field(default_factory=default_calibration_file)
     output_dir: Path = field(default_factory=_default_output_dir)
     camera_config: dict = field(default_factory=_default_camera_config)
-    left_index: int = 0
-    right_index: int = 1
+    left_index: int = 1
+    right_index: int = 3
     object_distance_threshold_mm: float = 1500.0
 
     def __post_init__(self) -> None:

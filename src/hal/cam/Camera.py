@@ -13,12 +13,13 @@ level pipeline components.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
+import copy
 
 # Centralised configuration defaults – callers may override when instantiating
 # a ``Camera``.
@@ -39,10 +40,10 @@ def _ensure_open(cap: Optional[cv2.VideoCapture]) -> cv2.VideoCapture:
 
 @dataclass
 class Camera:
-    """Thin wrapper around ``cv2.VideoCapture`` with explicit lifecycle calls."""
+    """Thin wrapper around cv2.VideoCapture with explicit lifecycle calls."""
 
     index: int
-    config: Dict[str, int | str] = DEFAULT_CAMERA_CONFIG
+    config: Dict[str, int | str] = field(default_factory=lambda: copy.deepcopy(DEFAULT_CAMERA_CONFIG))
     name: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -115,8 +116,8 @@ class Camera:
 
 
 def open_stereo_pair(
-    left_index: int = 0,
-    right_index: int = 1,
+    left_index: int = 1,
+    right_index: int = 3,
     config: Dict[str, int | str] = DEFAULT_CAMERA_CONFIG,
 ) -> Tuple[Camera, Camera]:
     """Open a left/right stereo pair and return the camera handles."""
