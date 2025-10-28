@@ -11,6 +11,20 @@ import numpy as np
 from .cam.Camera import Camera, DEFAULT_CAMERA_CONFIG
 from .cam.depth_processor import DepthProcessor, DepthResult
 from .cam.stereo_capture import capture_stereo_pair
+from .cam.calibrate.calib import load_calibration
+from .cam.depth_profile import (
+    load_profile,
+    load_settings,
+    StereoSGBMCache,
+    RectificationCache,
+    rectify_pair,
+    preprocess_images,
+    compute_disparity_map,
+    post_filter_strong,
+    post_filter_weak,
+    scale_calibration_for_downsampling,
+    disparity_to_depth_opencv,
+)
 
 
 def default_calibration_file() -> Path:
@@ -35,6 +49,11 @@ class VisionSystem:
     left_index: int = 1
     right_index: int = 3
     object_distance_threshold_mm: float = 1500.0
+    profile_name: str = "CDR"
+    _profile_params: Optional[dict] = field(default=None, repr=False)
+    _stereo_cache: Optional[StereoSGBMCache] = field(default=None, repr=False)
+    _rect_cache: Optional[RectificationCache] = field(default=None, repr=False)
+    _calib_tuple: Optional[tuple] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.left_camera = Camera(self.left_index, self.camera_config, name="left")
@@ -50,6 +69,14 @@ class VisionSystem:
         self.depth_processor = DepthProcessor(
             calibration_file=self.calibration_file, output_dir=self.output_dir
         )
+        calib = load_calibration(str(self.calibration_file))
+        self._calib_tuple = calib
+        self._rect_cache = RectificationCache(calib)
+        self._stereo_cache = StereoSGBMCache()
+        params = load_profile(self.profile_name)
+        if params is None:
+            params = load_settings()
+        self._profile_params = params
 
     def close(self) -> None:
         self.left_camera.close_camera()
@@ -75,9 +102,29 @@ class VisionSystem:
     # Processing utilities
     # ------------------------------------------------------------------
     def compute_depth(self, left: np.ndarray, right: np.ndarray) -> DepthResult:
-        if self.depth_processor is None:
+        if (
+            self._rect_cache is None
+            or self._stereo_cache is None
+            or self._profile_params is None
+            or self._calib_tuple is None
+        ):
             raise RuntimeError("VisionSystem must be opened before computing depth.")
-        return self.depth_processor.process(left, right)
+
+        rectL_color, rectR_color = rectify_pair(left, right, self._rect_cache)
+        grayL = cv2.cvtColor(rectL_color, cv2.COLOR_BGR2GRAY)
+        grayR = cv2.cvtColor(rectR_color, cv2.COLOR_BGR2GRAY)
+
+        params = self._profile_params
+        grayL_p, grayR_p, scale_factor, crop_pixels = preprocess_images(grayL, grayR, params)
+        disp, num_disp = compute_disparity_map(grayL_p, grayR_p, params, self._stereo_cache)
+        disp = post_filter_strong(disp, grayL_p, params)
+        disp = post_filter_weak(disp, params)
+
+        scaled_calib = scale_calibration_for_downsampling(self._calib_tuple, scale_factor, crop_pixels)
+        depth = disparity_to_depth_opencv(disp, scaled_calib)
+
+        metadata = {"profile": self.profile_name, "num_disparities": int(num_disp)}
+        return DepthResult(depth, disp, int(num_disp), None, metadata)
 
     @staticmethod
     def edge_map_from_depth(depth_map: np.ndarray) -> np.ndarray:
