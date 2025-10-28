@@ -20,6 +20,10 @@ from typing import Dict, Optional, Tuple
 import cv2
 import numpy as np
 import copy
+try:
+    from src.hal.config import LEFT_INDEX, RIGHT_INDEX
+except Exception:
+    LEFT_INDEX, RIGHT_INDEX = 1, 3
 
 # Centralised configuration defaults – callers may override when instantiating
 # a ``Camera``.
@@ -127,3 +131,25 @@ def open_stereo_pair(
     left.open_camera()
     right.open_camera()
     return left, right
+
+
+if __name__ == "__main__":
+    left, right = open_stereo_pair(LEFT_INDEX, RIGHT_INDEX)
+    try:
+        cv2.namedWindow("Left", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("Right", cv2.WINDOW_NORMAL)
+        while True:
+            lf = left.get_frame()
+            rf = right.get_frame()
+            if lf is not None:
+                cv2.putText(lf, "LEFT", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.imshow("Left", lf)
+            if rf is not None:
+                cv2.putText(rf, "RIGHT", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.imshow("Right", rf)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+    finally:
+        left.close()
+        right.close()
+        cv2.destroyAllWindows()
