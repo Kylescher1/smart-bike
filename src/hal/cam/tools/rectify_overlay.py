@@ -4,6 +4,7 @@ import numpy as np
 import os
 from src.hal.cam.calibrate.calib import load_calibration
 from src.hal.cam.Camera import open_stereo_pair
+from src.hal.config import LEFT_INDEX, RIGHT_INDEX, SWAP_LR
 
 def draw_epilines(img, step=40):
     """Draw horizontal green lines every `step` pixels."""
@@ -31,7 +32,7 @@ def main():
     calib = load_calibration()
 
     # open stereo cameras
-    left_cam, right_cam = open_stereo_pair()
+    left_cam, right_cam = open_stereo_pair(LEFT_INDEX, RIGHT_INDEX)
 
     try:
         while True:
@@ -39,6 +40,9 @@ def main():
             right_frame = right_cam.get_frame()
             if left_frame is None or right_frame is None:
                 continue
+
+            if SWAP_LR:
+                left_frame, right_frame = right_frame, left_frame
 
             rectL, rectR = rectify_pair(left_frame, right_frame, calib)
 

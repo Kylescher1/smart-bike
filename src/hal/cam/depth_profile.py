@@ -48,6 +48,7 @@ except Exception:
 # Project-specific imports (must exist in your environment)
 from src.hal.cam.calibrate.calib import load_calibration
 from src.hal.cam.Camera import open_stereo_pair
+from src.hal.config import LEFT_INDEX, RIGHT_INDEX, SWAP_LR, PROFILE_NAME
 
 
 # ---------------------------
@@ -514,7 +515,7 @@ def run(args,
 
     # Load calibration and open cameras
     calib = load_calibration()
-    left_cam_raw, right_cam_raw = open_stereo_pair()
+    left_cam_raw, right_cam_raw = open_stereo_pair(LEFT_INDEX, RIGHT_INDEX)
     left_cam = ThreadedCamera(left_cam_raw)
     right_cam = ThreadedCamera(right_cam_raw)
 
@@ -536,13 +537,19 @@ def run(args,
     if args.profile:
         prof = load_profile(args.profile)
         if prof:
-            # same normalization for loaded profile
             if "numDisparitiesK" not in prof and "numDisparities" in prof:
                 prof["numDisparitiesK"] = prof.pop("numDisparities")
             params = prof
             print(f"Loaded profile: {args.profile}")
         else:
             print(f"Profile '{args.profile}' not found. Using last saved settings.")
+    else:
+        prof = load_profile(PROFILE_NAME)
+        if prof:
+            if "numDisparitiesK" not in prof and "numDisparities" in prof:
+                prof["numDisparitiesK"] = prof.pop("numDisparities")
+            params = prof
+            print(f"Loaded profile from config: {PROFILE_NAME}")
 
     # UI initialization (off by default)
     if tuner:
@@ -565,6 +572,9 @@ def run(args,
             if left is None or right is None:
                 time.sleep(0.001)
                 continue
+
+            if SWAP_LR:
+                left, right = right, left
 
             # Rectify full-resolution color
             rectL_color, rectR_color = rectify_pair(left, right, rect_cache)

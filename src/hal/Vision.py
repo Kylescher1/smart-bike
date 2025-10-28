@@ -25,6 +25,7 @@ from .cam.depth_profile import (
     scale_calibration_for_downsampling,
     disparity_to_depth_opencv,
 )
+from .config import LEFT_INDEX, RIGHT_INDEX, SWAP_LR, PROFILE_NAME
 
 
 def default_calibration_file() -> Path:
@@ -46,10 +47,10 @@ class VisionSystem:
     calibration_file: Path = field(default_factory=default_calibration_file)
     output_dir: Path = field(default_factory=_default_output_dir)
     camera_config: dict = field(default_factory=_default_camera_config)
-    left_index: int = 1
-    right_index: int = 3
+    left_index: int = LEFT_INDEX
+    right_index: int = RIGHT_INDEX
     object_distance_threshold_mm: float = 1500.0
-    profile_name: str = "CDR"
+    profile_name: str = PROFILE_NAME
     _profile_params: Optional[dict] = field(default=None, repr=False)
     _stereo_cache: Optional[StereoSGBMCache] = field(default=None, repr=False)
     _rect_cache: Optional[RectificationCache] = field(default=None, repr=False)
@@ -110,6 +111,8 @@ class VisionSystem:
         ):
             raise RuntimeError("VisionSystem must be opened before computing depth.")
 
+        if SWAP_LR:
+            left, right = right, left
         rectL_color, rectR_color = rectify_pair(left, right, self._rect_cache)
         grayL = cv2.cvtColor(rectL_color, cv2.COLOR_BGR2GRAY)
         grayR = cv2.cvtColor(rectR_color, cv2.COLOR_BGR2GRAY)
