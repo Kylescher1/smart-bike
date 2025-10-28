@@ -24,9 +24,20 @@ def main() -> None:
             left_frame, right_frame = frames
             depth_result = vision.compute_depth(left_frame, right_frame)
             edge_map = VisionSystem.edge_map_from_depth(depth_result.depth_map)
+            depth_vis = depth_result.depth_map
+            depth_color = None
+            if depth_vis.size:
+                norm = cv2.normalize(depth_vis.astype("float32"), None, 0, 255, cv2.NORM_MINMAX)
+                depth_color = cv2.applyColorMap(norm.astype("uint8"), cv2.COLORMAP_JET)
 
+            shown = False
+            if depth_color is not None:
+                cv2.imshow("Depth map", depth_color)
+                shown = True
             if edge_map.size:
                 cv2.imshow("Depth edges", edge_map)
+                shown = True
+            if shown:
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
