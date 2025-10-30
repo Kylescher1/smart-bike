@@ -12,6 +12,7 @@
   "crop": 200,
   "farEnhance": 27,
   "nearCutoff": 143,
+  "farCutoff": 0,
   "useMorph": 1,
   "morphIter": 5,
   "useBilateral": 1,
