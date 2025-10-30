@@ -76,6 +76,10 @@ def main() -> None:
 
     create_tuner_window()
 
+    # Ensure the Depth map window is 1920x1080
+    cv2.namedWindow("Depth map", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Depth map", 1920, 1080)
+
     try:
         while True:
             frames = vision.capture_frames()
