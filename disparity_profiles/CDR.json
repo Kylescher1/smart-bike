@@ -1,7 +1,7 @@
 {
-  "minDisparity": 32,
+  "minDisparity": 30,
   "numDisparitiesK": 4,
-  "blockSize": 19,
+  "blockSize": 21,
   "preFilterCap": 33,
   "uniquenessRatio": 5,
   "speckleWindowSize": 113,
@@ -11,14 +11,14 @@
   "downSample": 100,
   "crop": 200,
   "farEnhance": 27,
-  "nearCutoff": 88,
+  "nearCutoff": 143,
   "useMorph": 1,
   "morphIter": 5,
-  "useBilateral": 0,
-  "bilateralStrength": 0,
+  "useBilateral": 1,
+  "bilateralStrength": 20,
   "useWLS": 1,
   "wlsLambda": 2389,
-  "wlsSigma": 1.2,
+  "wlsSigma": 2.1,
   "profileName": "CDR",
   "numDisparities": 4
 }
