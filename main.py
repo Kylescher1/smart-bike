@@ -126,6 +126,85 @@ def main() -> None:
 
     cv2.setMouseCallback("Depth map", on_depth_click)
 
+    # --- Region painting utility ---
+    def paint_depth_by_regions(edge_img: np.ndarray, depth_map: np.ndarray, invert_colormap: bool = True) -> np.ndarray:
+        """
+        Create a segmented, "painted" view: flood-fill regions bounded by edges with
+        their average depth value (computed from the depth map), then colorize.
+        Returns a BGR image sized to the preview window.
+        """
+        if depth_map is None or depth_map.size == 0:
+            return np.zeros((DISP_H, DISP_W, 3), dtype=np.uint8)
+
+        # Ensure single-channel binary edges
+        edges = edge_img
+        if edges.ndim == 3:
+            edges = cv2.cvtColor(edges, cv2.COLOR_BGR2GRAY)
+        _, edges_bin = cv2.threshold(edges, 0, 255, cv2.THRESH_BINARY)
+
+        # Resize edges to match depth map resolution
+        h, w = depth_map.shape[:2]
+        edges_bin = cv2.resize(edges_bin, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        # Add depth-discontinuity boundaries to help close silhouettes
+        depth = depth_map.astype(np.float32).copy()
+        depth[~np.isfinite(depth)] = 0.0
+        # Smooth depth to reduce noise before gradient
+        depth_s = cv2.GaussianBlur(depth, (5, 5), 0)
+        gx = cv2.Sobel(depth_s, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(depth_s, cv2.CV_32F, 0, 1, ksize=3)
+        gmag = cv2.magnitude(gx, gy)
+        # Normalize gradient for thresholding
+        if np.any(gmag > 0):
+            gnorm = cv2.normalize(gmag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            # Otsu threshold to pick strong depth edges
+            _, depth_edge = cv2.threshold(gnorm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        else:
+            depth_edge = np.zeros_like(edges_bin)
+
+        # Combine image edges with depth edges and thicken to better seal regions
+        boundaries = cv2.bitwise_or(edges_bin, depth_edge)
+        edges_thick = cv2.dilate(boundaries, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=2)
+
+        # Valid fillable pixels: not an edge and have valid positive depth
+        valid = (edges_thick == 0) & (depth_map > 0)
+        if not np.any(valid):
+            return np.zeros((DISP_H, DISP_W, 3), dtype=np.uint8)
+
+        valid_u8 = (valid.astype(np.uint8) * 255)
+        # Remove tiny holes/gaps by closing before labeling
+        valid_u8 = cv2.morphologyEx(valid_u8, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=1)
+        # Connected components on valid regions
+        num_labels, labels = cv2.connectedComponents(valid_u8, connectivity=4)
+
+        h, w = depth_map.shape[:2]
+        painted_depth = np.zeros((h, w), dtype=np.float32)
+
+        # Compute mean depth per region; skip label 0 (background). Ignore tiny regions.
+        min_region_area = max(200, int(0.001 * h * w))
+        for label_id in range(1, num_labels):
+            mask = (labels == label_id)
+            area = int(mask.sum())
+            if area < min_region_area:
+                continue
+            dvals = depth_map[mask]
+            dvals = dvals[np.isfinite(dvals) & (dvals > 0)]
+            if dvals.size == 0:
+                continue
+            mean_depth = float(dvals.mean())
+            painted_depth[mask] = mean_depth
+
+        # Normalize and colorize like the main depth view
+        if not np.any(painted_depth):
+            vis = np.zeros((h, w), dtype=np.uint8)
+        else:
+            norm = cv2.normalize(painted_depth, None, 0, 255, cv2.NORM_MINMAX)
+            if invert_colormap:
+                norm = 255 - norm
+            vis = norm.astype(np.uint8)
+        color = cv2.applyColorMap(vis, cv2.COLORMAP_JET)
+        return cv2.resize(color, (DISP_W, DISP_H), interpolation=cv2.INTER_AREA)
+
     try:
         while True:
             # --- performance tracker ---
@@ -204,8 +283,10 @@ def main() -> None:
             if depth_color is not None:
                 cv2.imshow("Depth map", depth_color)
                 shown = True
-            if edge_map.size:
-                cv2.imshow("Depth edges", edge_map)
+            # Show painted depth view instead of raw edges
+            if not paused and depth_vis.size:
+                painted = paint_depth_by_regions(edge_map, depth_vis, invert_colormap=True)
+                cv2.imshow("Painted depth", painted)
                 shown = True
             _mark("imshow")
             if shown:
@@ -227,8 +308,34 @@ def main() -> None:
                 fps = 1000.0 / total_ms if total_ms > 0 else 0.0
                 print(f"{parts} | total:{total_ms:.1f}ms | fps:{fps:.1f}")
 
-            if vision.is_object_close(depth_result.depth_map):
-                vision.warn_rider()
+            # Object detection based on nearest sufficiently large region mean depth
+            try:
+                if not paused and depth_vis.size:
+                    edges_src = edge_map if edge_map.ndim == 2 else cv2.cvtColor(edge_map, cv2.COLOR_BGR2GRAY)
+                    _, edges_bin = cv2.threshold(edges_src, 0, 255, cv2.THRESH_BINARY)
+                    edges_thick = cv2.dilate(edges_bin, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1)
+                    valid = (edges_thick == 0) & (depth_vis > 0)
+                    valid_u8 = (valid.astype(np.uint8) * 255)
+                    num_labels, labels = cv2.connectedComponents(valid_u8, connectivity=4)
+                    h, w = depth_vis.shape[:2]
+                    min_region_area = max(100, int(0.0005 * h * w))
+                    nearest = None
+                    for lid in range(1, num_labels):
+                        mask = (labels == lid)
+                        area = int(mask.sum())
+                        if area < min_region_area:
+                            continue
+                        dvals = depth_vis[mask]
+                        dvals = dvals[np.isfinite(dvals) & (dvals > 0)]
+                        if dvals.size == 0:
+                            continue
+                        mean_d = float(dvals.mean())
+                        if nearest is None or mean_d < nearest:
+                            nearest = mean_d
+                    if nearest is not None and nearest <= vision.object_distance_threshold_mm:
+                        vision.warn_rider()
+            except Exception:
+                pass
 
             time.sleep(0.01)
     except KeyboardInterrupt:

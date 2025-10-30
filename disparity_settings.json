@@ -23,10 +23,10 @@
   "profileName": "CDR",
   "objectThresholdMM": 1194,
   "edgeEqualize": 1,
-  "edgeBilateralD": 6,
-  "edgeBilateralSigma": 200,
-  "edgeCannyKLow": 0.31,
-  "edgeCannyKHigh": 1.02,
+  "edgeBilateralD": 12,
+  "edgeBilateralSigma": 136,
+  "edgeCannyKLow": 1.62,
+  "edgeCannyKHigh": 1.99,
   "edgeUseScharr": 0,
   "numDisparities": 4
 }
