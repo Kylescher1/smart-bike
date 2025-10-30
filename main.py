@@ -110,15 +110,26 @@ def main() -> None:
 
     try:
         while True:
+            # --- performance tracker ---
+            times = {}
+            t_prev = time.perf_counter()
+            def _mark(label: str):
+                nonlocal t_prev, times
+                t_now = time.perf_counter()
+                times[label] = (t_now - t_prev) * 1000.0
+                t_prev = t_now
             if not paused:
                 frames = vision.capture_frames()
                 if frames is None:
                     continue
 
                 left_frame, right_frame = frames
+                _mark("capture")
                 # Update live params from tuner
                 vision._profile_params = read_tuner_params()
+                _mark("read_tuner")
                 depth_result = vision.compute_depth(left_frame, right_frame)
+                _mark("compute_depth")
 
             # --- Edge detection on original (non-depth) image, tuned for 3D scenes ---
             gray = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
@@ -134,6 +145,7 @@ def main() -> None:
             mag_u8 = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             _, edges_scharr = cv2.threshold(mag_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             edge_map = cv2.bitwise_or(edges_canny, edges_scharr)
+            _mark("edges")
 
             if not paused:
                 depth_vis = depth_result.depth_map
@@ -145,6 +157,7 @@ def main() -> None:
                     # Resize to display size and keep originals for pause mode
                     pause_display = cv2.resize(depth_color, (DISP_W, DISP_H), interpolation=cv2.INTER_AREA)
                     pause_depth = depth_vis.copy()
+                    _mark("colorize_resize")
             else:
                 depth_color = pause_display.copy() if pause_display is not None else None
                 # Draw clicked points with depth labels on the paused display
@@ -154,6 +167,7 @@ def main() -> None:
                         label = f"{dval:.3f}"
                         cv2.putText(depth_color, label, (int(cx) + 8, int(cy) - 8),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                _mark("paused_draw")
 
             shown = False
             if depth_color is not None:
@@ -162,6 +176,7 @@ def main() -> None:
             if edge_map.size:
                 cv2.imshow("Depth edges", edge_map)
                 shown = True
+            _mark("imshow")
             if shown:
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('p'):
@@ -174,6 +189,12 @@ def main() -> None:
                         print("▶️  Resumed. Clearing sampled points.")
                 elif key == ord("q"):
                     break
+            # Print timing summary for this iteration
+            if times:
+                total_ms = sum(times.values())
+                parts = " | ".join(f"{k}:{v:.1f}ms" for k, v in times.items())
+                fps = 1000.0 / total_ms if total_ms > 0 else 0.0
+                print(f"{parts} | total:{total_ms:.1f}ms | fps:{fps:.1f}")
 
             if vision.is_object_close(depth_result.depth_map):
                 vision.warn_rider()
