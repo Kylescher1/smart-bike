@@ -83,16 +83,42 @@ def main() -> None:
     cv2.namedWindow("Depth map", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Depth map", 1920, 1080)
 
+    # --- Pause/inspect state ---
+    paused = False
+    pause_depth = None  # original depth map (float)
+    pause_display = None  # 1920x1080 BGR shown image
+    clicked_points = []  # list of (x,y,depth)
+    DISP_W, DISP_H = 1920, 1080
+
+    def on_depth_click(event, x, y, flags, param):
+        nonlocal clicked_points, pause_depth, pause_display
+        if not paused or pause_depth is None or pause_display is None:
+            return
+        if event == cv2.EVENT_LBUTTONDOWN:
+            h0, w0 = pause_depth.shape[:2]
+            # Map display coords (1920x1080) back to depth map coords
+            x0 = int(round(x * (w0 / float(DISP_W))))
+            y0 = int(round(y * (h0 / float(DISP_H))))
+            x0 = max(0, min(w0 - 1, x0))
+            y0 = max(0, min(h0 - 1, y0))
+            d = float(pause_depth[y0, x0])
+            clicked_points.append((x, y, d))
+            # Also print to console
+            print(f"Clicked depth at ({x0},{y0}) -> {d:.3f}")
+
+    cv2.setMouseCallback("Depth map", on_depth_click)
+
     try:
         while True:
-            frames = vision.capture_frames()
-            if frames is None:
-                continue
+            if not paused:
+                frames = vision.capture_frames()
+                if frames is None:
+                    continue
 
-            left_frame, right_frame = frames
-            # Update live params from tuner
-            vision._profile_params = read_tuner_params()
-            depth_result = vision.compute_depth(left_frame, right_frame)
+                left_frame, right_frame = frames
+                # Update live params from tuner
+                vision._profile_params = read_tuner_params()
+                depth_result = vision.compute_depth(left_frame, right_frame)
 
             # --- Edge detection on original (non-depth) image, tuned for 3D scenes ---
             gray = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
@@ -109,12 +135,25 @@ def main() -> None:
             _, edges_scharr = cv2.threshold(mag_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             edge_map = cv2.bitwise_or(edges_canny, edges_scharr)
 
-            depth_vis = depth_result.depth_map
-            depth_color = None
-            if depth_vis.size:
-                norm = cv2.normalize(depth_vis.astype("float32"), None, 0, 255, cv2.NORM_MINMAX)
-                norm = 255 - norm  # invert so nearer (smaller depth) becomes larger -> warmer after JET
-                depth_color = cv2.applyColorMap(norm.astype("uint8"), cv2.COLORMAP_JET)
+            if not paused:
+                depth_vis = depth_result.depth_map
+                depth_color = None
+                if depth_vis.size:
+                    norm = cv2.normalize(depth_vis.astype("float32"), None, 0, 255, cv2.NORM_MINMAX)
+                    norm = 255 - norm  # invert so nearer (smaller depth) becomes larger -> warmer after JET
+                    depth_color = cv2.applyColorMap(norm.astype("uint8"), cv2.COLORMAP_JET)
+                    # Resize to display size and keep originals for pause mode
+                    pause_display = cv2.resize(depth_color, (DISP_W, DISP_H), interpolation=cv2.INTER_AREA)
+                    pause_depth = depth_vis.copy()
+            else:
+                depth_color = pause_display.copy() if pause_display is not None else None
+                # Draw clicked points with depth labels on the paused display
+                if depth_color is not None and clicked_points:
+                    for (cx, cy, dval) in clicked_points:
+                        cv2.circle(depth_color, (int(cx), int(cy)), 5, (0, 255, 255), 2)
+                        label = f"{dval:.3f}"
+                        cv2.putText(depth_color, label, (int(cx) + 8, int(cy) - 8),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
             shown = False
             if depth_color is not None:
@@ -125,7 +164,15 @@ def main() -> None:
                 shown = True
             if shown:
                 key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
+                if key == ord('p'):
+                    paused = not paused
+                    if paused:
+                        clicked_points = []
+                        print("⏸️  Paused. Click on the depth view to sample depths. Press 'p' to resume.")
+                    else:
+                        clicked_points = []
+                        print("▶️  Resumed. Clearing sampled points.")
+                elif key == ord("q"):
                     break
 
             if vision.is_object_close(depth_result.depth_map):
