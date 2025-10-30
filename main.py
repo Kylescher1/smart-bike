@@ -43,6 +43,7 @@ def main() -> None:
         tb("farEnhance", 200, int(p.get("farEnhance", 50)))
         tb("nearCutoff", 255, int(p.get("nearCutoff", 0)))
         tb("farCutoff", 255, int(p.get("farCutoff", 0)))
+        tb("objThreshMM", 10000, int(p.get("objectThresholdMM", 1500)))
         tb("morphIter", 5, int(p.get("morphIter", 1)))
         tb("bilateralStrength", 20, int(p.get("bilateralStrength", 8)))
         tb("wlsLambda", 5000, int(p.get("wlsLambda", 0)))
@@ -51,6 +52,14 @@ def main() -> None:
         tb("useMorph", 1, int(p.get("useMorph", 1)))
         tb("useBilateral", 1, int(p.get("useBilateral", 1)))
         tb("useWLS", 1, int(p.get("useWLS", 0)))
+
+        # Edge detection parameters
+        tb("edgeEqualize", 1, int(p.get("edgeEqualize", 1)))
+        tb("edgeBilateralD", 15, int(p.get("edgeBilateralD", 5)))
+        tb("edgeBilateralSigma", 200, int(p.get("edgeBilateralSigma", 60)))
+        tb("edgeCannyKLow_x100", 300, int(round(float(p.get("edgeCannyKLow", 0.66)) * 100)))
+        tb("edgeCannyKHigh_x100", 400, int(round(float(p.get("edgeCannyKHigh", 1.33)) * 100)))
+        tb("edgeUseScharr", 1, int(p.get("edgeUseScharr", 1)))
 
     def read_tuner_params() -> dict:
         g = cv2.getTrackbarPos
@@ -68,6 +77,7 @@ def main() -> None:
         params["farEnhance"] = int(g("farEnhance", "Disparity Tuner"))
         params["nearCutoff"] = int(g("nearCutoff", "Disparity Tuner"))
         params["farCutoff"] = int(g("farCutoff", "Disparity Tuner"))
+        params["objectThresholdMM"] = int(g("objThreshMM", "Disparity Tuner"))
         params["morphIter"] = int(g("morphIter", "Disparity Tuner"))
         params["bilateralStrength"] = int(g("bilateralStrength", "Disparity Tuner"))
         params["wlsLambda"] = int(g("wlsLambda", "Disparity Tuner"))
@@ -75,6 +85,14 @@ def main() -> None:
         params["useMorph"] = int(g("useMorph", "Disparity Tuner"))
         params["useBilateral"] = int(g("useBilateral", "Disparity Tuner"))
         params["useWLS"] = int(g("useWLS", "Disparity Tuner"))
+
+        # Edge detection parameters
+        params["edgeEqualize"] = int(g("edgeEqualize", "Disparity Tuner"))
+        params["edgeBilateralD"] = max(1, int(g("edgeBilateralD", "Disparity Tuner")))
+        params["edgeBilateralSigma"] = max(0, int(g("edgeBilateralSigma", "Disparity Tuner")))
+        params["edgeCannyKLow"] = float(g("edgeCannyKLow_x100", "Disparity Tuner")) / 100.0
+        params["edgeCannyKHigh"] = float(g("edgeCannyKHigh_x100", "Disparity Tuner")) / 100.0
+        params["edgeUseScharr"] = int(g("edgeUseScharr", "Disparity Tuner"))
         return params
 
     create_tuner_window()
@@ -127,24 +145,37 @@ def main() -> None:
                 _mark("capture")
                 # Update live params from tuner
                 vision._profile_params = read_tuner_params()
+                # Update close-object threshold from settings
+                try:
+                    vision.object_distance_threshold_mm = float(vision._profile_params.get("objectThresholdMM", vision.object_distance_threshold_mm))
+                except Exception:
+                    pass
                 _mark("read_tuner")
                 depth_result = vision.compute_depth(left_frame, right_frame)
                 _mark("compute_depth")
 
             # --- Edge detection on original (non-depth) image, tuned for 3D scenes ---
             gray = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
-            gray = cv2.equalizeHist(gray)
-            denoised = cv2.bilateralFilter(gray, 5, 60, 60)
+            if int(vision._profile_params.get("edgeEqualize", 1)):
+                gray = cv2.equalizeHist(gray)
+            d_edge = max(1, int(vision._profile_params.get("edgeBilateralD", 5)))
+            s_edge = max(0, int(vision._profile_params.get("edgeBilateralSigma", 60)))
+            denoised = cv2.bilateralFilter(gray, d_edge, s_edge, s_edge)
             v = float(np.median(denoised))
-            lower = int(max(0, 0.66 * v))
-            upper = int(min(255, 1.33 * v))
+            k_low = float(vision._profile_params.get("edgeCannyKLow", 0.66))
+            k_high = float(vision._profile_params.get("edgeCannyKHigh", 1.33))
+            lower = int(max(0, k_low * v))
+            upper = int(min(255, k_high * v))
             edges_canny = cv2.Canny(denoised, lower, upper, L2gradient=True)
-            gx = cv2.Scharr(denoised, cv2.CV_32F, 1, 0)
-            gy = cv2.Scharr(denoised, cv2.CV_32F, 0, 1)
-            mag = cv2.magnitude(gx, gy)
-            mag_u8 = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            _, edges_scharr = cv2.threshold(mag_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            edge_map = cv2.bitwise_or(edges_canny, edges_scharr)
+            if int(vision._profile_params.get("edgeUseScharr", 1)):
+                gx = cv2.Scharr(denoised, cv2.CV_32F, 1, 0)
+                gy = cv2.Scharr(denoised, cv2.CV_32F, 0, 1)
+                mag = cv2.magnitude(gx, gy)
+                mag_u8 = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                _, edges_scharr = cv2.threshold(mag_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                edge_map = cv2.bitwise_or(edges_canny, edges_scharr)
+            else:
+                edge_map = edges_canny
             _mark("edges")
 
             if not paused:

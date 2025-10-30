@@ -8,10 +8,10 @@
   "speckleRange": 34,
   "disp12MaxDiff": 7,
   "medianBlurK": 0,
-  "downSample": 100,
+  "downSample": 80,
   "crop": 200,
   "farEnhance": 27,
-  "nearCutoff": 143,
+  "nearCutoff": 72,
   "farCutoff": 0,
   "useMorph": 1,
   "morphIter": 5,
@@ -21,5 +21,6 @@
   "wlsLambda": 2389,
   "wlsSigma": 2.1,
   "profileName": "CDR",
+  "objectThresholdMM": 1194,
   "numDisparities": 4
 }

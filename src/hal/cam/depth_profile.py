@@ -82,6 +82,13 @@ DEFAULT_SETTINGS = {
     "wlsLambda": 4000,
     "wlsSigma": 1.0,
     "profileName": "default"
+    ,"objectThresholdMM": 1500
+    ,"edgeEqualize": 1
+    ,"edgeBilateralD": 5
+    ,"edgeBilateralSigma": 60
+    ,"edgeCannyKLow": 0.66
+    ,"edgeCannyKHigh": 1.33
+    ,"edgeUseScharr": 1
 }
 
 # Global save queue for background saving
