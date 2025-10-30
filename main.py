@@ -91,6 +91,7 @@ def main() -> None:
             depth_color = None
             if depth_vis.size:
                 norm = cv2.normalize(depth_vis.astype("float32"), None, 0, 255, cv2.NORM_MINMAX)
+                norm = 255 - norm  # invert so nearer (smaller depth) becomes larger -> warmer after JET
                 depth_color = cv2.applyColorMap(norm.astype("uint8"), cv2.COLORMAP_JET)
 
             shown = False
@@ -115,20 +116,24 @@ def main() -> None:
         vision.close()
         cv2.destroyAllWindows()
         print("👋 Vision system shut down.")
-        # --- AUTO SAVE DISPARITY SETTINGS TO DEFAULT PROFILE ---
+        # --- ASK USER TO SAVE SETTINGS TO DEFAULT PROFILE ---
         try:
-            from src.hal.cam.depth_profile import save_settings, PROFILE_DIR
-            from src.hal.config import PROFILE_NAME
-            import os, json
-            params = vision._profile_params or {}
-            # Save to disparity_settings.json (legacy/global)
-            save_settings(params)
-            # Save to default profile (by name)
-            profile_path = os.path.join(PROFILE_DIR, f"{PROFILE_NAME}.json")
-            os.makedirs(PROFILE_DIR, exist_ok=True)
-            with open(profile_path, "w") as f:
-                json.dump(params, f, indent=2)
-            print(f"✅ Saved disparity settings to default profile: {profile_path}")
+            ans = input("Do you want to save the current disparity settings to the default profile? (y/n): ").strip().lower()
+            if ans == 'y':
+                from src.hal.cam.depth_profile import save_settings, PROFILE_DIR
+                from src.hal.config import PROFILE_NAME
+                import os, json
+                params = vision._profile_params or {}
+                # Save to disparity_settings.json (legacy/global)
+                save_settings(params)
+                # Save to default profile (by name)
+                profile_path = os.path.join(PROFILE_DIR, f"{PROFILE_NAME}.json")
+                os.makedirs(PROFILE_DIR, exist_ok=True)
+                with open(profile_path, "w") as f:
+                    json.dump(params, f, indent=2)
+                print(f"✅ Saved disparity settings to default profile: {profile_path}")
+            else:
+                print("❌ Disparity settings were not saved.")
         except Exception as e:
             print(f"⚠️ Could not save disparity settings to default profile: {e}")
 
