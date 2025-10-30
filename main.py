@@ -44,6 +44,9 @@ def main() -> None:
         tb("nearCutoff", 255, int(p.get("nearCutoff", 0)))
         tb("farCutoff", 255, int(p.get("farCutoff", 0)))
         tb("objThreshMM", 10000, int(p.get("objectThresholdMM", 1500)))
+        # Color mapping focus controls
+        tb("colorFocusMM", 20000, int(p.get("colorFocusMM", 3000)))
+        tb("colorSpanMM", 20000, int(p.get("colorSpanMM", 2000)))
         tb("morphIter", 5, int(p.get("morphIter", 1)))
         tb("bilateralStrength", 20, int(p.get("bilateralStrength", 8)))
         tb("wlsLambda", 5000, int(p.get("wlsLambda", 0)))
@@ -78,6 +81,9 @@ def main() -> None:
         params["nearCutoff"] = int(g("nearCutoff", "Disparity Tuner"))
         params["farCutoff"] = int(g("farCutoff", "Disparity Tuner"))
         params["objectThresholdMM"] = int(g("objThreshMM", "Disparity Tuner"))
+        # Color mapping focus controls
+        params["colorFocusMM"] = int(g("colorFocusMM", "Disparity Tuner"))
+        params["colorSpanMM"] = int(g("colorSpanMM", "Disparity Tuner"))
         params["morphIter"] = int(g("morphIter", "Disparity Tuner"))
         params["bilateralStrength"] = int(g("bilateralStrength", "Disparity Tuner"))
         params["wlsLambda"] = int(g("wlsLambda", "Disparity Tuner"))
@@ -127,7 +133,7 @@ def main() -> None:
     cv2.setMouseCallback("Depth map", on_depth_click)
 
     # --- Region painting utility ---
-    def paint_depth_by_regions(edge_img: np.ndarray, depth_map: np.ndarray, invert_colormap: bool = True) -> np.ndarray:
+    def paint_depth_by_regions(edge_img: np.ndarray, depth_map: np.ndarray, invert_colormap: bool = True, norm_low: float | None = None, norm_high: float | None = None) -> np.ndarray:
         """
         Create a segmented, "painted" view: flood-fill regions bounded by edges with
         their average depth value (computed from the depth map), then colorize.
@@ -198,7 +204,11 @@ def main() -> None:
         if not np.any(painted_depth):
             vis = np.zeros((h, w), dtype=np.uint8)
         else:
-            norm = cv2.normalize(painted_depth, None, 0, 255, cv2.NORM_MINMAX)
+            if norm_low is not None and norm_high is not None and norm_high > norm_low:
+                scaled = np.clip((painted_depth - norm_low) / float(norm_high - norm_low), 0.0, 1.0)
+                norm = (scaled * 255.0).astype(np.uint8)
+            else:
+                norm = cv2.normalize(painted_depth, None, 0, 255, cv2.NORM_MINMAX)
             if invert_colormap:
                 norm = 255 - norm
             vis = norm.astype(np.uint8)
@@ -233,37 +243,78 @@ def main() -> None:
                 depth_result = vision.compute_depth(left_frame, right_frame)
                 _mark("compute_depth")
 
-            # --- Edge detection on original (non-depth) image, tuned for 3D scenes ---
-            gray = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
-            if int(vision._profile_params.get("edgeEqualize", 1)):
-                gray = cv2.equalizeHist(gray)
-            d_edge = max(1, int(vision._profile_params.get("edgeBilateralD", 5)))
-            s_edge = max(0, int(vision._profile_params.get("edgeBilateralSigma", 60)))
-            denoised = cv2.bilateralFilter(gray, d_edge, s_edge, s_edge)
-            v = float(np.median(denoised))
-            k_low = float(vision._profile_params.get("edgeCannyKLow", 0.66))
-            k_high = float(vision._profile_params.get("edgeCannyKHigh", 1.33))
-            lower = int(max(0, k_low * v))
-            upper = int(min(255, k_high * v))
-            edges_canny = cv2.Canny(denoised, lower, upper, L2gradient=True)
-            if int(vision._profile_params.get("edgeUseScharr", 1)):
-                gx = cv2.Scharr(denoised, cv2.CV_32F, 1, 0)
-                gy = cv2.Scharr(denoised, cv2.CV_32F, 0, 1)
-                mag = cv2.magnitude(gx, gy)
-                mag_u8 = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-                _, edges_scharr = cv2.threshold(mag_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                edge_map = cv2.bitwise_or(edges_canny, edges_scharr)
-            else:
-                edge_map = edges_canny
+            # --- Primary edges from depth map (3D boundaries) ---
+            # Fallback to image edges only if depth not available this frame
+            edge_map = None
+            if not paused:
+                try:
+                    dv = depth_result.depth_map.astype(np.float32)
+                    dv[np.isnan(dv) | np.isinf(dv)] = 0.0
+                    if dv.size:
+                        dv_blur = cv2.GaussianBlur(dv, (5, 5), 0)
+                        gx = cv2.Sobel(dv_blur, cv2.CV_32F, 1, 0, ksize=3)
+                        gy = cv2.Sobel(dv_blur, cv2.CV_32F, 0, 1, ksize=3)
+                        gmag = cv2.magnitude(gx, gy)
+                        if np.any(gmag > 0):
+                            gnorm = cv2.normalize(gmag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                            _, edge_map = cv2.threshold(gnorm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                            edge_map = cv2.dilate(edge_map, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1)
+                except Exception:
+                    edge_map = None
+
+            if edge_map is None:
+                # Fallback: Edge detection on original (non-depth) image
+                gray = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
+                if int(vision._profile_params.get("edgeEqualize", 1)):
+                    gray = cv2.equalizeHist(gray)
+                d_edge = max(1, int(vision._profile_params.get("edgeBilateralD", 5)))
+                s_edge = max(0, int(vision._profile_params.get("edgeBilateralSigma", 60)))
+                denoised = cv2.bilateralFilter(gray, d_edge, s_edge, s_edge)
+                v = float(np.median(denoised))
+                k_low = float(vision._profile_params.get("edgeCannyKLow", 0.66))
+                k_high = float(vision._profile_params.get("edgeCannyKHigh", 1.33))
+                lower = int(max(0, k_low * v))
+                upper = int(min(255, k_high * v))
+                edges_canny = cv2.Canny(denoised, lower, upper, L2gradient=True)
+                if int(vision._profile_params.get("edgeUseScharr", 1)):
+                    gx = cv2.Scharr(denoised, cv2.CV_32F, 1, 0)
+                    gy = cv2.Scharr(denoised, cv2.CV_32F, 0, 1)
+                    mag = cv2.magnitude(gx, gy)
+                    mag_u8 = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                    _, edges_scharr = cv2.threshold(mag_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    edge_map = cv2.bitwise_or(edges_canny, edges_scharr)
+                else:
+                    edge_map = edges_canny
             _mark("edges")
 
             if not paused:
                 depth_vis = depth_result.depth_map
                 depth_color = None
                 if depth_vis.size:
-                    norm = cv2.normalize(depth_vis.astype("float32"), None, 0, 255, cv2.NORM_MINMAX)
-                    norm = 255 - norm  # invert so nearer (smaller depth) becomes larger -> warmer after JET
-                    depth_color = cv2.applyColorMap(norm.astype("uint8"), cv2.COLORMAP_JET)
+                    # Focused color mapping window based on sliders
+                    focus_mm = float(vision._profile_params.get("colorFocusMM", 3000))
+                    span_mm = float(vision._profile_params.get("colorSpanMM", 2000))
+                    low = high = None
+                    d = depth_vis.astype("float32")
+                    valid = d[np.isfinite(d) & (d > 0)]
+                    if valid.size and span_mm > 0:
+                        half = span_mm / 2.0
+                        low = max(float(valid.min()), focus_mm - half)
+                        high = min(float(valid.max()), focus_mm + half)
+                        if high <= low:
+                            low = float(valid.min())
+                            high = float(valid.max())
+                    if low is None or high is None or high <= low:
+                        # fallback to global min-max
+                        low = float(valid.min()) if valid.size else 0.0
+                        high = float(valid.max()) if valid.size else 1.0
+                        if high <= low:
+                            high = low + 1.0
+
+                    scaled = np.clip((d - low) / float(high - low), 0.0, 1.0)
+                    norm = (scaled * 255.0).astype(np.uint8)
+                    norm = 255 - norm  # invert so nearer appears warmer
+                    depth_color = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
                     # Resize to display size and keep originals for pause mode
                     pause_display = cv2.resize(depth_color, (DISP_W, DISP_H), interpolation=cv2.INTER_AREA)
                     pause_depth = depth_vis.copy()
@@ -283,9 +334,9 @@ def main() -> None:
             if depth_color is not None:
                 cv2.imshow("Depth map", depth_color)
                 shown = True
-            # Show painted depth view instead of raw edges
+            # Show painted depth view based on depth-derived edges (use same color window)
             if not paused and depth_vis.size:
-                painted = paint_depth_by_regions(edge_map, depth_vis, invert_colormap=True)
+                painted = paint_depth_by_regions(edge_map, depth_vis, invert_colormap=True, norm_low=low, norm_high=high)
                 cv2.imshow("Painted depth", painted)
                 shown = True
             _mark("imshow")
