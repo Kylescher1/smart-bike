@@ -115,6 +115,22 @@ def main() -> None:
         vision.close()
         cv2.destroyAllWindows()
         print("👋 Vision system shut down.")
+        # --- AUTO SAVE DISPARITY SETTINGS TO DEFAULT PROFILE ---
+        try:
+            from src.hal.cam.depth_profile import save_settings, PROFILE_DIR
+            from src.hal.config import PROFILE_NAME
+            import os, json
+            params = vision._profile_params or {}
+            # Save to disparity_settings.json (legacy/global)
+            save_settings(params)
+            # Save to default profile (by name)
+            profile_path = os.path.join(PROFILE_DIR, f"{PROFILE_NAME}.json")
+            os.makedirs(PROFILE_DIR, exist_ok=True)
+            with open(profile_path, "w") as f:
+                json.dump(params, f, indent=2)
+            print(f"✅ Saved disparity settings to default profile: {profile_path}")
+        except Exception as e:
+            print(f"⚠️ Could not save disparity settings to default profile: {e}")
 
 
 if __name__ == "__main__":
