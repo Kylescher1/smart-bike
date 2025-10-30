@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 
 import cv2
+import numpy as np
 
 from src.hal.Vision import VisionSystem, default_calibration_file
 
@@ -90,7 +91,22 @@ def main() -> None:
             # Update live params from tuner
             vision._profile_params = read_tuner_params()
             depth_result = vision.compute_depth(left_frame, right_frame)
-            edge_map = VisionSystem.edge_map_from_depth(depth_result.depth_map)
+
+            # --- Edge detection on original (non-depth) image, tuned for 3D scenes ---
+            gray = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
+            gray = cv2.equalizeHist(gray)
+            denoised = cv2.bilateralFilter(gray, 5, 60, 60)
+            v = float(np.median(denoised))
+            lower = int(max(0, 0.66 * v))
+            upper = int(min(255, 1.33 * v))
+            edges_canny = cv2.Canny(denoised, lower, upper, L2gradient=True)
+            gx = cv2.Scharr(denoised, cv2.CV_32F, 1, 0)
+            gy = cv2.Scharr(denoised, cv2.CV_32F, 0, 1)
+            mag = cv2.magnitude(gx, gy)
+            mag_u8 = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            _, edges_scharr = cv2.threshold(mag_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            edge_map = cv2.bitwise_or(edges_canny, edges_scharr)
+
             depth_vis = depth_result.depth_map
             depth_color = None
             if depth_vis.size:

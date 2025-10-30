@@ -73,6 +73,7 @@ DEFAULT_SETTINGS = {
     "crop": 0,
     "farEnhance": 50,
     "nearCutoff": 0,
+    "farCutoff": 0,
     "useMorph": 1,
     "morphIter": 1,
     "useBilateral": 1,
