@@ -371,6 +371,12 @@ def post_filter_weak(disp: np.ndarray, s: dict) -> np.ndarray:
     if near_cut > 0:
         out[out > near_cut] = 0.0
 
+    # Cutoff for very far objects (low disparity)
+    far_cut = float(s.get("farCutoff", 0))
+    if far_cut > 0:
+        mask_valid = out > 0
+        out[(out < far_cut) & mask_valid] = 0.0
+
     # Remove isolated remnants by neighborhood tally
     mask = (out > 0).astype(np.uint8)
     kernel = np.ones((3, 3), np.uint8)
@@ -441,6 +447,7 @@ def create_tuner_window(params: dict) -> None:
 
     cv2.createTrackbar("farEnh", "Disparity Tuner", int(params["farEnhance"]), 200, nothing)
     cv2.createTrackbar("nearCut", "Disparity Tuner", int(params["nearCutoff"]), 200, nothing)
+    cv2.createTrackbar("farCut", "Disparity Tuner", int(params.get("farCutoff", 0)), 200, nothing)
 
     cv2.createTrackbar("downSample%", "Disparity Tuner", int(params.get("downSample", 100)), 100, nothing)
     cv2.createTrackbar("crop(px)", "Disparity Tuner", int(params.get("crop", 0)), 200, nothing)
@@ -469,6 +476,7 @@ def read_tuner_params() -> dict:
         "wlsSigma": cv2.getTrackbarPos("wlsSigmaX10", "Disparity Tuner") / 10.0,
         "farEnhance": cv2.getTrackbarPos("farEnh", "Disparity Tuner"),
         "nearCutoff": cv2.getTrackbarPos("nearCut", "Disparity Tuner"),
+        "farCutoff": cv2.getTrackbarPos("farCut", "Disparity Tuner"),
         "downSample": max(10, cv2.getTrackbarPos("downSample%", "Disparity Tuner")),
         "crop": cv2.getTrackbarPos("crop(px)", "Disparity Tuner"),
 
