@@ -24,49 +24,64 @@ def main() -> None:
         return n if (n % 2 == 1) else (n + 1)
 
     def create_tuner_window() -> None:
+        # Page 1: Stereo/Disparity core params
         cv2.namedWindow("Disparity Tuner", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Disparity Tuner", 420, 640)
+        cv2.resizeWindow("Disparity Tuner", 420, 520)
+        # Page 2: Visualization, Edges, Segmentation
+        cv2.namedWindow("Viz/Seg Tuner", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Viz/Seg Tuner", 420, 520)
         p = vision._profile_params or {}
-        def tb(name, maxv, init):
-            cv2.createTrackbar(name, "Disparity Tuner", int(init), int(maxv), lambda v: None)
+        def tb(win, name, maxv, init):
+            cv2.createTrackbar(name, win, int(init), int(maxv), lambda v: None)
 
-        tb("numDisparitiesK", 12, int(p.get("numDisparitiesK", 4)))
-        tb("blockSize", 21, int(p.get("blockSize", 5)))
-        tb("minDisparity", 32, int(p.get("minDisparity", 0)))
-        tb("preFilterCap", 63, int(p.get("preFilterCap", 31)))
-        tb("uniquenessRatio", 40, int(p.get("uniquenessRatio", 10)))
-        tb("speckleWindowSize", 256, int(p.get("speckleWindowSize", 100)))
-        tb("speckleRange", 64, int(p.get("speckleRange", 32)))
-        tb("disp12MaxDiff", 32, int(p.get("disp12MaxDiff", 1)))
-        tb("downSample", 100, int(p.get("downSample", 100)))
-        tb("crop", 200, int(p.get("crop", 0)))
-        tb("farEnhance", 200, int(p.get("farEnhance", 50)))
-        tb("nearCutoff", 255, int(p.get("nearCutoff", 0)))
-        tb("farCutoff", 255, int(p.get("farCutoff", 0)))
-        tb("objThreshMM", 10000, int(p.get("objectThresholdMM", 1500)))
-        # Color mapping focus controls
-        tb("colorFocusMM", 20000, int(p.get("colorFocusMM", 3000)))
-        tb("colorSpanMM", 20000, int(p.get("colorSpanMM", 2000)))
-        tb("morphIter", 5, int(p.get("morphIter", 1)))
-        tb("bilateralStrength", 20, int(p.get("bilateralStrength", 8)))
-        tb("wlsLambda", 5000, int(p.get("wlsLambda", 0)))
-        tb("wlsSigma_x10", 100, int(round(float(p.get("wlsSigma", 1.0)) * 10)))
-        # binary toggles as 0/1
-        tb("useMorph", 1, int(p.get("useMorph", 1)))
-        tb("useBilateral", 1, int(p.get("useBilateral", 1)))
-        tb("useWLS", 1, int(p.get("useWLS", 0)))
+        # Disparity Tuner window
+        tb("Disparity Tuner", "numDisparitiesK", 12, int(p.get("numDisparitiesK", 4)))
+        tb("Disparity Tuner", "blockSize", 21, int(p.get("blockSize", 5)))
+        tb("Disparity Tuner", "minDisparity", 32, int(p.get("minDisparity", 0)))
+        tb("Disparity Tuner", "preFilterCap", 63, int(p.get("preFilterCap", 31)))
+        tb("Disparity Tuner", "uniquenessRatio", 40, int(p.get("uniquenessRatio", 10)))
+        tb("Disparity Tuner", "speckleWindowSize", 256, int(p.get("speckleWindowSize", 100)))
+        tb("Disparity Tuner", "speckleRange", 64, int(p.get("speckleRange", 32)))
+        tb("Disparity Tuner", "disp12MaxDiff", 32, int(p.get("disp12MaxDiff", 1)))
+        tb("Disparity Tuner", "downSample", 100, int(p.get("downSample", 100)))
+        tb("Disparity Tuner", "crop", 200, int(p.get("crop", 0)))
+
+        # Viz/Seg Tuner window
+        tb("Viz/Seg Tuner", "farEnhance", 200, int(p.get("farEnhance", 50)))
+        tb("Viz/Seg Tuner", "nearCutoff", 255, int(p.get("nearCutoff", 0)))
+        tb("Viz/Seg Tuner", "farCutoff", 255, int(p.get("farCutoff", 0)))
+        tb("Viz/Seg Tuner", "objThreshMM", 10000, int(p.get("objectThresholdMM", 1500)))
+        tb("Viz/Seg Tuner", "colorFocusMM", 20000, int(p.get("colorFocusMM", 3000)))
+        tb("Viz/Seg Tuner", "colorSpanMM", 20000, int(p.get("colorSpanMM", 2000)))
+        tb("Viz/Seg Tuner", "morphIter", 5, int(p.get("morphIter", 1)))
+        tb("Viz/Seg Tuner", "bilateralStrength", 20, int(p.get("bilateralStrength", 8)))
+        tb("Viz/Seg Tuner", "wlsLambda", 5000, int(p.get("wlsLambda", 0)))
+        tb("Viz/Seg Tuner", "wlsSigma_x10", 100, int(round(float(p.get("wlsSigma", 1.0)) * 10)))
+        tb("Viz/Seg Tuner", "useMorph", 1, int(p.get("useMorph", 1)))
+        tb("Viz/Seg Tuner", "useBilateral", 1, int(p.get("useBilateral", 1)))
+        tb("Viz/Seg Tuner", "useWLS", 1, int(p.get("useWLS", 0)))
 
         # Edge detection parameters
-        tb("edgeEqualize", 1, int(p.get("edgeEqualize", 1)))
-        tb("edgeBilateralD", 15, int(p.get("edgeBilateralD", 5)))
-        tb("edgeBilateralSigma", 200, int(p.get("edgeBilateralSigma", 60)))
-        tb("edgeCannyKLow_x100", 300, int(round(float(p.get("edgeCannyKLow", 0.66)) * 100)))
-        tb("edgeCannyKHigh_x100", 400, int(round(float(p.get("edgeCannyKHigh", 1.33)) * 100)))
-        tb("edgeUseScharr", 1, int(p.get("edgeUseScharr", 1)))
+        tb("Viz/Seg Tuner", "edgeEqualize", 1, int(p.get("edgeEqualize", 1)))
+        tb("Viz/Seg Tuner", "edgeBilateralD", 15, int(p.get("edgeBilateralD", 5)))
+        tb("Viz/Seg Tuner", "edgeBilateralSigma", 200, int(p.get("edgeBilateralSigma", 60)))
+        tb("Viz/Seg Tuner", "edgeCannyKLow_x100", 300, int(round(float(p.get("edgeCannyKLow", 0.66)) * 100)))
+        tb("Viz/Seg Tuner", "edgeCannyKHigh_x100", 400, int(round(float(p.get("edgeCannyKHigh", 1.33)) * 100)))
+        tb("Viz/Seg Tuner", "edgeUseScharr", 1, int(p.get("edgeUseScharr", 1)))
+
+        # Segmentation/painting mode and params
+        tb("Viz/Seg Tuner", "segMode", 2, int(p.get("segMode", 0)))
+        tb("Viz/Seg Tuner", "kmK", 10, int(p.get("kmK", 4)))
+        tb("Viz/Seg Tuner", "kmSpatialX100", 500, int(p.get("kmSpatialX100", 50)))
+        tb("Viz/Seg Tuner", "rgTau", 500, int(p.get("rgTau", 50)))
+        tb("Viz/Seg Tuner", "rgSeedStep", 64, int(p.get("rgSeedStep", 16)))
+        tb("Viz/Seg Tuner", "wsSigma", 10, int(p.get("wsSigma", 2)))
+        tb("Viz/Seg Tuner", "wsMinArea", 5000, int(p.get("wsMinArea", 800)))
 
     def read_tuner_params() -> dict:
         g = cv2.getTrackbarPos
         params = dict(vision._profile_params or {})
+        # Disparity Tuner reads
         params["numDisparitiesK"] = max(1, int(g("numDisparitiesK", "Disparity Tuner")))
         params["blockSize"] = ensure_odd(int(g("blockSize", "Disparity Tuner")), 3)
         params["minDisparity"] = int(g("minDisparity", "Disparity Tuner"))
@@ -77,28 +92,39 @@ def main() -> None:
         params["disp12MaxDiff"] = int(g("disp12MaxDiff", "Disparity Tuner"))
         params["downSample"] = max(10, int(g("downSample", "Disparity Tuner")))
         params["crop"] = max(0, int(g("crop", "Disparity Tuner")))
-        params["farEnhance"] = int(g("farEnhance", "Disparity Tuner"))
-        params["nearCutoff"] = int(g("nearCutoff", "Disparity Tuner"))
-        params["farCutoff"] = int(g("farCutoff", "Disparity Tuner"))
-        params["objectThresholdMM"] = int(g("objThreshMM", "Disparity Tuner"))
-        # Color mapping focus controls
-        params["colorFocusMM"] = int(g("colorFocusMM", "Disparity Tuner"))
-        params["colorSpanMM"] = int(g("colorSpanMM", "Disparity Tuner"))
-        params["morphIter"] = int(g("morphIter", "Disparity Tuner"))
-        params["bilateralStrength"] = int(g("bilateralStrength", "Disparity Tuner"))
-        params["wlsLambda"] = int(g("wlsLambda", "Disparity Tuner"))
-        params["wlsSigma"] = float(g("wlsSigma_x10", "Disparity Tuner")) / 10.0
-        params["useMorph"] = int(g("useMorph", "Disparity Tuner"))
-        params["useBilateral"] = int(g("useBilateral", "Disparity Tuner"))
-        params["useWLS"] = int(g("useWLS", "Disparity Tuner"))
+
+        # Viz/Seg Tuner reads
+        params["farEnhance"] = int(g("farEnhance", "Viz/Seg Tuner"))
+        params["nearCutoff"] = int(g("nearCutoff", "Viz/Seg Tuner"))
+        params["farCutoff"] = int(g("farCutoff", "Viz/Seg Tuner"))
+        params["objectThresholdMM"] = int(g("objThreshMM", "Viz/Seg Tuner"))
+        params["colorFocusMM"] = int(g("colorFocusMM", "Viz/Seg Tuner"))
+        params["colorSpanMM"] = int(g("colorSpanMM", "Viz/Seg Tuner"))
+        params["morphIter"] = int(g("morphIter", "Viz/Seg Tuner"))
+        params["bilateralStrength"] = int(g("bilateralStrength", "Viz/Seg Tuner"))
+        params["wlsLambda"] = int(g("wlsLambda", "Viz/Seg Tuner"))
+        params["wlsSigma"] = float(g("wlsSigma_x10", "Viz/Seg Tuner")) / 10.0
+        params["useMorph"] = int(g("useMorph", "Viz/Seg Tuner"))
+        params["useBilateral"] = int(g("useBilateral", "Viz/Seg Tuner"))
+        params["useWLS"] = int(g("useWLS", "Viz/Seg Tuner"))
 
         # Edge detection parameters
-        params["edgeEqualize"] = int(g("edgeEqualize", "Disparity Tuner"))
-        params["edgeBilateralD"] = max(1, int(g("edgeBilateralD", "Disparity Tuner")))
-        params["edgeBilateralSigma"] = max(0, int(g("edgeBilateralSigma", "Disparity Tuner")))
-        params["edgeCannyKLow"] = float(g("edgeCannyKLow_x100", "Disparity Tuner")) / 100.0
-        params["edgeCannyKHigh"] = float(g("edgeCannyKHigh_x100", "Disparity Tuner")) / 100.0
-        params["edgeUseScharr"] = int(g("edgeUseScharr", "Disparity Tuner"))
+        params["edgeEqualize"] = int(g("edgeEqualize", "Viz/Seg Tuner"))
+        params["edgeBilateralD"] = max(1, int(g("edgeBilateralD", "Viz/Seg Tuner")))
+        params["edgeBilateralSigma"] = max(0, int(g("edgeBilateralSigma", "Viz/Seg Tuner")))
+        params["edgeCannyKLow"] = float(g("edgeCannyKLow_x100", "Viz/Seg Tuner")) / 100.0
+        params["edgeCannyKHigh"] = float(g("edgeCannyKHigh_x100", "Viz/Seg Tuner")) / 100.0
+        params["edgeUseScharr"] = int(g("edgeUseScharr", "Viz/Seg Tuner"))
+
+        # Segmentation/painting mode and params
+        params["segMode"] = int(g("segMode", "Viz/Seg Tuner"))
+        params["kmK"] = max(2, int(g("kmK", "Viz/Seg Tuner")))
+        params["kmSpatialX100"] = max(0, int(g("kmSpatialX100", "Viz/Seg Tuner")))
+        params["rgTau"] = max(1, int(g("rgTau", "Viz/Seg Tuner")))
+        params["rgSeedStep"] = max(4, int(g("rgSeedStep", "Viz/Seg Tuner")))
+        params["wsSigma"] = max(0, int(g("wsSigma", "Viz/Seg Tuner")))
+        params["wsMinArea"] = max(0, int(g("wsMinArea", "Viz/Seg Tuner")))
+        return params
         return params
 
     create_tuner_window()
@@ -133,7 +159,13 @@ def main() -> None:
     cv2.setMouseCallback("Depth map", on_depth_click)
 
     # --- Region painting utility ---
-    def paint_depth_by_regions(edge_img: np.ndarray, depth_map: np.ndarray, invert_colormap: bool = True, norm_low: float | None = None, norm_high: float | None = None) -> np.ndarray:
+    def paint_depth_by_regions(edge_img: np.ndarray,
+                               depth_map: np.ndarray,
+                               invert_colormap: bool = True,
+                               norm_low: float | None = None,
+                               norm_high: float | None = None,
+                               mode: int = 0,
+                               params: dict | None = None) -> np.ndarray:
         """
         Create a segmented, "painted" view: flood-fill regions bounded by edges with
         their average depth value (computed from the depth map), then colorize.
@@ -142,63 +174,113 @@ def main() -> None:
         if depth_map is None or depth_map.size == 0:
             return np.zeros((DISP_H, DISP_W, 3), dtype=np.uint8)
 
-        # Ensure single-channel binary edges
-        edges = edge_img
-        if edges.ndim == 3:
-            edges = cv2.cvtColor(edges, cv2.COLOR_BGR2GRAY)
-        _, edges_bin = cv2.threshold(edges, 0, 255, cv2.THRESH_BINARY)
-
-        # Resize edges to match depth map resolution
         h, w = depth_map.shape[:2]
-        edges_bin = cv2.resize(edges_bin, (w, h), interpolation=cv2.INTER_NEAREST)
-
-        # Add depth-discontinuity boundaries to help close silhouettes
-        depth = depth_map.astype(np.float32).copy()
+        depth = depth_map.astype(np.float32)
         depth[~np.isfinite(depth)] = 0.0
-        # Smooth depth to reduce noise before gradient
-        depth_s = cv2.GaussianBlur(depth, (5, 5), 0)
-        gx = cv2.Sobel(depth_s, cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(depth_s, cv2.CV_32F, 0, 1, ksize=3)
-        gmag = cv2.magnitude(gx, gy)
-        # Normalize gradient for thresholding
-        if np.any(gmag > 0):
-            gnorm = cv2.normalize(gmag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            # Otsu threshold to pick strong depth edges
-            _, depth_edge = cv2.threshold(gnorm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        else:
-            depth_edge = np.zeros_like(edges_bin)
 
-        # Combine image edges with depth edges and thicken to better seal regions
-        boundaries = cv2.bitwise_or(edges_bin, depth_edge)
-        edges_thick = cv2.dilate(boundaries, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=2)
-
-        # Valid fillable pixels: not an edge and have valid positive depth
-        valid = (edges_thick == 0) & (depth_map > 0)
-        if not np.any(valid):
-            return np.zeros((DISP_H, DISP_W, 3), dtype=np.uint8)
-
-        valid_u8 = (valid.astype(np.uint8) * 255)
-        # Remove tiny holes/gaps by closing before labeling
-        valid_u8 = cv2.morphologyEx(valid_u8, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=1)
-        # Connected components on valid regions
-        num_labels, labels = cv2.connectedComponents(valid_u8, connectivity=4)
-
-        h, w = depth_map.shape[:2]
         painted_depth = np.zeros((h, w), dtype=np.float32)
+        mode = int(mode or 0)
+        p = params or {}
 
-        # Compute mean depth per region; skip label 0 (background). Ignore tiny regions.
-        min_region_area = max(200, int(0.001 * h * w))
-        for label_id in range(1, num_labels):
-            mask = (labels == label_id)
-            area = int(mask.sum())
-            if area < min_region_area:
-                continue
-            dvals = depth_map[mask]
-            dvals = dvals[np.isfinite(dvals) & (dvals > 0)]
-            if dvals.size == 0:
-                continue
-            mean_depth = float(dvals.mean())
-            painted_depth[mask] = mean_depth
+        if mode == 0:
+            # KMeans clustering in (x,y,Z)
+            K = max(2, int(p.get("kmK", 4)))
+            spw = float(p.get("kmSpatialX100", 50)) / 100.0
+            ys, xs = np.mgrid[0:h, 0:w]
+            valid = depth > 0
+            if not np.any(valid):
+                return np.zeros((DISP_H, DISP_W, 3), dtype=np.uint8)
+            X = np.stack([xs[valid] * spw, ys[valid] * spw, depth[valid]], axis=1).astype(np.float32)
+            # kmeans
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+            attempts = 1
+            flags = cv2.KMEANS_PP_CENTERS
+            compactness, labels_km, centers = cv2.kmeans(X, K, None, criteria, attempts, flags)
+            labels_km = labels_km.reshape(-1)
+            painted_depth = np.zeros((h, w), dtype=np.float32)
+            idx = np.flatnonzero(valid)
+            for k in range(K):
+                mask_idx = idx[labels_km == k]
+                if mask_idx.size == 0:
+                    continue
+                mean_d = float(np.mean(depth.flat[mask_idx]))
+                painted_depth.flat[mask_idx] = mean_d
+
+        elif mode == 1:
+            # Region growing by depth difference threshold
+            tau = float(p.get("rgTau", 50))
+            step = max(4, int(p.get("rgSeedStep", 16)))
+            labels = -np.ones((h, w), dtype=np.int32)
+            cur_label = 0
+            for sy in range(0, h, step):
+                for sx in range(0, w, step):
+                    if labels[sy, sx] != -1 or depth[sy, sx] <= 0:
+                        continue
+                    cur_label += 1
+                    seed_val = depth[sy, sx]
+                    q = [(sy, sx)]
+                    labels[sy, sx] = cur_label
+                    acc = [seed_val]
+                    while q:
+                        y0, x0 = q.pop()
+                        for dy, dx in ((1,0),(-1,0),(0,1),(0,-1)):
+                            y1, x1 = y0 + dy, x0 + dx
+                            if y1 < 0 or y1 >= h or x1 < 0 or x1 >= w:
+                                continue
+                            if labels[y1, x1] != -1:
+                                continue
+                            dval = depth[y1, x1]
+                            if dval <= 0:
+                                continue
+                            if abs(dval - seed_val) <= tau:
+                                labels[y1, x1] = cur_label
+                                acc.append(dval)
+                                q.append((y1, x1))
+            painted_depth = np.zeros((h, w), dtype=np.float32)
+            for lid in range(1, cur_label + 1):
+                mask = labels == lid
+                if not np.any(mask):
+                    continue
+                mean_d = float(np.mean(depth[mask]))
+                painted_depth[mask] = mean_d
+
+        else:
+            # Watershed on depth gradient
+            sigma = int(p.get("wsSigma", 2))
+            min_area = int(p.get("wsMinArea", 800))
+            depth_s = cv2.GaussianBlur(depth, (max(1, 2*sigma+1), max(1, 2*sigma+1)), 0) if sigma > 0 else depth
+            gx = cv2.Sobel(depth_s, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(depth_s, cv2.CV_32F, 0, 1, ksize=3)
+            gmag = cv2.magnitude(gx, gy)
+            g8 = cv2.normalize(gmag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            # sure background as high gradient, sure foreground as eroded valid low gradient
+            _, edges_bin = cv2.threshold(g8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            valid = (depth > 0).astype(np.uint8) * 255
+            sure_fg = cv2.morphologyEx(valid, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)), iterations=1)
+            dist = cv2.distanceTransform(sure_fg, cv2.DIST_L2, 3)
+            _, markers = cv2.threshold(dist, 0.5 * dist.max(), 255, 0)
+            markers = markers.astype(np.uint8)
+            num, markers_cc = cv2.connectedComponents(markers)
+            markers_cc = markers_cc + 1
+            unknown = cv2.subtract(valid, sure_fg)
+            markers_cc[unknown == 255] = 0
+            # Need 3-channel image; use colorized gradient as placeholder
+            g3 = cv2.cvtColor(g8, cv2.COLOR_GRAY2BGR)
+            cv2.watershed(g3, markers_cc)
+            labels = markers_cc
+            painted_depth = np.zeros((h, w), dtype=np.float32)
+            for lid in np.unique(labels):
+                if lid <= 1:
+                    continue
+                mask = labels == lid
+                area = int(mask.sum())
+                if area < min_area:
+                    continue
+                dvals = depth[mask]
+                dvals = dvals[(dvals > 0) & np.isfinite(dvals)]
+                if dvals.size == 0:
+                    continue
+                painted_depth[mask] = float(np.mean(dvals))
 
         # Normalize and colorize like the main depth view
         if not np.any(painted_depth):
@@ -336,7 +418,13 @@ def main() -> None:
                 shown = True
             # Show painted depth view based on depth-derived edges (use same color window)
             if not paused and depth_vis.size:
-                painted = paint_depth_by_regions(edge_map, depth_vis, invert_colormap=True, norm_low=low, norm_high=high)
+                painted = paint_depth_by_regions(edge_map,
+                                                depth_vis,
+                                                invert_colormap=True,
+                                                norm_low=low,
+                                                norm_high=high,
+                                                mode=int(vision._profile_params.get("segMode", 0)),
+                                                params=vision._profile_params)
                 cv2.imshow("Painted depth", painted)
                 shown = True
             _mark("imshow")
