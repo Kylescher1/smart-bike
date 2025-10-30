@@ -152,6 +152,8 @@ def main() -> None:
             x0 = max(0, min(w0 - 1, x0))
             y0 = max(0, min(h0 - 1, y0))
             d = float(pause_depth[y0, x0])
+            d = d * 0.0254
+            d = 42.794 * (d ** -1.28)
             clicked_points.append((x, y, d))
             # Also print to console
             print(f"Clicked depth at ({x0},{y0}) -> {d:.3f}")
@@ -370,7 +372,7 @@ def main() -> None:
             _mark("edges")
 
             if not paused:
-                depth_vis = depth_result.depth_map
+                depth_vis = depth_result.disparity_map
                 depth_color = None
                 if depth_vis.size:
                     # Focused color mapping window based on sliders
