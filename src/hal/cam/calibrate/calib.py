@@ -4,7 +4,7 @@ import cv2
 
 def load_calibration(filename=None):
     if filename is None:
-        # this file is /home/radxa/smart-bike/src/hal/cam/calibrate/calib.py
+        # this file is /home/radxa/smart_bike/src/hal/cam/calibrate/calib.py
         base = os.path.dirname(__file__)
         filename = os.path.join(base, "data", "stereo_calib.npz")
 

@@ -1,5 +1,5 @@
 import sys
-sys.path.insert(1,'/home/radxa/smart-bike/src/hal')
+sys.path.insert(1,'/home/radxa/smart_bike/src/hal')
 import Camera
 
 # create and open a camera

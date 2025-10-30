@@ -39,7 +39,7 @@ The project follows a NASA-inspired multi-layered architecture with clear separa
 1. Clone the repository
 ```bash
 git clone https://github.com/yourusername/smart-bike.git
-cd smart-bike
+cd smart_bike
 ```
 
 2. Create a virtual environment
