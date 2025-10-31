@@ -1,89 +1,153 @@
-# src/hal/cam/Camera.py
+"""Camera I/O primitives for the Smart Bike vision pipeline.
+
+This module keeps the camera interaction surface very small and predictable:
+ - ``open_camera``/``close`` wrap ``cv2.VideoCapture`` lifecycle handling.
+ - ``grab_frame`` grabs the next frame without decoding so that stereo pairs can
+   be synchronised using ``Camera.grab_frame`` on both cameras before calling
+   ``retrieve_frame``.
+ - ``retrieve_frame`` decodes the last grabbed frame.
+ - ``save_frame`` persists a BGR frame to disk.
+
+The goal is to keep the low level camera contract crystal clear for the higher
+level pipeline components.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, Optional, Tuple
+
 import cv2
-from typing import Optional, Dict
+import numpy as np
+import copy
+try:
+    from src.hal.config import LEFT_INDEX, RIGHT_INDEX
+except Exception:
+    LEFT_INDEX, RIGHT_INDEX = 1, 3
 
-
-# Centralized configuration
-CAMERA_CONFIG: Dict[str, int | str] = {
+# Centralised configuration defaults – callers may override when instantiating
+# a ``Camera``.
+DEFAULT_CAMERA_CONFIG: Dict[str, int | str] = {
     "backend": cv2.CAP_V4L2,
     "width": 1024,
     "height": 768,
     "fps": 90,
-    "fourcc": "MJPG",  # string form for clarity
+    "fourcc": "MJPG",
 }
 
 
+def _ensure_open(cap: Optional[cv2.VideoCapture]) -> cv2.VideoCapture:
+    if cap is None or not cap.isOpened():
+        raise RuntimeError("Camera handle is not open. Call open_camera() first.")
+    return cap
+
+
+@dataclass
 class Camera:
-    def __init__(self, index: int, config: Dict[str, int | str] = CAMERA_CONFIG):
-        self.index = index
-        self.backend = config["backend"]
-        self.width = config["width"]
-        self.height = config["height"]
-        self.fps = config["fps"]
-        self.fourcc = config["fourcc"]
+    """Thin wrapper around cv2.VideoCapture with explicit lifecycle calls."""
+
+    index: int
+    config: Dict[str, int | str] = field(default_factory=lambda: copy.deepcopy(DEFAULT_CAMERA_CONFIG))
+    name: Optional[str] = None
+
+    def __post_init__(self) -> None:
         self.cap: Optional[cv2.VideoCapture] = None
 
-    def open(self):
-        self.cap = cv2.VideoCapture(self.index, self.backend)
+    # ------------------------------------------------------------------
+    # Lifecycle helpers
+    # ------------------------------------------------------------------
+    def open_camera(self) -> None:
+        """Open the camera with the configured backend and stream settings."""
+        if self.cap and self.cap.isOpened():
+            return
+
+        self.cap = cv2.VideoCapture(self.index, self.config["backend"])
         if not self.cap.isOpened():
-            raise RuntimeError(f"[Camera {self.index}] Failed to open.")
+            raise RuntimeError(f"Failed to open camera {self.index}.")
 
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+        # Apply stream configuration
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*str(self.config["fourcc"])) )
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.config["width"]))
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.config["height"]))
+        self.cap.set(cv2.CAP_PROP_FPS, int(self.config["fps"]))
 
-    def close(self):
+    def close_camera(self) -> None:
+        """Release the underlying ``cv2.VideoCapture`` handle."""
         if self.cap and self.cap.isOpened():
             self.cap.release()
+        self.cap = None
 
-    def read_frame(self):
-        if not self.cap or not self.cap.isOpened():
-            raise RuntimeError(f"[Camera {self.index}] Not open. Call open() first.")
-        ret, frame = self.cap.read()
-        return frame if ret else None
+    # ------------------------------------------------------------------
+    # Frame acquisition helpers
+    # ------------------------------------------------------------------
+    def grab_frame(self) -> bool:
+        """Grab the next frame without decoding it."""
+        cap = _ensure_open(self.cap)
+        return bool(cap.grab())
+
+    def retrieve_frame(self) -> Optional[np.ndarray]:
+        """Retrieve the frame that was previously grabbed."""
+        cap = _ensure_open(self.cap)
+        success, frame = cap.retrieve()
+        return frame if success else None
+
+    def get_frame(self) -> Optional[np.ndarray]:
+        """Convenience helper that performs a grab followed by retrieve."""
+        if not self.grab_frame():
+            return None
+        return self.retrieve_frame()
+
+    # ------------------------------------------------------------------
+    # Persistence helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def save_frame(frame: np.ndarray, path: str | Path) -> Path:
+        """Persist a BGR frame to ``path`` and return the ``Path`` instance."""
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(output_path), frame):
+            raise IOError(f"Failed to write frame to {output_path}")
+        return output_path
+
+    # ------------------------------------------------------------------
+    # Utility helpers
+    # ------------------------------------------------------------------
+    def is_open(self) -> bool:
+        return bool(self.cap and self.cap.isOpened())
+
+    def close(self) -> None:  # Backwards compatibility alias
+        self.close_camera()
 
 
-def open_stereo_pair(max_index: int = 10, config: Dict[str, int | str] = CAMERA_CONFIG):
-    """
-    Try all /dev/video indices up to `max_index` and open the first two that work.
-    Returns (left, right) Camera objects.
-    """
-    opened = []
-    for idx in range(max_index):
-        try:
-            cam = Camera(index=idx, config=config)
-            cam.open()
-            print(f"✅ Opened camera {idx}")
-            opened.append(cam)
-            if len(opened) == 2:
-                break
-        except RuntimeError:
-            pass
+def open_stereo_pair(
+    left_index: int = 1,
+    right_index: int = 3,
+    config: Dict[str, int | str] = DEFAULT_CAMERA_CONFIG,
+) -> Tuple[Camera, Camera]:
+    """Open a left/right stereo pair and return the camera handles."""
 
-    if len(opened) < 2:
-        for cam in opened:
-            cam.close()
-        raise RuntimeError("❌ Could not find two working cameras.")
-
-    return opened[0], opened[1]
+    left = Camera(index=left_index, config=config, name="left")
+    right = Camera(index=right_index, config=config, name="right")
+    left.open_camera()
+    right.open_camera()
+    return left, right
 
 
 if __name__ == "__main__":
+    left, right = open_stereo_pair(LEFT_INDEX, RIGHT_INDEX)
     try:
-        # Override config here if needed
-        stereo_config = CAMERA_CONFIG.copy()
-        stereo_config.update({"width": 1024, "height": 768, "fps": 90})
-
-        left, right = open_stereo_pair(config=stereo_config)
+        cv2.namedWindow("Left", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("Right", cv2.WINDOW_NORMAL)
         while True:
-            frameL = left.read_frame()
-            frameR = right.read_frame()
-            if frameL is not None:
-                cv2.imshow(f"Camera {left.index}", frameL)
-            if frameR is not None:
-                cv2.imshow(f"Camera {right.index}", frameR)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            lf = left.get_frame()
+            rf = right.get_frame()
+            if lf is not None:
+                cv2.putText(lf, "LEFT", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.imshow("Left", lf)
+            if rf is not None:
+                cv2.putText(rf, "RIGHT", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.imshow("Right", rf)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
     finally:
         left.close()

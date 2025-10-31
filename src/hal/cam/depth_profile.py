@@ -48,6 +48,7 @@ except Exception:
 # Project-specific imports (must exist in your environment)
 from src.hal.cam.calibrate.calib import load_calibration
 from src.hal.cam.Camera import open_stereo_pair
+from src.hal.config import LEFT_INDEX, RIGHT_INDEX, SWAP_LR, PROFILE_NAME
 
 
 # ---------------------------
@@ -72,6 +73,7 @@ DEFAULT_SETTINGS = {
     "crop": 0,
     "farEnhance": 50,
     "nearCutoff": 0,
+    "farCutoff": 0,
     "useMorph": 1,
     "morphIter": 1,
     "useBilateral": 1,
@@ -80,6 +82,13 @@ DEFAULT_SETTINGS = {
     "wlsLambda": 4000,
     "wlsSigma": 1.0,
     "profileName": "default"
+    ,"objectThresholdMM": 1500
+    ,"edgeEqualize": 1
+    ,"edgeBilateralD": 5
+    ,"edgeBilateralSigma": 60
+    ,"edgeCannyKLow": 0.66
+    ,"edgeCannyKHigh": 1.33
+    ,"edgeUseScharr": 1
 }
 
 # Global save queue for background saving
@@ -369,6 +378,12 @@ def post_filter_weak(disp: np.ndarray, s: dict) -> np.ndarray:
     if near_cut > 0:
         out[out > near_cut] = 0.0
 
+    # Cutoff for very far objects (low disparity)
+    far_cut = float(s.get("farCutoff", 0))
+    if far_cut > 0:
+        mask_valid = out > 0
+        out[(out < far_cut) & mask_valid] = 0.0
+
     # Remove isolated remnants by neighborhood tally
     mask = (out > 0).astype(np.uint8)
     kernel = np.ones((3, 3), np.uint8)
@@ -439,6 +454,7 @@ def create_tuner_window(params: dict) -> None:
 
     cv2.createTrackbar("farEnh", "Disparity Tuner", int(params["farEnhance"]), 200, nothing)
     cv2.createTrackbar("nearCut", "Disparity Tuner", int(params["nearCutoff"]), 200, nothing)
+    cv2.createTrackbar("farCut", "Disparity Tuner", int(params.get("farCutoff", 0)), 200, nothing)
 
     cv2.createTrackbar("downSample%", "Disparity Tuner", int(params.get("downSample", 100)), 100, nothing)
     cv2.createTrackbar("crop(px)", "Disparity Tuner", int(params.get("crop", 0)), 200, nothing)
@@ -467,6 +483,7 @@ def read_tuner_params() -> dict:
         "wlsSigma": cv2.getTrackbarPos("wlsSigmaX10", "Disparity Tuner") / 10.0,
         "farEnhance": cv2.getTrackbarPos("farEnh", "Disparity Tuner"),
         "nearCutoff": cv2.getTrackbarPos("nearCut", "Disparity Tuner"),
+        "farCutoff": cv2.getTrackbarPos("farCut", "Disparity Tuner"),
         "downSample": max(10, cv2.getTrackbarPos("downSample%", "Disparity Tuner")),
         "crop": cv2.getTrackbarPos("crop(px)", "Disparity Tuner"),
 
@@ -514,7 +531,7 @@ def run(args,
 
     # Load calibration and open cameras
     calib = load_calibration()
-    left_cam_raw, right_cam_raw = open_stereo_pair()
+    left_cam_raw, right_cam_raw = open_stereo_pair(LEFT_INDEX, RIGHT_INDEX)
     left_cam = ThreadedCamera(left_cam_raw)
     right_cam = ThreadedCamera(right_cam_raw)
 
@@ -536,13 +553,19 @@ def run(args,
     if args.profile:
         prof = load_profile(args.profile)
         if prof:
-            # same normalization for loaded profile
             if "numDisparitiesK" not in prof and "numDisparities" in prof:
                 prof["numDisparitiesK"] = prof.pop("numDisparities")
             params = prof
             print(f"Loaded profile: {args.profile}")
         else:
             print(f"Profile '{args.profile}' not found. Using last saved settings.")
+    else:
+        prof = load_profile(PROFILE_NAME)
+        if prof:
+            if "numDisparitiesK" not in prof and "numDisparities" in prof:
+                prof["numDisparitiesK"] = prof.pop("numDisparities")
+            params = prof
+            print(f"Loaded profile from config: {PROFILE_NAME}")
 
     # UI initialization (off by default)
     if tuner:
@@ -565,6 +588,9 @@ def run(args,
             if left is None or right is None:
                 time.sleep(0.001)
                 continue
+
+            if SWAP_LR:
+                left, right = right, left
 
             # Rectify full-resolution color
             rectL_color, rectR_color = rectify_pair(left, right, rect_cache)

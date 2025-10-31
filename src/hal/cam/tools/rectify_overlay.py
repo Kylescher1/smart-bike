@@ -1,9 +1,10 @@
-# src/hal/cam/rectify_overlay.py
+# src/hal/cam/tools/rectify_overlay.py
 import cv2
 import numpy as np
 import os
-from src.hal.cam.depth import load_calibration, rectify_pair
+from src.hal.cam.calibrate.calib import load_calibration
 from src.hal.cam.Camera import open_stereo_pair
+from src.hal.config import LEFT_INDEX, RIGHT_INDEX, SWAP_LR
 
 def draw_epilines(img, step=40):
     """Draw horizontal green lines every `step` pixels."""
@@ -20,18 +21,28 @@ def tint_red(img):
     red[:, :, 2] = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     return red
 
+def rectify_pair(left_frame, right_frame, calib):
+    """Rectify a stereo pair using calibration maps."""
+    left_map_x, left_map_y, right_map_x, right_map_y, _image_size, _Q = calib
+    rectL = cv2.remap(left_frame, left_map_x, left_map_y, cv2.INTER_LINEAR)
+    rectR = cv2.remap(right_frame, right_map_x, right_map_y, cv2.INTER_LINEAR)
+    return rectL, rectR
+
 def main():
     calib = load_calibration()
 
     # open stereo cameras
-    left_cam, right_cam = open_stereo_pair()
+    left_cam, right_cam = open_stereo_pair(LEFT_INDEX, RIGHT_INDEX)
 
     try:
         while True:
-            left_frame = left_cam.read_frame()
-            right_frame = right_cam.read_frame()
+            left_frame = left_cam.get_frame()
+            right_frame = right_cam.get_frame()
             if left_frame is None or right_frame is None:
                 continue
+
+            if SWAP_LR:
+                left_frame, right_frame = right_frame, left_frame
 
             rectL, rectR = rectify_pair(left_frame, right_frame, calib)
 
