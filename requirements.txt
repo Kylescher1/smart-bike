@@ -2,11 +2,13 @@
 numpy==1.24.3
 opencv-python==4.7.0.72
 scipy==1.10.1
+matplotlib  # For plotting and visualization (used by SpinningLidar)
 dill  # For serializing configuration and functions
 quaternion  # For quaternion math (used in sensor configuration) - install via: pip install numpy-quaternion
 
 # Sensor Interfaces
 pyserial==3.5  # For LIDAR and other serial devices
+rplidarc1  # For RPLidar C1 laser scanner
 smbus2==0.4.2  # I2C interface for IMU and TOF
 
 # Logging and Telemetry
