@@ -61,6 +61,17 @@ config = {
          },
 }
 
+config = {
+    "horizontal_lidar":
+        {
+            "port": "/dev/ttyUSB0",
+            "baudrate" : 460800,
+            "BUFFER_SIZE" : 600,
+            "position": np.quaternion(1, 0, 0, 0),#w,x,y,z
+            "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
+            "class": "src.hal.SpinningLidar.SpinningLidar",
+         },
+}
 
 #Check you have all reqired fields
 required_keys = {"class","port", "position", "z_direction"}

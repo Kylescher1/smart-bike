@@ -4,3 +4,10 @@ key
 key.pub
 
 *.png
+
+# Python virtual environment
+venv/
+env/
+ENV/
+.env
+.venv
