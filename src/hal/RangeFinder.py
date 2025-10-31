@@ -1,102 +1,166 @@
-# -*- coding: utf-8 -*-
-"""
-TF03 Time-of-Flight (TOF) Rangefinder Interface
-
-Provides object-oriented access to TF03 sensor over USB/Serial.
-"""
-
 import serial
 import time
+import threading
+from collections import deque
 from typing import Optional
-
 
 class RangeFinder:
     """
-    TF03 Time-of-Flight Rangefinder wrapper class.
-
-    Attributes:
-        port (str): Serial port (e.g. "/dev/ttyUSB0", "COM5").
-        baudrate (int): Serial baudrate (default: 115200).
+    TF03 Time-of-Flight Rangefinder interface.
+    Designed to be instanced and managed like SpinningLidar.
     """
 
     FRAME_HEADER = 0x59
     FRAME_LENGTH = 9
 
-    def __init__(self, port: str = "COM5", baudrate: int = 115200, timeout: float = 0.1):
-        self.port = port
-        self.baudrate = baudrate
-        self.timeout = timeout
+    def __init__(self, name="Unnamed RangeFinder", **kwargs):
+        """
+        Initialize the rangefinder with configurable settings.
+        Keyword args can include: port, baudrate, timeout, buffer_size
+        """
+        self.name = name
+        self.debug_mode = True
+
+        # Load configuration from kwargs
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+        # Required parameters
+        if "port" not in vars(self):
+            raise KeyError(f"Port not specified for {self.name}")
+        if "baudrate" not in vars(self):
+            raise KeyError(f"Baudrate not specified for {self.name}")
+
+        # Optional parameters
+        self.timeout = getattr(self, "timeout", 0.1)
+        self.buffer_size = getattr(self, "buffer_size", 1000)
+
+        # Internal state
         self.ser: Optional[serial.Serial] = None
+        self.connected = False
+        self.stop_event = threading.Event()
+        self.data_buffer = deque(maxlen=self.buffer_size)
+        self.data_thread: Optional[threading.Thread] = None
 
-    def open(self):
-        """Open the serial connection."""
-        if self.ser is None or not self.ser.is_open:
+    # -------------------------------------------------------------------------
+    # Connection Management
+    # -------------------------------------------------------------------------
+    def connect(self):
+        """Open serial connection and start data collection thread."""
+        print(f"{self.name}: Connecting to {self.port} at {self.baudrate}...")
+        try:
             self.ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
-        print(f"[TF03] Opened connection on {self.port} at {self.baudrate} baud")
+            time.sleep(1)
+            self.connected = True
+            self.stop_event.clear()
+            self.data_thread = threading.Thread(target=self._data_collector, daemon=True)
+            self.data_thread.start()
+            print(f"{self.name}: Connection successful.")
+        except Exception as e:
+            raise ConnectionError(f"{self.name}: Failed to connect ({e})")
 
-    def close(self):
-        """Close the serial connection."""
+    def disconnect(self):
+        """Stop data collection and close serial connection."""
+        if not self.connected:
+            return
+        print(f"{self.name}: Disconnecting...")
+        self.connected = False
+        self.stop_event.set()
+        if self.data_thread and self.data_thread.is_alive():
+            self.data_thread.join(timeout=2)
         if self.ser and self.ser.is_open:
             self.ser.close()
-            print("[TF03] Connection closed")
+        print(f"{self.name}: Disconnected.")
 
-    def read_frame(self) -> Optional[dict[str, float]]:
-        """
-        Read and parse a full TF03 data frame.
+    def start(self):
+        """Alias for connect()."""
+        self.connect()
 
-        Returns:
-            dict with distance (cm), signal_strength, and temperature (°C),
-            or None if frame not valid.
-        """
-        if not self.ser or not self.ser.is_open:
-            raise RuntimeError("Serial port not open. Call open() first.")
+    def stop(self):
+        """Alias for disconnect()."""
+        self.disconnect()
 
-        if self.ser.in_waiting >= self.FRAME_LENGTH:#Check we have at least the full frame of bytes
-            data = self.ser.read(self.FRAME_LENGTH)
-            self.ser.reset_input_buffer()#clear buffer for next frame
+    # -------------------------------------------------------------------------
+    # Data Collection
+    # -------------------------------------------------------------------------
+    def _data_collector(self):
+        """Background thread to continuously read frames from the rangefinder."""
+        print(f"{self.name}: Data collector started.")
+        while not self.stop_event.is_set():
+            frame = self._read_frame()
+            if frame:
+                frame["timestamp"] = time.time()
+                self.data_buffer.append(frame)
+            else:
+                time.sleep(0.01)  # prevent busy loop
+        print(f"{self.name}: Data collector stopped.")
 
-            # Validate frame header
-            if data[0] == self.FRAME_HEADER and data[1] == self.FRAME_HEADER:
-                # Compute checksum
-                checksum = sum(data[0:8]) & 0xFF #see data sheet for checksum
-                if checksum != data[8]:
-                    return None  # bad frame
+    def _read_frame(self) -> Optional[dict]:
+        """Low-level frame read and validation."""
+        try:
+            if not self.ser or not self.ser.is_open:
+                return None
 
-                distance = data[2] + (data[3] << 8)         # cm
-                signal_strength = data[4] + (data[5] << 8)
+            if self.ser.in_waiting >= self.FRAME_LENGTH:
+                data = self.ser.read(self.FRAME_LENGTH)
+                self.ser.reset_input_buffer()
 
-                return {
-                    "distance_cm": distance,
-                    "signal_strength": signal_strength,
-                }
-        else: #No Frame collected/building packet
-            return None
+                if data[0] == self.FRAME_HEADER and data[1] == self.FRAME_HEADER:
+                    checksum = sum(data[0:8]) & 0xFF
+                    if checksum != data[8]:
+                        return None
 
-    def debug_print_loop(self, delay: float = 0.05):
-        """
-        Continuously print sensor readings for debugging.
+                    distance = data[2] + (data[3] << 8)
+                    signal_strength = data[4] + (data[5] << 8)
 
-        Args:
-            delay (float): Delay between reads in seconds.
-        """
-        print("[TF03] Starting debug output (Ctrl+C to stop)")
+                    return {
+                        "distance_cm": distance,
+                        "signal_strength": signal_strength,
+                    }
+        except Exception as e:
+            if self.debug_mode:
+                print(f"{self.name}: Frame read error - {e}")
+        return None
+
+    def read(self):
+        """Return a copy of the most recent buffered readings."""
+        return list(self.data_buffer)
+
+    # -------------------------------------------------------------------------
+    # Debugging & Utilities
+    # -------------------------------------------------------------------------
+    def print_status(self):
+        print(f"[{self.name}] Port: {self.port}")
+        print(f"[{self.name}] Baudrate: {self.baudrate}")
+        print(f"[{self.name}] Connected: {self.connected}")
+        print(f"[{self.name}] Buffered Frames: {len(self.data_buffer)}")
+
+    def debug_print_loop(self, delay=0.1):
+        """Print continuous readings for debugging."""
+        print(f"{self.name}: Starting debug output (Ctrl+C to stop)")
         try:
             while True:
-                frame = self.read_frame()
-                if frame:
-                    print(
-                        f"Distance: {frame['distance_cm']} cm"
-                        f" @ "
-                        f"Signal: {frame['signal_strength']} "
-                    )
+                if self.data_buffer:
+                    frame = self.data_buffer[-1]
+                    print(f"Distance: {frame['distance_cm']} cm @ Signal: {frame['signal_strength']}")
                 time.sleep(delay)
         except KeyboardInterrupt:
-            print("\n[TF03] Debug loop stopped by user")
+            print(f"\n{self.name}: Debug loop stopped.")
         finally:
-            self.close()
+            self.disconnect()
 
+    def __repr__(self):
+        return f"<RangeFinder name={self.name}, port={self.port}, connected={self.connected}>"
 
+# -------------------------------------------------------------------------
+# Example usage
+# -------------------------------------------------------------------------
 if __name__ == "__main__":
-    sensor = RangeFinder(port="COM5")
-    sensor.open()
-    sensor.debug_print_loop()
+    rf = RangeFinder(name="FrontTF03", port="COM5", baudrate=115200)
+    rf.start()
+    try:
+        time.sleep(5)
+        rf.print_status()
+        print("Sample frames:", rf.read()[-3:])
+    finally:
+        rf.stop()
