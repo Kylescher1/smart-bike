@@ -2,6 +2,8 @@
 numpy==1.24.3
 opencv-python==4.7.0.72
 scipy==1.10.1
+dill  # For serializing configuration and functions
+quaternion  # For quaternion math (used in sensor configuration) - install via: pip install numpy-quaternion
 
 # Sensor Interfaces
 pyserial==3.5  # For LIDAR and other serial devices
