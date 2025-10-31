@@ -1,0 +1,18 @@
+import asyncio
+from rplidarc1 import RPLidar
+
+async def monitor_errors():
+    lidar = RPLidar("/dev/ttyUSB0", 256000)
+    total = errors = 0
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(lidar.simple_scan(make_return_dict=True))
+        while True:
+            data = await lidar.output_queue.get()
+            total += 1
+            if 'error' in data:  # if the library flags misalignment
+                errors += 1
+            if total % 500 == 0:
+                print(f"Errors: {errors} / {total}  ({errors/total*100:.4f}%)")
+    lidar.reset()
+
+asyncio.run(monitor_errors())
