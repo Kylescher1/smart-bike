@@ -1,95 +1,89 @@
-#!/usr/bin/env python3
+import serial
 import time
-from smbus2 import SMBus
+import re
+import csv
 
-# I2C addresses
-MPU_ADDR = 0x68
-AK8963_ADDR = 0x0C
+class MPU9250Serial:
+    def __init__(self, port="/dev/ttyUSB0", baudrate=115200, timeout=1, log_file="sensor_log.csv"):
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.ser = None
+        self.log_file = log_file
+        self.start_time = None
 
-# Registers
-PWR_MGMT_1 = 0x6B
-ACCEL_XOUT_H = 0x3B
-GYRO_XOUT_H = 0x43
-INT_PIN_CFG = 0x37  # Needed to access magnetometer
-AK8963_ST1 = 0x02
-AK8963_XOUT_L = 0x03
+    def connect(self):
+        try:
+            self.ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
+            time.sleep(2)
+            print(f"Connected to {self.port}")
+        except serial.SerialException as e:
+            print(f"Failed to connect: {e}")
+            self.ser = None
 
-# Select your Rock Pi I2C bus (usually /dev/i2c-7)
-I2C_BUS = 7
+    def disconnect(self):
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+            print("Disconnected.")
 
-def read_word(bus, addr, reg):
-    high = bus.read_byte_data(addr, reg)
-    low = bus.read_byte_data(addr, reg + 1)
-    val = (high << 8) | low
-    if val & 0x8000:
-        val = -((65535 - val) + 1)
-    return val
+    def read_data(self):
+        if not self.ser or not self.ser.is_open:
+            return None
 
-def init_mpu(bus):
-    # Wake up MPU
-    bus.write_byte_data(MPU_ADDR, PWR_MGMT_1, 0x00)
-    time.sleep(0.1)
+        try:
+            line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+        except Exception:
+            return None
 
-    # Configure accelerometer ±2g
-    bus.write_byte_data(MPU_ADDR, 0x1C, 0x00)
+        if not line:
+            return None
 
-    # Configure gyro ±250 °/s
-    bus.write_byte_data(MPU_ADDR, 0x1B, 0x00)
+        match = re.match(
+            r"Accel\s*\(g\):\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\s*\|\s*Gyro\s*\(°/s\):\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)",
+            line
+        )
 
-    # Enable bypass mode so master can access magnetometer
-    bus.write_byte_data(MPU_ADDR, INT_PIN_CFG, 0x02)
-    time.sleep(0.1)
+        if match:
+            ax, ay, az, gx, gy, gz = map(float, match.groups())
+            return {"ax": ax, "ay": ay, "az": az, "gx": gx, "gy": gy, "gz": gz}
+        return None
 
-    # Configure AK8963 (magnetometer)
-    try:
-        bus.write_byte_data(AK8963_ADDR, 0x0A, 0x16)  # 16-bit, continuous measurement mode 2
-    except OSError:
-        print("⚠️  Magnetometer not responding — continuing without it.")
+    def log_data(self, duration_s=10):
+        """Logs data at ~1 kHz for the specified duration in seconds."""
+        if not self.ser or not self.ser.is_open:
+            print("Serial not connected.")
+            return
 
-def read_mpu(bus):
-    # Accelerometer
-    ax = read_word(bus, MPU_ADDR, 0x3B)
-    ay = read_word(bus, MPU_ADDR, 0x3D)
-    az = read_word(bus, MPU_ADDR, 0x3F)
+        self.start_time = time.time()
+        end_time = self.start_time + duration_s
+        sample_interval = 1.0 / 1000.0  # 1 kHz
 
-    # Gyroscope
-    gx = read_word(bus, MPU_ADDR, 0x43)
-    gy = read_word(bus, MPU_ADDR, 0x45)
-    gz = read_word(bus, MPU_ADDR, 0x47)
+        with open(self.log_file, mode="w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Time(s)", "Ax(g)", "Ay(g)", "Az(g)", "Gx(°/s)", "Gy(°/s)", "Gz(°/s)"])
 
-    # Magnetometer
-    mx = my = mz = 0
-    try:
-        st1 = bus.read_byte_data(AK8963_ADDR, AK8963_ST1)
-        if st1 & 0x01:
-            data = bus.read_i2c_block_data(AK8963_ADDR, AK8963_XOUT_L, 7)
-            mx = (data[1] << 8) | data[0]
-            my = (data[3] << 8) | data[2]
-            mz = (data[5] << 8) | data[4]
-            # Convert to signed
-            if mx >= 32768: mx -= 65536
-            if my >= 32768: my -= 65536
-            if mz >= 32768: mz -= 65536
-    except OSError:
-        pass
+            next_sample_time = self.start_time
+            while time.time() < end_time:
+                data = self.read_data()
+                if data:
+                    timestamp = time.time() - self.start_time
+                    writer.writerow([
+                        f"{timestamp:.6f}",
+                        data["ax"], data["ay"], data["az"],
+                        data["gx"], data["gy"], data["gz"]
+                    ])
+                next_sample_time += sample_interval
+                sleep_time = next_sample_time - time.time()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
-    return (ax, ay, az, gx, gy, gz, mx, my, mz)
+        print(f"Logging complete. Saved to {self.log_file}")
 
-def main():
-    with SMBus(I2C_BUS) as bus:
-        print(f"Initializing MPU-9250 on I2C bus {I2C_BUS}...")
-        init_mpu(bus)
-        print("Ready! Press Ctrl+C to stop.\n")
-
-        while True:
-            ax, ay, az, gx, gy, gz, mx, my, mz = read_mpu(bus)
-            print(f"ACCEL[g]: {ax:6d} {ay:6d} {az:6d} | "
-                  f"GYRO[dps]: {gx:6d} {gy:6d} {gz:6d} | "
-                  f"MAG: {mx:6d} {my:6d} {mz:6d}")
-            time.sleep(0.1)
 
 if __name__ == "__main__":
+    sensor = MPU9250Serial()
+    sensor.connect()
     try:
-        main()
-    except KeyboardInterrupt:
-        print("\nStopped.")
+        sensor.log_data(duration_s=1000)  # change duration as needed
+    finally:
+        sensor.disconnect()
