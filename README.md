@@ -29,9 +29,11 @@ The project follows a NASA-inspired multi-layered architecture with clear separa
 
 ### Prerequisites
 
-- Python 3.9+
-- OpenCV
-- NumPy
+- Python 3.9+ (tested with Python 3.11)
+- OpenCV 4.7+
+- NumPy 1.24+
+- pyserial (for LIDAR and serial devices)
+- smbus2 (for I2C communication)
 - ZeroMQ (optional, for pub/sub)
 
 ### Installation
@@ -42,21 +44,110 @@ git clone https://github.com/yourusername/smart-bike.git
 cd smart-bike
 ```
 
-2. Create a virtual environment
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+2. Create and activate a virtual environment
+
+   **On Linux/Mac:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate
+   ```
+
+   **On Windows:**
+   ```bash
+   python -m venv venv
+   venv\Scripts\activate
+   ```
+
+   You should see `(venv)` prefix in your terminal prompt when the virtual environment is active.
 
 3. Install dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
+4. Verify installation
+```bash
+python --version  # Should show Python 3.9 or higher
+pip list           # Verify packages from requirements.txt are installed
+```
+
+### Development Setup
+
+#### Virtual Environment Management
+
+**Activating the virtual environment:**
+- **Linux/Mac**: `source venv/bin/activate`
+- **Windows**: `venv\Scripts\activate`
+
+**Deactivating the virtual environment:**
+```bash
+deactivate
+```
+
+**Important:** Always activate the virtual environment before running any Python scripts or installing packages.
+
+#### Development Notes
+
+- Python cache files (`.pyc` and `__pycache__/`) are automatically ignored via `.gitignore`
+- The project structure follows standard Python conventions with hardware abstraction layers and sensor interfaces
+- All Python scripts should be run with the virtual environment activated to ensure correct dependency versions
+
 ### Running the System
 
+#### Using main.py (Vision Pipeline)
+
+The `main.py` script is the primary entry point for the Smart Bike vision pipeline. It initializes the stereo camera system and provides an interactive disparity tuning interface.
+
+**Before running, ensure:**
+- Virtual environment is activated (see Installation step 2)
+- Dependencies are installed (see Installation step 3)
+- Stereo cameras are connected and calibrated
+
+**To run:**
 ```bash
+# Make sure virtual environment is activated
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Run the vision pipeline
+python main.py
+```
+
+**Features:**
+- Live disparity map visualization
+- Interactive parameter tuning via trackbars
+- Real-time stereo depth processing
+- Press `Ctrl+C` to stop the system
+
+**Tuning Windows:**
+- **Disparity Tuner**: Core stereo matching parameters (blockSize, numDisparities, etc.)
+- **Viz/Seg Tuner**: Visualization and segmentation parameters
+
+#### Alternative Entry Points
+
+```bash
+# Full Smart Bike system
 python src/apps/run_smart_bike.py
+
+# Camera development/testing
+python src/apps/camera_dev.py
+```
+
+### Project Structure
+
+```
+smart-bike/
+├── src/
+│   ├── apps/              # Application entry points
+│   │   ├── run_smart_bike.py
+│   │   └── camera_dev.py
+│   ├── hal/               # Hardware Abstraction Layer
+│   │   ├── cam/           # Camera interfaces and tools
+│   │   ├── MPU6250.py     # IMU interface
+│   │   └── SpinningLidar.py # LIDAR interface
+│   └── Debug Tools/       # Development utilities
+├── data/                  # Calibration data and depth maps
+├── requirements.txt       # Python dependencies
+└── README.md
 ```
 
 ### Development Status
@@ -77,6 +168,13 @@ python src/apps/run_smart_bike.py
 - **DEGRADED**: Reduced sensor input
 - **SAFE**: Emergency halt
 - **SHUTDOWN**: Orderly system stop
+
+### Development Notes
+
+- Python cache files (`.pyc` and `__pycache__/`) are ignored by git
+- The project uses a layered architecture for maintainability and testability
+- Sensor calibration data is stored in `data/` directory
+- Debug tools are available in `src/Debug Tools/` for hardware diagnostics
 
 ### Contributing
 
