@@ -132,14 +132,66 @@ python src/apps/run_smart_bike.py
 python src/apps/camera_dev.py
 ```
 
+#### ESP32 WiFi Bridge
+
+The ESP32 bridge allows remote visualization of camera, depth map, and LIDAR data via a web browser. The ESP32 acts as a WiFi Access Point and web server.
+
+**Setup:**
+
+1. **Flash ESP32 firmware** (see `esp32/README.md` for detailed instructions):
+   - Install Arduino IDE with ESP32 board support
+   - Install required libraries (WebSockets, ArduinoJson)
+   - Upload `esp32/smart_bike_bridge.ino` to your ESP32
+
+2. **Connect to ESP32 WiFi network**:
+   - SSID: `SmartBike_AP`
+   - Password: `smartbike123` (default, change in firmware)
+
+3. **Start the bridge on ROCK Pi**:
+   ```bash
+   # Make sure virtual environment is activated
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   
+   # Run the ESP32 bridge
+   python src/esp32_bridge.py
+   ```
+
+4. **Open visualization dashboard**:
+   - Navigate to `http://192.168.4.1` in your web browser
+   - Dashboard displays:
+     - Live camera stream
+     - Real-time depth map
+     - LIDAR scan visualization
+
+**Bridge Options:**
+```bash
+# Customize ESP32 IP and ports
+python src/esp32_bridge.py --esp32-ip 192.168.4.1 --esp32-port 80
+
+# Adjust frame rates
+python src/esp32_bridge.py --camera-fps 5 --depth-fps 5 --lidar-fps 2
+
+# Run without LIDAR
+python src/esp32_bridge.py --no-lidar
+
+# Custom LIDAR port
+python src/esp32_bridge.py --lidar-port /dev/ttyUSB0 --lidar-baudrate 256000
+```
+
+See `esp32/README.md` for complete setup instructions and troubleshooting.
+
 ### Project Structure
 
 ```
 smart-bike/
+├── esp32/                 # ESP32 firmware and documentation
+│   ├── smart_bike_bridge.ino  # ESP32 Arduino code
+│   └── README.md          # ESP32 setup instructions
 ├── src/
 │   ├── apps/              # Application entry points
 │   │   ├── run_smart_bike.py
 │   │   └── camera_dev.py
+│   ├── esp32_bridge.py    # ROCK Pi to ESP32 bridge script
 │   ├── hal/               # Hardware Abstraction Layer
 │   │   ├── cam/           # Camera interfaces and tools
 │   │   ├── MPU6250.py     # IMU interface
