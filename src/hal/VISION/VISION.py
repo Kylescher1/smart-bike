@@ -431,7 +431,7 @@ class VISION:
         self.Q = Q
         
         # Create a deep copy of the camera config to preserve all existing settings
-        updated_camera_config = copy.deepcopy(self.camera)
+        updated_camera_config = {}
         
         # Update calibration maps in the nested structure
         updated_camera_config["left"]["map_x"] = leftMapX
@@ -461,9 +461,7 @@ class VISION:
         # Return dictionary in format expected by Calibrate.py
         # Note: dict.update() does shallow merge, so we return the complete config
         # to preserve all existing settings (minDisparity, numDisparitiesK, etc.)
-        return {
-            self.name: updated_camera_config
-        }
+        return {self.name: updated_camera_config}
     
     def __repr__(self):
         return f"<VISION name={self.name}, left_port={self.left_port}, right_port={self.right_port}, connected={self.connected}>"
