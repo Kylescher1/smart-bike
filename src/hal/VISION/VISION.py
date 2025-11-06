@@ -310,30 +310,12 @@ class VISION:
                     print("⚠️ Failed to grab one or both frames. Retrying...")
                     continue
                 
-                # Convert to grayscale for checkerboard detection
-                gray_left = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
-                gray_right = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
-                
-                # Try to find checkerboard in both images
-                retL, cornersL = cv2.findChessboardCorners(gray_left, CHECKERBOARD, None)
-                retR, cornersR = cv2.findChessboardCorners(gray_right, CHECKERBOARD, None)
-                
-                # Draw checkerboard corners if found
-                display_left = left_frame.copy()
-                display_right = right_frame.copy()
-                if retL:
-                    cv2.drawChessboardCorners(display_left, CHECKERBOARD, cornersL, retL)
-                if retR:
-                    cv2.drawChessboardCorners(display_right, CHECKERBOARD, cornersR, retR)
-                
-                # Resize for display
-                preview_left = cv2.resize(display_left, (800, 600))
-                preview_right = cv2.resize(display_right, (800, 600))
+                # Resize for display (no live detection to avoid lag)
+                preview_left = cv2.resize(left_frame, (800, 600))
+                preview_right = cv2.resize(right_frame, (800, 600))
                 
                 # Add status text
                 status_text = f"Pairs captured: {len(captured_pairs)}/{min_pairs}"
-                if retL and retR:
-                    status_text += " [Checkerboard detected!]"
                 cv2.putText(preview_left, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(preview_right, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 
@@ -346,6 +328,13 @@ class VISION:
                     print(f"\n✅ Finished capturing. Total pairs captured: {len(captured_pairs)}")
                     break
                 elif key == ord("s"):
+                    # Only detect checkerboard when capturing (not on every frame)
+                    gray_left = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
+                    gray_right = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
+                    
+                    retL, cornersL = cv2.findChessboardCorners(gray_left, CHECKERBOARD, None)
+                    retR, cornersR = cv2.findChessboardCorners(gray_right, CHECKERBOARD, None)
+                    
                     if retL and retR:
                         # Refine corners
                         cornersL_refined = cv2.cornerSubPix(gray_left, cornersL, (11, 11), (-1, -1), criteria)
@@ -399,7 +388,8 @@ class VISION:
         print("\n--- Stereo Calibration (Fisheye) ---")
         
         # Fisheye stereo calibration
-        rms, K1, D1, K2, D2, R, T = cv2.fisheye.stereoCalibrate(
+        # Returns: retval, K1, D1, K2, D2, R, T, rvecs, tvecs
+        rms, K1, D1, K2, D2, R, T, rvecs, tvecs = cv2.fisheye.stereoCalibrate(
             objpoints,
             imgpointsL,
             imgpointsR,
@@ -452,6 +442,21 @@ class VISION:
         # Update shared calibration data at camera level
         updated_camera_config["imageSize"] = tuple(img_shape)
         updated_camera_config["Q"] = Q
+        
+        # Save all calibration parameters for future use/debugging
+        updated_camera_config["calibration"] = {
+            "K1": K1,  # Left camera intrinsic matrix
+            "D1": D1,  # Left camera distortion coefficients
+            "K2": K2,  # Right camera intrinsic matrix
+            "D2": D2,  # Right camera distortion coefficients
+            "R": R,    # Rotation matrix between cameras
+            "T": T,    # Translation vector between cameras
+            "R1": R1,  # Left rectification rotation matrix
+            "R2": R2,  # Right rectification rotation matrix
+            "P1": P1,  # Left projection matrix
+            "P2": P2,  # Right projection matrix
+            "rms": rms,  # RMS reprojection error
+        }
         
         # Return dictionary in format expected by Calibrate.py
         # Note: dict.update() does shallow merge, so we return the complete config
