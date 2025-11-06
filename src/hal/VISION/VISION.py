@@ -1,9 +1,10 @@
-import os
 import cv2
 import numpy as np
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, Dict
+import os
+import glob
+import dill
 
 from ..cam.Camera import Camera, CAMERA_CONFIG
 
@@ -53,49 +54,30 @@ class VISION:
         self.right_position = right_cfg.get('position', None)
         self.right_z_direction = right_cfg.get('z_direction', None)
         
-        # Default calibration file path
-        self.calibration_file = getattr(
-            self, 
-            'calibration_file', 
-            Path(__file__).resolve().parent.parent / "cam" / "calibrate" / "data" / "stereo_calib.npz"
-        )
+        # Extract calibration maps from camera.left and camera.right
+        # Maps are stored as map_x and map_y under each camera
+        self.leftMapX = left_cfg.get('map_x', None)
+        self.leftMapY = left_cfg.get('map_y', None)
+        self.rightMapX = right_cfg.get('map_x', None)
+        self.rightMapY = right_cfg.get('map_y', None)
+        
+        # Extract shared calibration data (imageSize and Q) from camera level
+        # These are set via kwargs unpacking, but we can also get them from camera config
+        if not hasattr(self, 'imageSize'):
+            self.imageSize = kwargs.get('imageSize', None)
+        if not hasattr(self, 'Q'):
+            self.Q = kwargs.get('Q', None)
         
         # Initialize camera objects
         self.left_camera: Optional[Camera] = None
         self.right_camera: Optional[Camera] = None
         
         # Depth processing components (initialized in start())
-        self.left_map_x = None
-        self.left_map_y = None
-        self.right_map_x = None
-        self.right_map_y = None
-        self.image_size = None
-        self.Q = None
+        # Calibration maps are already set via kwargs (leftMapX, leftMapY, rightMapX, rightMapY, imageSize, Q)
         self.stereo = None
         
         # Runtime state
         self.connected = False
-    
-    def _load_calibration(self, filename=None):
-        """
-        Load calibration data from file.
-        Copied from src/hal/cam/calibrate/calib.py
-        """
-        if filename is None:
-            filename = self.calibration_file
-        
-        if not os.path.exists(filename):
-            raise FileNotFoundError(f"Calibration file not found: {filename}")
-        
-        data = np.load(filename, allow_pickle=True)
-        return (
-            data["leftMapX"],
-            data["leftMapY"],
-            data["rightMapX"],
-            data["rightMapY"],
-            tuple(data["imageSize"]),
-            data["Q"],
-        )
     
     def start(self):
         """Open cameras and initialize depth processor."""
@@ -122,34 +104,32 @@ class VISION:
             self.left_camera.close()
             raise RuntimeError(f"{self.name}: Failed to open right camera: {e}")
         
-        # Load calibration data
-        try:
-            (
-                self.left_map_x,
-                self.left_map_y,
-                self.right_map_x,
-                self.right_map_y,
-                self.image_size,
-                self.Q,
-            ) = self._load_calibration()
-            print(f"{self.name}: Calibration data loaded from {self.calibration_file}")
-        except Exception as e:
+        # Validate calibration maps are present (they should be unpacked from kwargs)
+        required_calib = ['leftMapX', 'leftMapY', 'rightMapX', 'rightMapY', 'imageSize', 'Q']
+        missing = [key for key in required_calib if not hasattr(self, key)]
+        if missing:
             self.left_camera.close()
             self.right_camera.close()
-            raise RuntimeError(f"{self.name}: Failed to load calibration: {e}")
+            raise RuntimeError(f"{self.name}: Missing calibration data: {missing}")
         
-        # Initialize stereo matcher
-        block_size = 5
+        # Calibration maps are already set via kwargs unpacking
+        # Use them directly (they're stored as leftMapX, leftMapY, etc.)
+        print(f"{self.name}: Calibration data loaded from config")
+        
+        # Initialize stereo matcher using config settings
+        block_size = self.blockSize
         block_size = block_size if block_size % 2 == 1 else block_size + 1
+        num_disparities = max(16, 16 * self.numDisparitiesK)
+        
         self.stereo = cv2.StereoSGBM_create(
-            minDisparity=0,
-            numDisparities=max(16, 16 * 5),  # 80 disparities
+            minDisparity=self.minDisparity,
+            numDisparities=num_disparities,
             blockSize=max(3, block_size),
-            preFilterCap=31,
-            uniquenessRatio=10,
-            speckleWindowSize=100,
-            speckleRange=32,
-            disp12MaxDiff=1,
+            preFilterCap=self.preFilterCap,
+            uniquenessRatio=self.uniquenessRatio,
+            speckleWindowSize=self.speckleWindowSize,
+            speckleRange=self.speckleRange,
+            disp12MaxDiff=self.disp12MaxDiff,
             mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
         )
         
@@ -171,13 +151,7 @@ class VISION:
             self.right_camera.close()
             self.right_camera = None
         
-        # Clear calibration data
-        self.left_map_x = None
-        self.left_map_y = None
-        self.right_map_x = None
-        self.right_map_y = None
-        self.image_size = None
-        self.Q = None
+        # Clear stereo matcher (calibration maps remain as they're from config)
         self.stereo = None
         
         self.connected = False
@@ -185,11 +159,11 @@ class VISION:
     
     def _rectify(self, left_frame: np.ndarray, right_frame: np.ndarray):
         """Rectify stereo pair using calibration maps."""
-        if self.left_map_x is None or self.left_map_y is None:
+        if not hasattr(self, 'leftMapX') or self.leftMapX is None:
             raise RuntimeError("Calibration data not loaded. Call start() first.")
         
-        rect_left = cv2.remap(left_frame, self.left_map_x, self.left_map_y, cv2.INTER_LINEAR)
-        rect_right = cv2.remap(right_frame, self.right_map_x, self.right_map_y, cv2.INTER_LINEAR)
+        rect_left = cv2.remap(left_frame, self.leftMapX, self.leftMapY, cv2.INTER_LINEAR)
+        rect_right = cv2.remap(right_frame, self.rightMapX, self.rightMapY, cv2.INTER_LINEAR)
         return rect_left, rect_right
     
     def _compute_disparity(self, left_rect: np.ndarray, right_rect: np.ndarray):
@@ -205,7 +179,7 @@ class VISION:
     
     def _disparity_to_depth(self, disparity: np.ndarray):
         """Convert disparity map to depth map using Q matrix."""
-        if self.Q is None:
+        if not hasattr(self, 'Q') or self.Q is None:
             raise RuntimeError("Calibration Q matrix not loaded. Call start() first.")
         
         points = cv2.reprojectImageTo3D(disparity, self.Q)
@@ -223,8 +197,8 @@ class VISION:
                 'depth_map': np.ndarray,
                 'metadata': {
                     'timestamp': str,
-                    'calibration_file': str,
-                    'num_disparities': int
+                    'num_disparities': int,
+                    'profileName': str
                 }
             }
         """
@@ -240,7 +214,6 @@ class VISION:
                 'depth_map': np.array([]),
                 'metadata': {
                     'timestamp': datetime.now().isoformat(),
-                    'calibration_file': str(self.calibration_file),
                     'num_disparities': 0,
                     'error': 'Failed to capture frames'
                 }
@@ -260,8 +233,8 @@ class VISION:
             # Prepare metadata
             metadata = {
                 'timestamp': datetime.now().isoformat(),
-                'calibration_file': str(self.calibration_file),
                 'num_disparities': int(self.stereo.getNumDisparities()) if self.stereo else 0,
+                'profileName': self.profileName,
             }
             
             return {
@@ -275,11 +248,168 @@ class VISION:
                 'depth_map': np.array([]),
                 'metadata': {
                     'timestamp': datetime.now().isoformat(),
-                    'calibration_file': str(self.calibration_file),
                     'num_disparities': 0,
                     'error': str(e)
                 }
             }
+    
+    def calibrate(self, stereo_pairs_dir: Optional[str] = None, checkerboard=(7, 10), square_size=20.0):
+        """
+        Perform stereo calibration and update config.dill with rectification maps.
+        
+        Args:
+            stereo_pairs_dir: Directory containing stereo pair images (left_*.png, right_*.png).
+                            If None, uses default calibration pairs directory.
+            checkerboard: Tuple of (cols, rows) for checkerboard pattern
+            square_size: Size of checkerboard squares in mm
+        """
+        # Import calibration constants
+        CHECKERBOARD = checkerboard
+        SQUARE_SIZE = square_size
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 150, 1e-6)
+        
+        # Determine pairs directory
+        if stereo_pairs_dir is None:
+            # Use default calibration pairs directory
+            current_dir = os.path.dirname(__file__)
+            project_root = os.path.abspath(os.path.join(current_dir, "..", "..", ".."))
+            stereo_pairs_dir = os.path.join(project_root, "src", "hal", "cam", "calibrate", "stereo_pairs")
+        
+        if not os.path.exists(stereo_pairs_dir):
+            raise RuntimeError(f"Stereo pairs directory not found: {stereo_pairs_dir}")
+        
+        # Load calibration pairs
+        left_images = sorted(glob.glob(os.path.join(stereo_pairs_dir, "left_*.png")))
+        right_images = sorted(glob.glob(os.path.join(stereo_pairs_dir, "right_*.png")))
+        
+        if len(left_images) != len(right_images):
+            raise RuntimeError(f"Mismatch in number of left ({len(left_images)}) and right ({len(right_images)}) images")
+        
+        if len(left_images) < 5:
+            raise RuntimeError(f"Need at least 5 stereo pairs, found {len(left_images)}")
+        
+        # Prepare object points
+        objp = np.zeros((1, CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
+        objp[0, :, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
+        objp *= SQUARE_SIZE
+        
+        objpoints, imgpointsL, imgpointsR = [], [], []
+        
+        # Process each pair
+        for left_img, right_img in zip(left_images, right_images):
+            imgL = cv2.imread(left_img, cv2.IMREAD_GRAYSCALE)
+            imgR = cv2.imread(right_img, cv2.IMREAD_GRAYSCALE)
+            
+            if imgL is None or imgR is None:
+                print(f"⚠️ Could not read {os.path.basename(left_img)} or {os.path.basename(right_img)}")
+                continue
+            
+            retL, cornersL = cv2.findChessboardCorners(imgL, CHECKERBOARD, None)
+            retR, cornersR = cv2.findChessboardCorners(imgR, CHECKERBOARD, None)
+            
+            if retL and retR:
+                cornersL = cv2.cornerSubPix(imgL, cornersL, (11, 11), (-1, -1), criteria)
+                cornersR = cv2.cornerSubPix(imgR, cornersR, (11, 11), (-1, -1), criteria)
+                
+                objpoints.append(objp)
+                imgpointsL.append(cornersL.reshape(1, -1, 2))
+                imgpointsR.append(cornersR.reshape(1, -1, 2))
+        
+        N_OK = len(objpoints)
+        print(f"✅ Using {N_OK} valid pairs for calibration")
+        
+        if N_OK < 5:
+            raise RuntimeError(f"Not enough valid pairs ({N_OK}). Need at least 5.")
+        
+        img_shape = imgL.shape[::-1]
+        
+        # Initialize intrinsics
+        K1 = np.eye(3)
+        D1 = np.zeros((4, 1))
+        K2 = np.eye(3)
+        D2 = np.zeros((4, 1))
+        
+        print("\n--- Stereo Calibration (Fisheye) ---")
+        
+        # Fisheye stereo calibration
+        rms, K1, D1, K2, D2, R, T = cv2.fisheye.stereoCalibrate(
+            objpoints,
+            imgpointsL,
+            imgpointsR,
+            K1, D1, K2, D2,
+            img_shape,
+            criteria=criteria,
+            flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC
+        )
+        
+        print(f"RMS reprojection error: {rms:.4f}")
+        
+        # Stereo rectification (fisheye)
+        R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(
+            K1, D1, K2, D2,
+            img_shape, R, T,
+            flags=cv2.CALIB_ZERO_DISPARITY,
+            balance=0.0,
+            fov_scale=1.2
+        )
+        
+        # Generate rectification maps
+        leftMapX, leftMapY = cv2.fisheye.initUndistortRectifyMap(
+            K1, D1, R1, P1, img_shape, cv2.CV_32FC1
+        )
+        rightMapX, rightMapY = cv2.fisheye.initUndistortRectifyMap(
+            K2, D2, R2, P2, img_shape, cv2.CV_32FC1
+        )
+        
+        # Update config.dill with new calibration maps
+        # Find project root (where config.dill is located)
+        current_dir = os.path.dirname(__file__)
+        project_root = os.path.abspath(os.path.join(current_dir, "..", "..", ".."))
+        config_path = os.path.join(project_root, "config.dill")
+        
+        # Load existing config
+        if os.path.exists(config_path):
+            with open(config_path, "rb") as f:
+                config = dill.load(f)
+        else:
+            raise RuntimeError(f"config.dill not found at {config_path}")
+        
+        # Update camera config with new calibration maps
+        if "camera" in config:
+            # Update maps under each camera
+            if "left" in config["camera"]:
+                config["camera"]["left"]["map_x"] = leftMapX
+                config["camera"]["left"]["map_y"] = leftMapY
+            else:
+                raise RuntimeError("camera.left not found in config.dill")
+            
+            if "right" in config["camera"]:
+                config["camera"]["right"]["map_x"] = rightMapX
+                config["camera"]["right"]["map_y"] = rightMapY
+            else:
+                raise RuntimeError("camera.right not found in config.dill")
+            
+            # Update shared calibration data at camera level
+            config["camera"]["imageSize"] = tuple(img_shape)
+            config["camera"]["Q"] = Q
+        else:
+            raise RuntimeError("Camera config not found in config.dill")
+        
+        # Save updated config
+        with open(config_path, "wb") as f:
+            dill.dump(config, f)
+        
+        print(f"\n💾 Updated config.dill with new calibration maps")
+        print(f"   Maps shape: {leftMapX.shape}")
+        print(f"   Image size: {img_shape}")
+        
+        # Update instance attributes
+        self.leftMapX = leftMapX
+        self.leftMapY = leftMapY
+        self.rightMapX = rightMapX
+        self.rightMapY = rightMapY
+        self.imageSize = tuple(img_shape)
+        self.Q = Q
     
     def __repr__(self):
         return f"<VISION name={self.name}, left_port={self.left_port}, right_port={self.right_port}, connected={self.connected}>"

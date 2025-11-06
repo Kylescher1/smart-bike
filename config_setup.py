@@ -3,6 +3,7 @@ import quaternion
 import numpy as np
 import time
 
+
 #EXAMPLE  of FEATURES
 examp = {
     "name": "Damian",
@@ -79,15 +80,59 @@ config = {
                     "port": 1,
                     "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
                     "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
+                    "map_x": None,  # Placeholder - will be set by calibration (leftMapX)
+                    "map_y": None,  # Placeholder - will be set by calibration (leftMapY)
                 },
             "right":
                 {
                     "port": 3,
                     "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
                     "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
+                    "map_x": None,  # Placeholder - will be set by calibration (rightMapX)
+                    "map_y": None,  # Placeholder - will be set by calibration (rightMapY)
                 },
             "class": "src.hal.VISION.VISION",
-            
+            "minDisparity": 0,
+            "numDisparitiesK": 2,
+            "blockSize": 11,
+            "preFilterCap": 43,
+            "uniquenessRatio": 1,
+            "speckleWindowSize": 196,
+            "speckleRange": 34,
+            "disp12MaxDiff": 18,
+            "medianBlurK": 0,
+            "downSample": 57,
+            "crop": 128,
+            "farEnhance": 27,
+            "nearCutoff": 72,
+            "farCutoff": 5,
+            "useMorph": 1,
+            "morphIter": 5,
+            "useBilateral": 0,
+            "bilateralStrength": 20,
+            "useWLS": 1,
+            "wlsLambda": 2389,
+            "wlsSigma": 2.1,
+            "profileName": "CDR",
+            "objectThresholdMM": 1095,
+            "edgeEqualize": 1,
+            "edgeBilateralD": 13,
+            "edgeBilateralSigma": 200,
+            "edgeCannyKLow": 3.0,
+            "edgeCannyKHigh": 4.0,
+            "edgeUseScharr": 1,
+            "numDisparities": 4,
+            "colorFocusMM": 10612,
+            "colorSpanMM": 17800,
+            "segMode": 0,
+            "kmK": 4,
+            "kmSpatialX100": 50,
+            "rgTau": 50,
+            "rgSeedStep": 16,
+            "wsSigma": 2,
+            "wsMinArea": 800,
+            "imageSize": None,  # Placeholder - will be set by calibration (shared between cameras)
+            "Q": None,  # Placeholder - will be set by calibration (shared between cameras)
         },
 }
 
