@@ -64,15 +64,6 @@ config = {
 }
 
 config = {
-    "arduino_breakout":
-        {
-            "port": "/dev/ttyUSB0",
-            "baudrate": 115200,
-            "BUFFER_SIZE": 200,
-            "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
-            "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
-            "class": "src.hal.MPU6250.MPU6250",
-        },
     "camera":
         {
             "left":
@@ -91,7 +82,7 @@ config = {
                     "map_x": None,  # Placeholder - will be set by calibration (rightMapX)
                     "map_y": None,  # Placeholder - will be set by calibration (rightMapY)
                 },
-            "class": "src.hal.VISION.VISION",
+            "class": "src.hal.VISION.VISION.VISION",
             "minDisparity": 0,
             "numDisparitiesK": 2,
             "blockSize": 11,

@@ -20,9 +20,19 @@ class VISION:
         """
         Initialize VISION instance.
         Supports nested config structure: camera.left and camera.right
+        Also supports flat structure where left/right are at top level
         """
         self.name = name
         self.debug_mode = True
+        
+        # Handle config structure: if left/right are at top level, nest them under camera
+        if 'left' in kwargs and 'right' in kwargs and 'camera' not in kwargs:
+            left_cfg = kwargs.pop('left')
+            right_cfg = kwargs.pop('right')
+            kwargs['camera'] = {
+                'left': left_cfg,
+                'right': right_cfg
+            }
         
         # Load user-provided configuration (following MPU6250 pattern)
         for k, v in kwargs.items():
