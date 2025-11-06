@@ -6,6 +6,7 @@ import matplotlib.animation as animation
 from rplidarc1 import RPLidar
 import asyncio
 from collections import deque
+from datetime import datetime
 import matplotlib.cm as cm  # Import colormap module
 
 import serial  # optional, for real lidar connection
@@ -77,6 +78,10 @@ class SpinningLidar:
     def stop(self):
         self.disconnect()
 
+    def calibrate(self):
+        print(f"Damian needs to make calibration actually do something for {self.name}")
+        settings = {"Last_cal":datetime.now()}
+        return settings
     # -------------------------------------------------------------------------
     # Data acquisition
     # -------------------------------------------------------------------------

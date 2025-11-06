@@ -4,6 +4,7 @@ import threading
 import re
 import csv
 from collections import deque
+from datetime import datetime
 
 class MPU6250:
     def __init__(self, name="Unnamed IMU", **kwargs):
@@ -72,6 +73,10 @@ class MPU6250:
         """Alias for disconnect()."""
         self.disconnect()
 
+    def calibrate(self):
+        print(f"Damian needs to make calibration actually do something for {self.name}")
+        settings = {"Last_cal":datetime.now()}
+        return settings
     # -------------------------------------------------------------------------
     # Data Collection
     # -------------------------------------------------------------------------

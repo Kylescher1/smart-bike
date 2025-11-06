@@ -3,6 +3,10 @@ import time
 import threading
 from collections import deque
 from typing import Optional
+from datetime import datetime
+
+from dill import settings
+
 
 class RangeFinder:
     """
@@ -125,7 +129,10 @@ class RangeFinder:
     def read(self):
         """Return a copy of the most recent buffered readings."""
         return list(self.data_buffer)
-
+    def calibrate(self):
+        print(f"Damian needs to make calibration actually do something for {self.name}")
+        settings = {"Last_cal":datetime.now()}
+        return settings
     # -------------------------------------------------------------------------
     # Debugging & Utilities
     # -------------------------------------------------------------------------
