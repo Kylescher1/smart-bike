@@ -254,44 +254,111 @@ class VISION:
                 }
             }
     
-    def calibrate(self, stereo_pairs_dir: Optional[str] = None, checkerboard=(7, 10), square_size=20.0):
+    def calibrate(self, checkerboard=(7, 10), square_size=20.0, min_pairs=5):
         """
-        Perform stereo calibration and return updated config dictionary.
+        Perform stereo calibration by capturing images from cameras and return updated config dictionary.
         
         Args:
-            stereo_pairs_dir: Directory containing stereo pair images (left_*.png, right_*.png).
-                            If None, uses default calibration pairs directory.
             checkerboard: Tuple of (cols, rows) for checkerboard pattern
             square_size: Size of checkerboard squares in mm
+            min_pairs: Minimum number of valid stereo pairs required for calibration
         
         Returns:
             dict: Dictionary with updated calibration data in the format expected by Calibrate.py.
                   Structure: {self.name: {"left": {...}, "right": {...}, "imageSize": ..., "Q": ...}}
         """
+        # Ensure cameras are started
+        if not self.connected:
+            print(f"{self.name}: Starting cameras for calibration...")
+            self.start()
+        
         # Import calibration constants
         CHECKERBOARD = checkerboard
         SQUARE_SIZE = square_size
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 150, 1e-6)
         
-        # Determine pairs directory
-        if stereo_pairs_dir is None:
-            # Use default calibration pairs directory
-            current_dir = os.path.dirname(__file__)
-            project_root = os.path.abspath(os.path.join(current_dir, "..", "..", ".."))
-            stereo_pairs_dir = os.path.join(project_root, "src", "hal", "cam", "calibrate", "stereo_pairs")
+        print("\n" + "="*60)
+        print("STEREO CALIBRATION - IMAGE CAPTURE")
+        print("="*60)
+        print("Instructions:")
+        print("  - Press 's' to capture a stereo pair")
+        print("  - Press 'q' to finish capturing and proceed with calibration")
+        print(f"  - You need at least {min_pairs} valid pairs with detected checkerboards")
+        print("="*60 + "\n")
         
-        if not os.path.exists(stereo_pairs_dir):
-            raise RuntimeError(f"Stereo pairs directory not found: {stereo_pairs_dir}")
+        # Capture stereo pairs interactively
+        captured_pairs = []
+        pair_count = 0
         
-        # Load calibration pairs
-        left_images = sorted(glob.glob(os.path.join(stereo_pairs_dir, "left_*.png")))
-        right_images = sorted(glob.glob(os.path.join(stereo_pairs_dir, "right_*.png")))
+        try:
+            while True:
+                # Capture frames
+                left_frame = self.left_camera.read_frame()
+                right_frame = self.right_camera.read_frame()
+                
+                if left_frame is None or right_frame is None:
+                    print("⚠️ Failed to grab one or both frames. Retrying...")
+                    continue
+                
+                # Convert to grayscale for checkerboard detection
+                gray_left = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
+                gray_right = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
+                
+                # Try to find checkerboard in both images
+                retL, cornersL = cv2.findChessboardCorners(gray_left, CHECKERBOARD, None)
+                retR, cornersR = cv2.findChessboardCorners(gray_right, CHECKERBOARD, None)
+                
+                # Draw checkerboard corners if found
+                display_left = left_frame.copy()
+                display_right = right_frame.copy()
+                if retL:
+                    cv2.drawChessboardCorners(display_left, CHECKERBOARD, cornersL, retL)
+                if retR:
+                    cv2.drawChessboardCorners(display_right, CHECKERBOARD, cornersR, retR)
+                
+                # Resize for display
+                preview_left = cv2.resize(display_left, (800, 600))
+                preview_right = cv2.resize(display_right, (800, 600))
+                
+                # Add status text
+                status_text = f"Pairs captured: {len(captured_pairs)}/{min_pairs}"
+                if retL and retR:
+                    status_text += " [Checkerboard detected!]"
+                cv2.putText(preview_left, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(preview_right, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                cv2.imshow("Left Camera - Press 's' to capture, 'q' to finish", preview_left)
+                cv2.imshow("Right Camera - Press 's' to capture, 'q' to finish", preview_right)
+                
+                key = cv2.waitKey(1) & 0xFF
+                
+                if key == ord("q"):
+                    print(f"\n✅ Finished capturing. Total pairs captured: {len(captured_pairs)}")
+                    break
+                elif key == ord("s"):
+                    if retL and retR:
+                        # Refine corners
+                        cornersL_refined = cv2.cornerSubPix(gray_left, cornersL, (11, 11), (-1, -1), criteria)
+                        cornersR_refined = cv2.cornerSubPix(gray_right, cornersR, (11, 11), (-1, -1), criteria)
+                        
+                        captured_pairs.append((gray_left.copy(), gray_right.copy(), cornersL_refined, cornersR_refined))
+                        print(f"✅ Captured pair {len(captured_pairs)}: Checkerboard detected in both images")
+                    else:
+                        print(f"⚠️ Pair {pair_count + 1}: Checkerboard not detected in both images. Skipping...")
+                    pair_count += 1
         
-        if len(left_images) != len(right_images):
-            raise RuntimeError(f"Mismatch in number of left ({len(left_images)}) and right ({len(right_images)}) images")
+        except KeyboardInterrupt:
+            print("\n⚠️ Capture interrupted by user")
+        finally:
+            cv2.destroyAllWindows()
         
-        if len(left_images) < 5:
-            raise RuntimeError(f"Need at least 5 stereo pairs, found {len(left_images)}")
+        if len(captured_pairs) < min_pairs:
+            raise RuntimeError(f"Not enough valid pairs captured ({len(captured_pairs)}). Need at least {min_pairs}.")
+        
+        print(f"\n📸 Processing {len(captured_pairs)} captured stereo pairs...")
+        
+        # Get image shape from first pair
+        img_shape = captured_pairs[0][0].shape[::-1]
         
         # Prepare object points
         objp = np.zeros((1, CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
@@ -300,33 +367,18 @@ class VISION:
         
         objpoints, imgpointsL, imgpointsR = [], [], []
         
-        # Process each pair
-        for left_img, right_img in zip(left_images, right_images):
-            imgL = cv2.imread(left_img, cv2.IMREAD_GRAYSCALE)
-            imgR = cv2.imread(right_img, cv2.IMREAD_GRAYSCALE)
-            
-            if imgL is None or imgR is None:
-                print(f"⚠️ Could not read {os.path.basename(left_img)} or {os.path.basename(right_img)}")
-                continue
-            
-            retL, cornersL = cv2.findChessboardCorners(imgL, CHECKERBOARD, None)
-            retR, cornersR = cv2.findChessboardCorners(imgR, CHECKERBOARD, None)
-            
-            if retL and retR:
-                cornersL = cv2.cornerSubPix(imgL, cornersL, (11, 11), (-1, -1), criteria)
-                cornersR = cv2.cornerSubPix(imgR, cornersR, (11, 11), (-1, -1), criteria)
-                
-                objpoints.append(objp)
-                imgpointsL.append(cornersL.reshape(1, -1, 2))
-                imgpointsR.append(cornersR.reshape(1, -1, 2))
+        # Process captured pairs
+        for i, (imgL, imgR, cornersL, cornersR) in enumerate(captured_pairs):
+            objpoints.append(objp)
+            imgpointsL.append(cornersL.reshape(1, -1, 2))
+            imgpointsR.append(cornersR.reshape(1, -1, 2))
+            print(f"  ✓ Processed pair {i+1}/{len(captured_pairs)}")
         
         N_OK = len(objpoints)
         print(f"✅ Using {N_OK} valid pairs for calibration")
         
-        if N_OK < 5:
-            raise RuntimeError(f"Not enough valid pairs ({N_OK}). Need at least 5.")
-        
-        img_shape = imgL.shape[::-1]
+        if N_OK < min_pairs:
+            raise RuntimeError(f"Not enough valid pairs ({N_OK}). Need at least {min_pairs}.")
         
         # Initialize intrinsics
         K1 = np.eye(3)
