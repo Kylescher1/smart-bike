@@ -5,6 +5,7 @@ from typing import Optional, Dict
 import os
 import glob
 import dill
+import copy
 
 from ..cam.Camera import Camera, CAMERA_CONFIG
 
@@ -255,13 +256,17 @@ class VISION:
     
     def calibrate(self, stereo_pairs_dir: Optional[str] = None, checkerboard=(7, 10), square_size=20.0):
         """
-        Perform stereo calibration and update config.dill with rectification maps.
+        Perform stereo calibration and return updated config dictionary.
         
         Args:
             stereo_pairs_dir: Directory containing stereo pair images (left_*.png, right_*.png).
                             If None, uses default calibration pairs directory.
             checkerboard: Tuple of (cols, rows) for checkerboard pattern
             square_size: Size of checkerboard squares in mm
+        
+        Returns:
+            dict: Dictionary with updated calibration data in the format expected by Calibrate.py.
+                  Structure: {self.name: {"left": {...}, "right": {...}, "imageSize": ..., "Q": ...}}
         """
         # Import calibration constants
         CHECKERBOARD = checkerboard
@@ -361,45 +366,7 @@ class VISION:
             K2, D2, R2, P2, img_shape, cv2.CV_32FC1
         )
         
-        # Update config.dill with new calibration maps
-        # Find project root (where config.dill is located)
-        current_dir = os.path.dirname(__file__)
-        project_root = os.path.abspath(os.path.join(current_dir, "..", "..", ".."))
-        config_path = os.path.join(project_root, "config.dill")
-        
-        # Load existing config
-        if os.path.exists(config_path):
-            with open(config_path, "rb") as f:
-                config = dill.load(f)
-        else:
-            raise RuntimeError(f"config.dill not found at {config_path}")
-        
-        # Update camera config with new calibration maps
-        if "camera" in config:
-            # Update maps under each camera
-            if "left" in config["camera"]:
-                config["camera"]["left"]["map_x"] = leftMapX
-                config["camera"]["left"]["map_y"] = leftMapY
-            else:
-                raise RuntimeError("camera.left not found in config.dill")
-            
-            if "right" in config["camera"]:
-                config["camera"]["right"]["map_x"] = rightMapX
-                config["camera"]["right"]["map_y"] = rightMapY
-            else:
-                raise RuntimeError("camera.right not found in config.dill")
-            
-            # Update shared calibration data at camera level
-            config["camera"]["imageSize"] = tuple(img_shape)
-            config["camera"]["Q"] = Q
-        else:
-            raise RuntimeError("Camera config not found in config.dill")
-        
-        # Save updated config
-        with open(config_path, "wb") as f:
-            dill.dump(config, f)
-        
-        print(f"\n💾 Updated config.dill with new calibration maps")
+        print(f"\n💾 Calibration complete")
         print(f"   Maps shape: {leftMapX.shape}")
         print(f"   Image size: {img_shape}")
         
@@ -410,6 +377,26 @@ class VISION:
         self.rightMapY = rightMapY
         self.imageSize = tuple(img_shape)
         self.Q = Q
+        
+        # Create a deep copy of the camera config to preserve all existing settings
+        updated_camera_config = copy.deepcopy(self.camera)
+        
+        # Update calibration maps in the nested structure
+        updated_camera_config["left"]["map_x"] = leftMapX
+        updated_camera_config["left"]["map_y"] = leftMapY
+        updated_camera_config["right"]["map_x"] = rightMapX
+        updated_camera_config["right"]["map_y"] = rightMapY
+        
+        # Update shared calibration data at camera level
+        updated_camera_config["imageSize"] = tuple(img_shape)
+        updated_camera_config["Q"] = Q
+        
+        # Return dictionary in format expected by Calibrate.py
+        # Note: dict.update() does shallow merge, so we return the complete config
+        # to preserve all existing settings (minDisparity, numDisparitiesK, etc.)
+        return {
+            self.name: updated_camera_config
+        }
     
     def __repr__(self):
         return f"<VISION name={self.name}, left_port={self.left_port}, right_port={self.right_port}, connected={self.connected}>"
