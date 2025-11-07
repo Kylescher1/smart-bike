@@ -214,14 +214,17 @@ class VISION:
         return f"<VISION name={self.name}, left_port={self.left['port']}, right_port={self.right['port']}, connected={self.connected}>"
 
     def _refresh_depth_processor(self):
+
+        #check if left and right are in the config
         if not hasattr(self, 'left') or not hasattr(self, 'right'):
             self.depth_processor = None
             return
-
+        #check if stereo is in the config
         if self.stereo is None:
             self.depth_processor = None
             return
-
+        
+        # Recreate the depth processor so it always uses the latest stereo matcher and calibration maps.
         self.depth_processor = DepthProcessor(
             self.left,
             self.right,
