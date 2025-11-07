@@ -132,7 +132,7 @@ config = {
             # Color segmentation
             "colorFocusMM": 10612,
             "colorSpanMM": 17800,
-            "segMode": 0,
+            "segMode": 0, #1-3 
             "kmK": 4,
             "kmSpatialX100": 50,
             "rgTau": 50,
