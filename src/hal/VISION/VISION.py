@@ -193,7 +193,7 @@ class VISION:
                 }
             }
     
-    def calibrate(self, checkerboard=(7, 10), square_size=20.0, min_pairs=5):
+    def calibrate(self, checkerboard=(7, 10), square_size=20.0, min_pairs=10):
         """
         Perform stereo calibration by capturing images from cameras and return updated config dictionary.
         

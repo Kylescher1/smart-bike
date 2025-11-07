@@ -25,6 +25,7 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
 
     captured_pairs: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
     pair_count = 0
+    frame_count = 0  # Track frames for visualization frequency
 
     try:
         while True:
@@ -37,6 +38,34 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
 
             preview_left = cv2.resize(left_frame, (800, 600))
             preview_right = cv2.resize(right_frame, (800, 600))
+
+            # Every 5 frames, try to detect and draw checkerboard pattern
+            if frame_count % 5 == 0:
+                gray_left_viz = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
+                gray_right_viz = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
+                
+                retL_viz, cornersL_viz = cv2.findChessboardCorners(gray_left_viz, CHECKERBOARD, None)
+                retR_viz, cornersR_viz = cv2.findChessboardCorners(gray_right_viz, CHECKERBOARD, None)
+                
+                # Draw checkerboard corners on the preview frames
+                if retL_viz:
+                    # Scale corners to preview resolution
+                    scale_x = 800 / left_frame.shape[1]
+                    scale_y = 600 / left_frame.shape[0]
+                    cornersL_scaled = cornersL_viz.copy()
+                    cornersL_scaled[:, :, 0] *= scale_x
+                    cornersL_scaled[:, :, 1] *= scale_y
+                    cv2.drawChessboardCorners(preview_left, CHECKERBOARD, cornersL_scaled, retL_viz)
+                
+                if retR_viz:
+                    scale_x = 800 / right_frame.shape[1]
+                    scale_y = 600 / right_frame.shape[0]
+                    cornersR_scaled = cornersR_viz.copy()
+                    cornersR_scaled[:, :, 0] *= scale_x
+                    cornersR_scaled[:, :, 1] *= scale_y
+                    cv2.drawChessboardCorners(preview_right, CHECKERBOARD, cornersR_scaled, retR_viz)
+
+            frame_count += 1
 
             status_text = f"Pairs captured: {len(captured_pairs)}/{min_pairs}"
             cv2.putText(preview_left, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
