@@ -173,8 +173,7 @@ class VISION:
                 'depth_map': np.ndarray,
                 'metadata': {
                     'timestamp': str,
-                    'num_disparities': int,
-                    'profileName': str
+                    'num_disparities': int
                 }
             }
         """
@@ -210,7 +209,6 @@ class VISION:
             metadata = {
                 'timestamp': datetime.now().isoformat(),
                 'num_disparities': int(self.stereo.getNumDisparities()) if self.stereo else 0,
-                'profileName': self.profileName,
             }
             
             return {
