@@ -40,7 +40,7 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
             preview_right = cv2.resize(right_frame, (800, 600))
 
             # Every 5 frames, try to detect and draw checkerboard pattern
-            if frame_count % 5 == 0:
+            if frame_count % 1 == 0:
                 gray_left_viz = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
                 gray_right_viz = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
                 

@@ -210,6 +210,67 @@ class VISION:
         self._refresh_depth_processor()
         return result
     
+    def debug(self):
+        """
+        Debug mode that continuously displays the depth map.
+        Press 'q' to quit the debug view.
+        """
+        if not self.connected:
+            print(f"{self.name}: Cannot start debug mode. Vision system not connected. Call start() first.")
+            return
+        
+        print(f"{self.name}: Starting debug mode - displaying depth map...")
+        print(f"{self.name}: Press 'q' to exit debug mode")
+        
+        window_name = f"{self.name} - Depth Map Debug"
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        
+        try:
+            while True:
+                # Get depth data
+                result = self.read()
+                depth_map = result.get('depth_map')
+                metadata = result.get('metadata', {})
+                
+                # Check for errors
+                if 'error' in metadata:
+                    print(f"{self.name}: Error in debug mode: {metadata['error']}")
+                    continue
+                
+                if depth_map is None or depth_map.size == 0:
+                    print(f"{self.name}: No depth data available")
+                    continue
+                
+                # Normalize depth map for visualization (0-255 range)
+                depth_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
+                depth_display = depth_normalized.astype(np.uint8)
+                
+                # Apply colormap for better visualization
+                depth_colored = cv2.applyColorMap(depth_display, cv2.COLORMAP_JET)
+                
+                # Add metadata text overlay
+                timestamp = metadata.get('timestamp', 'N/A')
+                num_disp = metadata.get('num_disparities', 'N/A')
+                cv2.putText(depth_colored, f"Timestamp: {timestamp}", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(depth_colored, f"Num Disparities: {num_disp}", (10, 60), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                
+                # Display the depth map
+                cv2.imshow(window_name, depth_colored)
+                
+                # Check for quit key
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+                    
+        except KeyboardInterrupt:
+            print(f"\n{self.name}: Debug mode interrupted by user")
+        except Exception as e:
+            print(f"{self.name}: Error in debug mode: {e}")
+        finally:
+            cv2.destroyWindow(window_name)
+            print(f"{self.name}: Debug mode ended")
+    
     def __repr__(self):
         return f"<VISION name={self.name}, left_port={self.left['port']}, right_port={self.right['port']}, connected={self.connected}>"
 
