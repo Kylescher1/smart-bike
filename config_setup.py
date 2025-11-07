@@ -142,6 +142,15 @@ config = {
             "imageSize": None,  # Set by calibration
             "Q": None,  # Set by calibration
         },
+    "RangeFinder":
+        {
+            "port": "COM5",
+            "baudrate" : 115200,
+            "BUFFER_SIZE" : 200,
+            "position": np.quaternion(1, 0, 0, 0),#w,x,y,z
+            "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
+            "who_to_run": "src.hal.RangeFinder.RangeFinder",
+         },
 }
 
 #Check you have all reqired fields

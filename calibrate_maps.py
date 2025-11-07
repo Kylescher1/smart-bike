@@ -1,7 +1,13 @@
 import cv2
 import numpy as np
 from typing import List, Tuple
+import dill
+import quaternion
+import sys, os
+import importlib.util
+import Calibrate
 
+config_path = r"config.dill"
 
 def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5):
     """Perform stereo calibration using the active cameras on the provided vision instance."""
@@ -43,10 +49,10 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
             if frame_count % 1 == 0:
                 gray_left_viz = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
                 gray_right_viz = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
-                
+
                 retL_viz, cornersL_viz = cv2.findChessboardCorners(gray_left_viz, CHECKERBOARD, None)
                 retR_viz, cornersR_viz = cv2.findChessboardCorners(gray_right_viz, CHECKERBOARD, None)
-                
+
                 # Draw checkerboard corners on the preview frames
                 if retL_viz:
                     # Scale corners to preview resolution
@@ -56,7 +62,7 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
                     cornersL_scaled[:, :, 0] *= scale_x
                     cornersL_scaled[:, :, 1] *= scale_y
                     cv2.drawChessboardCorners(preview_left, CHECKERBOARD, cornersL_scaled, retL_viz)
-                
+
                 if retR_viz:
                     scale_x = 800 / right_frame.shape[1]
                     scale_y = 600 / right_frame.shape[0]
@@ -161,16 +167,51 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
         fov_scale=1.2,
     )
 
-    vision.left["map_x"], vision.left["map_y"] = cv2.fisheye.initUndistortRectifyMap(
+    try: #Load in dill settings
+        with open(config_path, "rb") as f:
+            current_dill = dill.load(f)
+    except:
+        raise RuntimeError(f"No config dill FOUND!: {e}")
+
+    camera_settings = current_dill['camera'] #just camera
+
+
+    #modify values we care abt to locations in dill (not dynamic cause Kyle_scher is evil)
+    camera_settings["left"]["map_x"], camera_settings["left"]["map_y"] = cv2.fisheye.initUndistortRectifyMap(
         K1, D1, R1, P1, vision.img_shape, cv2.CV_32FC1
     )
-    vision.right["map_x"], vision.right["map_y"] = cv2.fisheye.initUndistortRectifyMap(
+    camera_settings["left"]["map_y"], camera_settings["right"]["map_y"] = cv2.fisheye.initUndistortRectifyMap(
         K2, D2, R2, P2, vision.img_shape, cv2.CV_32FC1
     )
+
+    #assign Q new value
+    camera_settings["Q"] = vision.Q
 
     print(f"\n💾 Calibration complete")
     print(f"   Maps shape: {vision.left['map_x'].shape}")
     print(f"   Image size: {vision.img_shape}")
 
-    return {vision.name: vars(vision)}
 
+
+
+
+
+    return camera_settings
+
+if __name__ == "__main__":
+    # Load condfig
+    print("Loading Config...")
+    try:
+        with open(config_path, "rb") as f:
+            config = dill.load(f)
+        for k,v in config.items():
+            print(k,v)
+        print("Loaded whole Dill")
+        config = {'camera':config['camera']}
+        print("Loaded Camera Config")
+        for k, v in config.items():
+            print(f"Device: {k} | Properties: {v}")
+    except Exception as e:
+        raise KeyError(f"An unexpected error occurred Loading config.dill: {e}")
+
+    Calibrate.main(config)

@@ -9,7 +9,7 @@ import copy
 
 from ..cam.Camera import Camera, CAMERA_CONFIG
 from .depth_processing import DepthProcessor
-from .calibration import run_calibration
+# from .calibration import run_calibration
 
 
 class VISION:
@@ -194,21 +194,23 @@ class VISION:
             }
     
     def calibrate(self, checkerboard=(7, 10), square_size=20.0, min_pairs=10):
-        """
-        Perform stereo calibration by capturing images from cameras and return updated config dictionary.
-        
-        Args:
-            checkerboard: Tuple of (cols, rows) for checkerboard pattern
-            square_size: Size of checkerboard squares in mm
-            min_pairs: Minimum number of valid stereo pairs required for calibration
-        
-        Returns:
-            dict: Dictionary with updated calibration data in the format expected by Calibrate.py.
-                  Structure: {self.name: {"left": {...}, "right": {...}, "imageSize": ..., "Q": ...}}
-        """
-        result = run_calibration(self, checkerboard=checkerboard, square_size=square_size, min_pairs=min_pairs)
-        self._refresh_depth_processor()
-        return result
+        print("VISION/calibrate.py has been deprecated I hate kyle")
+        return {}
+        # """
+        # Perform stereo calibration by capturing images from cameras and return updated config dictionary.
+        #
+        # Args:
+        #     checkerboard: Tuple of (cols, rows) for checkerboard pattern
+        #     square_size: Size of checkerboard squares in mm
+        #     min_pairs: Minimum number of valid stereo pairs required for calibration
+        #
+        # Returns:
+        #     dict: Dictionary with updated calibration data in the format expected by Calibrate.py.
+        #           Structure: {self.name: {"left": {...}, "right": {...}, "imageSize": ..., "Q": ...}}
+        # """
+        # result = run_calibration(self, checkerboard=checkerboard, square_size=square_size, min_pairs=min_pairs)
+        # self._refresh_depth_processor()
+        # return result
     
     def debug(self):
         """

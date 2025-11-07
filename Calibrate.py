@@ -35,19 +35,7 @@ def instantiate_sensors(config):
         sensors[name] = sensor
     return sensors
 
-def main():
-
-    #Load condfig
-    print("Loading Config...")
-    try:
-        with open("config.dill", "rb") as f:
-            config = dill.load(f)
-        print("Loaded Config")
-        for k, v in config.items():
-            print(f"Device: {k} | Properties: {v}")
-    except Exception as e:
-        raise KeyError(f"An unexpected error occurred Loading config.dill: {e}")
-
+def main(config):
     print("==="*20)
     print("Enabling Sensors...")
     try:
@@ -77,4 +65,15 @@ def main():
             sensor.stop()
 
 if __name__ == "__main__":
-    main()
+    # Load condfig
+    print("Loading Config...")
+    try:
+        with open("config.dill", "rb") as f:
+            config = dill.load(f)
+        print("Loaded Config")
+        for k, v in config.items():
+            print(f"Device: {k} | Properties: {v}")
+    except Exception as e:
+        raise KeyError(f"An unexpected error occurred Loading config.dill: {e}")
+
+    main(config)
