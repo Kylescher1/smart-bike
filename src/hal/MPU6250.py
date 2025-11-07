@@ -77,6 +77,9 @@ class MPU6250:
         print(f"Damian needs to make calibration actually do something for {self.name}")
         settings = {"Last_cal":datetime.now()}
         return settings
+    def debug(self):
+        print(f"Damian needs to make debug actually do something for {self.name}")
+
     # -------------------------------------------------------------------------
     # Data Collection
     # -------------------------------------------------------------------------
