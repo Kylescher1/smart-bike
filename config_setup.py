@@ -83,36 +83,53 @@ config = {
                     "map_y": None,  # Placeholder - will be set by calibration (rightMapY)
                 },
             "who_to_run": "src.hal.VISION.VISION.VISION",
+
+            # Stereo block matcher core parameters
             "minDisparity": 0,
             "numDisparitiesK": 2,
+            "numDisparities": 4,
             "blockSize": 11,
             "preFilterCap": 43,
             "uniquenessRatio": 1,
             "speckleWindowSize": 196,
             "speckleRange": 34,
             "disp12MaxDiff": 18,
+
+            # Pre-processing & scaling
             "medianBlurK": 0,
             "downSample": 57,
             "crop": 128,
             "farEnhance": 27,
             "nearCutoff": 72,
             "farCutoff": 5,
-            "useMorph": 1,
+
+            # Morphological filtering
+            "useMorph": True,
             "morphIter": 5,
-            "useBilateral": 0,
+
+            # Bilateral smoothing
+            "useBilateral": False,
             "bilateralStrength": 20,
-            "useWLS": 1,
+
+            # Weighted least squares refinement
+            "useWLS": True,
             "wlsLambda": 2389,
             "wlsSigma": 2.1,
-            "profileName": "CDR",
+
+            # Object detection thresholds
             "objectThresholdMM": 1095,
-            "edgeEqualize": 1,
+            "wsSigma": 2,
+            "wsMinArea": 800,
+
+            # Edge enhancement
+            "edgeEqualize": True,
             "edgeBilateralD": 13,
             "edgeBilateralSigma": 200,
             "edgeCannyKLow": 3.0,
             "edgeCannyKHigh": 4.0,
-            "edgeUseScharr": 1,
-            "numDisparities": 4,
+            "edgeUseScharr": True,
+
+            # Color segmentation
             "colorFocusMM": 10612,
             "colorSpanMM": 17800,
             "segMode": 0,
@@ -120,10 +137,10 @@ config = {
             "kmSpatialX100": 50,
             "rgTau": 50,
             "rgSeedStep": 16,
-            "wsSigma": 2,
-            "wsMinArea": 800,
-            "imageSize": None,  # Placeholder - will be set by calibration (shared between cameras)
-            "Q": None,  # Placeholder - will be set by calibration (shared between cameras)
+
+            # Calibration placeholders (shared between cameras)
+            "imageSize": None,  # Set by calibration
+            "Q": None,  # Set by calibration
         },
 }
 

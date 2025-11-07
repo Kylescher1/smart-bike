@@ -11,6 +11,13 @@ from ..cam.Camera import Camera, CAMERA_CONFIG
 
 
 class VISION:
+    BOOLEAN_FIELDS = {
+        "useMorph",
+        "useBilateral",
+        "useWLS",
+        "edgeEqualize",
+        "edgeUseScharr",
+    }
     """
     Vision system for stereo camera depth processing.
     Follows sensor pattern with start(), stop(), and read() methods.
@@ -30,6 +37,11 @@ class VISION:
             setattr(self, k, v)
         #     print(f"self.{k} returns:{v}")
         # print(f"kyle is evil and am {vars(self)}")
+
+        # Normalize boolean toggles (config may use 0/1 or True/False)
+        for field in self.BOOLEAN_FIELDS:
+            if hasattr(self, field):
+                setattr(self, field, bool(getattr(self, field)))
 
         # Extract calibration maps from camera.left and camera.right
         # Maps are stored as map_x and map_y under each camera
