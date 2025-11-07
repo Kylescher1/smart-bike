@@ -1,28 +1,50 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Smart Dashboard</title>
+    <meta charset="UTF-8">
+    <title>Smart Bike Dashboard</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <style>
-        body { font-family: sans-serif; margin: 0; background: #f4f4f4; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; padding: 1em; }
-        .card { background: white; border-radius: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.2); padding: 1em; }
-        img { width: 100%; border-radius: 10px; }
+        body { font-family: Arial, sans-serif; background: #f0f0f0; }
+        .container { display: flex; flex-wrap: wrap; gap: 20px; padding: 20px; }
+        .card { background: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+        img { max-width: 100%; height: auto; display: block; }
+        pre { background: #eee; padding: 10px; border-radius: 5px; overflow-x: auto; }
     </style>
 </head>
 <body>
-    <h1 style="text-align:center;">Smart Dashboard</h1>
-    <div class="grid">
-        <div class="card">
-            <h2>Live Graph</h2>
-            <img id="plot" src="">
-        </div>
-        <div class="card">
-            <h2>Video Stream</h2>
-            <img src="/video_feed">
-        </div>
+<h1>Smart Bike Dashboard</h1>
+<div class="container">
+    <div class="card">
+        <h2>Numeric Value</h2>
+        <p id="numeric">0.0</p>
     </div>
+    <div class="card">
+        <h2>Live Plot</h2>
+        <img id="plot" src="" alt="Live Plot">
+    </div>
+    <div class="card">
+        <h2>Raw Bike Data</h2>
+        <pre id="raw_data">{}</pre>
+    </div>
+    <div class="card">
+        <h2>Video Feed</h2>
+        <img id="video_feed" src="/video_feed" alt="Video Feed">
+    </div>
+</div>
 
-    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-    <script src="/static/dashboard.js"></script>
+<script>
+const socket = io("/", {transports:["websocket"], namespace:"/viewer"});
+
+socket.on("connect", () => console.log("Connected as viewer"));
+socket.on("disconnect", () => console.log("Disconnected"));
+
+// Receive dashboard updates
+socket.on("dashboard_update", data => {
+    if (data.value !== undefined) document.getElementById("numeric").textContent = data.value.toFixed(3);
+    if (data.plot) document.getElementById("plot").src = "data:image/png;base64," + data.plot;
+    if (data.bike) document.getElementById("raw_data").textContent = JSON.stringify(data.bike, null, 2);
+});
+</script>
 </body>
 </html>
