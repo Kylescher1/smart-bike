@@ -16,13 +16,9 @@ def load_class_from_path(path: str):
 
 def instantiate_sensors(config):
     sensors = {}
-    print("LOL"*20)
     for name, params in config.items():
         print(f"Loading: {name}")
-        print("NO"*20)
-        print(params['class'])
-        class_path = params.pop("class")
-        cls = load_class_from_path(class_path)
+        cls = load_class_from_path(params['who_to_run'])
 
         try:#load class
             sensor = cls(name=name,**params)

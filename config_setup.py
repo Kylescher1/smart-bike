@@ -19,7 +19,7 @@ Example sensor
             "BUFFER_SIZE" : 600,
             "position": np.quaternion(1, 0, 0, 0),#w,x,y,z <- REQUIRED
             "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z <- REQUIRED
-            "class": "src.hal.SpinningLidar.SpinningLidar",#  <- REQUIRED
+            "who_to_run": "src.hal.SpinningLidar.SpinningLidar",#  <- REQUIRED
          },
 """
 print("Writing config file as")
@@ -32,7 +32,7 @@ config = {
             "BUFFER_SIZE" : 600,
             "position": np.quaternion(1, 0, 0, 0),#w,x,y,z
             "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
-            "class": "src.hal.SpinningLidar.SpinningLidar",
+            "who_to_run": "src.hal.SpinningLidar.SpinningLidar",
          },
     "ground_lidar":
         {
@@ -41,7 +41,7 @@ config = {
             "BUFFER_SIZE" : 600,
             "position": np.quaternion(1, 0, 0, 0),#w,x,y,z
             "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
-            "class": "src.hal.SpinningLidar.SpinningLidar",
+            "who_to_run": "src.hal.SpinningLidar.SpinningLidar",
          },
     "arduino_breakout":
         {
@@ -50,7 +50,7 @@ config = {
             "BUFFER_SIZE": 200,
             "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
             "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
-            "class": "src.hal.MPU6250.MPU6250",
+            "who_to_run": "src.hal.MPU6250.MPU6250",
         },
     "RangeFinder":
         {
@@ -59,7 +59,7 @@ config = {
             "BUFFER_SIZE" : 200,
             "position": np.quaternion(1, 0, 0, 0),#w,x,y,z
             "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
-            "class": "src.hal.RangeFinder.RangeFinder",
+            "who_to_run": "src.hal.RangeFinder.RangeFinder",
          },
 }
 
@@ -76,13 +76,13 @@ config = {
                 },
             "right":
                 {
-                    "port": 3,
+                    "port": 2,
                     "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
                     "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
                     "map_x": None,  # Placeholder - will be set by calibration (rightMapX)
                     "map_y": None,  # Placeholder - will be set by calibration (rightMapY)
                 },
-            "class": "src.hal.VISION.VISION.VISION",
+            "who_to_run": "src.hal.VISION.VISION.VISION",
             "minDisparity": 0,
             "numDisparitiesK": 2,
             "blockSize": 11,
@@ -128,7 +128,7 @@ config = {
 }
 
 #Check you have all reqired fields
-required_keys = {"class","port", "position", "z_direction"}
+required_keys = {"who_to_run","port", "position", "z_direction"}
 
 for name,cfg in config.items():
     # Handle nested structure for camera
@@ -143,9 +143,9 @@ for name,cfg in config.items():
         right_missing = {"port", "position", "z_direction"} - ({"port", "position", "z_direction"} & right_cfg.keys())
         if right_missing:
             raise KeyError(f"{name}.right is missing required config items: {right_missing} ")
-        # Check class field at camera level
-        if "class" not in cfg:
-            raise KeyError(f"{name} is missing required config item: class")
+        # Check who_to_run field at camera level
+        if "who_to_run" not in cfg:
+            raise KeyError(f"{name} is missing required config item: who_to_run")
     else:
         # Standard flat structure
         missing = required_keys - (required_keys & cfg.keys())

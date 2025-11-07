@@ -18,8 +18,7 @@ def instantiate_sensors(config):
     sensors = {}
     for name, params in config.items():
         print(f"Loading: {name}")
-        class_path = params.pop("class")
-        cls = load_class_from_path(class_path)
+        cls = load_class_from_path(params['who_to_run'])
 
         try:#load class
             sensor = cls(name=name,**params)

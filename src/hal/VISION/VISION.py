@@ -25,53 +25,15 @@ class VISION:
         self.name = name
         self.debug_mode = True
         
-        # Handle config structure: if left/right are at top level, nest them under camera
-        if 'left' in kwargs and 'right' in kwargs and 'camera' not in kwargs:
-            left_cfg = kwargs.pop('left')
-            right_cfg = kwargs.pop('right')
-            kwargs['camera'] = {
-                'left': left_cfg,
-                'right': right_cfg
-            }
-        
         # Load user-provided configuration (following MPU6250 pattern)
         for k, v in kwargs.items():
             setattr(self, k, v)
-        
-        # Validate required fields
-        if not hasattr(self, 'camera') or not isinstance(self.camera, dict):
-            raise KeyError(f"Camera configuration not found for {self.name}")
-        
-        if 'left' not in self.camera:
-            raise KeyError(f"camera.left not specified for {self.name}")
-        if 'right' not in self.camera:
-            raise KeyError(f"camera.right not specified for {self.name}")
-        
-        left_cfg = self.camera['left']
-        right_cfg = self.camera['right']
-        
-        if 'port' not in left_cfg:
-            raise KeyError(f"camera.left.port not specified for {self.name}")
-        if 'port' not in right_cfg:
-            raise KeyError(f"camera.right.port not specified for {self.name}")
-        
-        # Extract camera indices from port values
-        self.left_port = left_cfg['port']
-        self.right_port = right_cfg['port']
-        
-        # Store position and z_direction if provided
-        self.left_position = left_cfg.get('position', None)
-        self.left_z_direction = left_cfg.get('z_direction', None)
-        self.right_position = right_cfg.get('position', None)
-        self.right_z_direction = right_cfg.get('z_direction', None)
-        
+        #     print(f"self.{k} returns:{v}")
+        # print(f"kyle is evil and am {vars(self)}")
+
         # Extract calibration maps from camera.left and camera.right
         # Maps are stored as map_x and map_y under each camera
-        self.leftMapX = left_cfg.get('map_x', None)
-        self.leftMapY = left_cfg.get('map_y', None)
-        self.rightMapX = right_cfg.get('map_x', None)
-        self.rightMapY = right_cfg.get('map_y', None)
-        
+
         # Extract shared calibration data (imageSize and Q) from camera level
         # These are set via kwargs unpacking, but we can also get them from camera config
         if not hasattr(self, 'imageSize'):
@@ -98,31 +60,24 @@ class VISION:
         print(f"{self.name}: Starting vision system...")
         
         # Initialize cameras
-        self.left_camera = Camera(self.left_port, CAMERA_CONFIG)
-        self.right_camera = Camera(self.right_port, CAMERA_CONFIG)
+        self.left_camera = Camera(self.left['port'], CAMERA_CONFIG)
+        self.right_camera = Camera(self.right['port'], CAMERA_CONFIG)
         
         # Open cameras
         try:
             self.left_camera.open()
-            print(f"{self.name}: Left camera opened on port {self.left_port}")
+            print(f"{self.name}: Left camera opened on port {self.left['port']}")
         except Exception as e:
             raise RuntimeError(f"{self.name}: Failed to open left camera: {e}")
         
         try:
             self.right_camera.open()
-            print(f"{self.name}: Right camera opened on port {self.right_port}")
+            print(f"{self.name}: Right camera opened on port {self.right['port']}")
         except Exception as e:
             self.left_camera.close()
             raise RuntimeError(f"{self.name}: Failed to open right camera: {e}")
         
-        # Validate calibration maps are present (they should be unpacked from kwargs)
-        required_calib = ['leftMapX', 'leftMapY', 'rightMapX', 'rightMapY', 'imageSize', 'Q']
-        missing = [key for key in required_calib if not hasattr(self, key)]
-        if missing:
-            self.left_camera.close()
-            self.right_camera.close()
-            raise RuntimeError(f"{self.name}: Missing calibration data: {missing}")
-        
+
         # Calibration maps are already set via kwargs unpacking
         # Use them directly (they're stored as leftMapX, leftMapY, etc.)
         print(f"{self.name}: Calibration data loaded from config")
@@ -170,11 +125,9 @@ class VISION:
     
     def _rectify(self, left_frame: np.ndarray, right_frame: np.ndarray):
         """Rectify stereo pair using calibration maps."""
-        if not hasattr(self, 'leftMapX') or self.leftMapX is None:
-            raise RuntimeError("Calibration data not loaded. Call start() first.")
-        
-        rect_left = cv2.remap(left_frame, self.leftMapX, self.leftMapY, cv2.INTER_LINEAR)
-        rect_right = cv2.remap(right_frame, self.rightMapX, self.rightMapY, cv2.INTER_LINEAR)
+
+        rect_left = cv2.remap(left_frame, self.left['map_x'], self.left['map_y'], cv2.INTER_LINEAR)
+        rect_right = cv2.remap(right_frame, self.left['map_x'], self.left['map_y'], cv2.INTER_LINEAR)
         return rect_left, rect_right
     
     def _compute_disparity(self, left_rect: np.ndarray, right_rect: np.ndarray):
@@ -357,7 +310,7 @@ class VISION:
         print(f"\n📸 Processing {len(captured_pairs)} captured stereo pairs...")
         
         # Get image shape from first pair
-        img_shape = captured_pairs[0][0].shape[::-1]
+        self.img_shape = captured_pairs[0][0].shape[::-1]
         
         # Prepare object points
         objp = np.zeros((1, CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
@@ -389,12 +342,12 @@ class VISION:
         
         # Fisheye stereo calibration
         # Returns: retval, K1, D1, K2, D2, R, T, rvecs, tvecs
-        rms, K1, D1, K2, D2, R, T, rvecs, tvecs = cv2.fisheye.stereoCalibrate(
+        rms,K1, D1, K2, D2, R, T, rvecs, tvecs = cv2.fisheye.stereoCalibrate(
             objpoints,
             imgpointsL,
             imgpointsR,
             K1, D1, K2, D2,
-            img_shape,
+            self.img_shape,
             criteria=criteria,
             flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC
         )
@@ -402,67 +355,47 @@ class VISION:
         print(f"RMS reprojection error: {rms:.4f}")
         
         # Stereo rectification (fisheye)
-        R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(
+        R1, R2, P1,P2, self.Q = cv2.fisheye.stereoRectify(
             K1, D1, K2, D2,
-            img_shape, R, T,
+            self.img_shape, R, T,
             flags=cv2.CALIB_ZERO_DISPARITY,
             balance=0.0,
             fov_scale=1.2
         )
         
         # Generate rectification maps
-        leftMapX, leftMapY = cv2.fisheye.initUndistortRectifyMap(
-            K1, D1, R1, P1, img_shape, cv2.CV_32FC1
+        self.left['map_x'], self.left['map_y'] = cv2.fisheye.initUndistortRectifyMap(
+            K1, D1, R1, P1, self.img_shape, cv2.CV_32FC1
         )
-        rightMapX, rightMapY = cv2.fisheye.initUndistortRectifyMap(
-            K2, D2, R2, P2, img_shape, cv2.CV_32FC1
+        self.right['map_x'], self.right['map_y'] = cv2.fisheye.initUndistortRectifyMap(
+           K2, D2, R2, P2, self.img_shape, cv2.CV_32FC1
         )
         
         print(f"\n💾 Calibration complete")
-        print(f"   Maps shape: {leftMapX.shape}")
-        print(f"   Image size: {img_shape}")
-        
-        # Update instance attributes
-        self.leftMapX = leftMapX
-        self.leftMapY = leftMapY
-        self.rightMapX = rightMapX
-        self.rightMapY = rightMapY
-        self.imageSize = tuple(img_shape)
-        self.Q = Q
-        
-        # Create a deep copy of the camera config to preserve all existing settings
-        updated_camera_config = {}
-        
-        # Update calibration maps in the nested structure
-        updated_camera_config["left"]["map_x"] = leftMapX
-        updated_camera_config["left"]["map_y"] = leftMapY
-        updated_camera_config["right"]["map_x"] = rightMapX
-        updated_camera_config["right"]["map_y"] = rightMapY
-        
-        # Update shared calibration data at camera level
-        updated_camera_config["imageSize"] = tuple(img_shape)
-        updated_camera_config["Q"] = Q
-        
-        # Save all calibration parameters for future use/debugging
-        updated_camera_config["calibration"] = {
-            "K1": K1,  # Left camera intrinsic matrix
-            "D1": D1,  # Left camera distortion coefficients
-            "K2": K2,  # Right camera intrinsic matrix
-            "D2": D2,  # Right camera distortion coefficients
-            "R": R,    # Rotation matrix between cameras
-            "T": T,    # Translation vector between cameras
-            "R1": R1,  # Left rectification rotation matrix
-            "R2": R2,  # Right rectification rotation matrix
-            "P1": P1,  # Left projection matrix
-            "P2": P2,  # Right projection matrix
-            "rms": rms,  # RMS reprojection error
-        }
+        print(f"   Maps shape: {self.left['map_x'].shape}")
+        print(f"   Image size: {self.img_shape}")
+
+        # # Create a deep copy of the camera config to preserve all existing settings
+        # # Save all calibration parameters for future use/debugging HOLD OVER FROM CURSOR LOOK AWAY
+        # updated_camera_config["calibration"] = {
+        #     "K1": K1,  # Left camera intrinsic matrix
+        #     "D1": D1,  # Left camera distortion coefficients
+        #     "K2": K2,  # Right camera intrinsic matrix
+        #     "D2": D2,  # Right camera distortion coefficients
+        #     "R": R,    # Rotation matrix between cameras
+        #     "T": T,    # Translation vector between cameras
+        #     "R1": R1,  # Left rectification rotation matrix
+        #     "R2": R2,  # Right rectification rotation matrix
+        #     "P1": P1,  # Left projection matrix
+        #     "P2": P2,  # Right projection matrix
+        #     "rms": rms,  # RMS reprojection error
+        # }
         
         # Return dictionary in format expected by Calibrate.py
         # Note: dict.update() does shallow merge, so we return the complete config
         # to preserve all existing settings (minDisparity, numDisparitiesK, etc.)
-        return {self.name: updated_camera_config}
+        return {self.name: vars(self)}
     
     def __repr__(self):
-        return f"<VISION name={self.name}, left_port={self.left_port}, right_port={self.right_port}, connected={self.connected}>"
+        return f"<VISION name={self.name}, left_port={self.left['port']}, right_port={self.right['port']}, connected={self.connected}>"
 

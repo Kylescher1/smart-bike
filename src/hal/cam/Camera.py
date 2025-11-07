@@ -1,17 +1,24 @@
 # src/hal/cam/Camera.py
 import cv2
+import platform
 from typing import Optional, Dict
 
+def get_default_backend():
+    system = platform.system()
+    if system == "Windows":
+        return cv2.CAP_DSHOW  # or cv2.CAP_MSMF
+    else:  # Linux
+        return cv2.CAP_V4L2
 
 # Centralized configuration
 CAMERA_CONFIG: Dict[str, int | str] = {
-    "backend": cv2.CAP_V4L2,
+    #"backend": cv2.CAP_V4L2,
+    "backend": get_default_backend(),
     "width": 1024,
     "height": 768,
     "fps": 60,
     "fourcc": "MJPG",  # string form for clarity
 }
-
 
 class Camera:
     def __init__(self, index: int, config: Dict[str, int | str] = CAMERA_CONFIG):
