@@ -127,7 +127,7 @@ def get_trackbar_values(window_name):
     
     return params
 
-def run_disparity_calibration(vision):
+def run_disparity_calibration(vision, camera_config):
     """Interactive disparity parameter tuning with live preview."""
     
     if not vision.connected:
@@ -194,6 +194,7 @@ def run_disparity_calibration(vision):
     create_trackbars(window_name, original_params)
     
     paused = False
+    should_save = False
     saved_params = None
     
     try:
@@ -201,12 +202,14 @@ def run_disparity_calibration(vision):
             key = cv2.waitKey(1) & 0xFF
             
             if key == ord('q'):
-                print("\n⚠️ Quitting without saving")
-                saved_params = None
+                if not should_save:
+                    print("\n⚠️ Quitting without saving")
                 break
             elif key == ord('s'):
+                # Capture the parameters NOW, while window still exists
                 saved_params = get_trackbar_values(window_name)
-                print("\n✅ Parameters saved! Press 'q' to exit.")
+                should_save = True
+                print("\n✅ Parameters marked for saving! Press 'q' to exit and save.")
             elif key == ord('r'):
                 print("\n🔄 Resetting to original parameters")
                 # Reset trackbars to original values
@@ -294,7 +297,15 @@ def run_disparity_calibration(vision):
     finally:
         cv2.destroyAllWindows()
     
-    return saved_params
+    # If user pressed 's', update camera_config with saved parameters and return it
+    if should_save and saved_params is not None:
+        for param_name, param_value in saved_params.items():
+            camera_config[param_name] = param_value
+        
+        print(f"\n💾 Disparity calibration complete")
+        return camera_config
+    else:
+        return None
 
 if __name__ == "__main__":
     # Load config
@@ -329,18 +340,15 @@ if __name__ == "__main__":
     
     try:
         # Run disparity calibration
-        updated_params = run_disparity_calibration(vision)
+        updated_camera_settings = run_disparity_calibration(vision, camera_config)
         
-        if updated_params is not None:
-            # Update the config with new disparity parameters
-            for param_name, param_value in updated_params.items():
-                camera_config[param_name] = param_value
-            
-            config['camera'] = camera_config
+        if updated_camera_settings is not None:
+            # Update the config with new calibration data
+            config['camera'] = updated_camera_settings
             
             # Save updated config back to dill file
             print("\n" + "="*60)
-            print("Saving updated disparity configuration to config.dill...")
+            print("Saving updated configuration to config.dill...")
             with open(config_path, "wb") as f:
                 dill.dump(config, f)
             print("✅ Configuration saved successfully!")
@@ -348,11 +356,11 @@ if __name__ == "__main__":
             
             # Print summary of key parameters
             print("\n📊 Key Parameters Summary:")
-            print(f"  blockSize: {updated_params['blockSize']}")
-            print(f"  numDisparities: {updated_params['numDisparities']}")
-            print(f"  uniquenessRatio: {updated_params['uniquenessRatio']}")
-            print(f"  useWLS: {updated_params['useWLS']}")
-            print(f"  wlsLambda: {updated_params['wlsLambda']}")
+            print(f"  blockSize: {updated_camera_settings['blockSize']}")
+            print(f"  numDisparities: {updated_camera_settings['numDisparities']}")
+            print(f"  uniquenessRatio: {updated_camera_settings['uniquenessRatio']}")
+            print(f"  useWLS: {updated_camera_settings['useWLS']}")
+            print(f"  wlsLambda: {updated_camera_settings['wlsLambda']}")
         else:
             print("\n⚠️ No parameters saved - config.dill unchanged")
         
