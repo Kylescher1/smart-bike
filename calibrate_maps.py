@@ -180,7 +180,7 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
     camera_settings["left"]["map_x"], camera_settings["left"]["map_y"] = cv2.fisheye.initUndistortRectifyMap(
         K1, D1, R1, P1, vision.img_shape, cv2.CV_32FC1
     )
-    camera_settings["left"]["map_y"], camera_settings["right"]["map_y"] = cv2.fisheye.initUndistortRectifyMap(
+    camera_settings["right"]["map_x"], camera_settings["right"]["map_y"] = cv2.fisheye.initUndistortRectifyMap(
         K2, D2, R2, P2, vision.img_shape, cv2.CV_32FC1
     )
 
@@ -188,7 +188,7 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
     camera_settings["Q"] = vision.Q
 
     print(f"\n💾 Calibration complete")
-    print(f"   Maps shape: {vision.left['map_x'].shape}")
+    print(f"   Maps shape: {camera_settings['left']['map_x'].shape}")
     print(f"   Image size: {vision.img_shape}")
 
 
@@ -199,19 +199,56 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
     return camera_settings
 
 if __name__ == "__main__":
-    # Load condfig
+    # Load config
     print("Loading Config...")
     try:
         with open(config_path, "rb") as f:
             config = dill.load(f)
-        for k,v in config.items():
-            print(k,v)
         print("Loaded whole Dill")
-        config = {'camera':config['camera']}
+        camera_config = config['camera']
         print("Loaded Camera Config")
-        for k, v in config.items():
-            print(f"Device: {k} | Properties: {v}")
     except Exception as e:
         raise KeyError(f"An unexpected error occurred Loading config.dill: {e}")
 
-    Calibrate.main(config)
+    # Instantiate vision system
+    print("\n" + "="*60)
+    print("Initializing Vision System...")
+    print("="*60)
+    
+    # Import and load the vision class
+    module_path, class_name = camera_config['who_to_run'].rsplit(".", 1)
+    spec = importlib.util.spec_from_file_location(
+        module_path, 
+        os.path.join(os.path.dirname(__file__), *module_path.split(".")) + ".py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_path] = module
+    spec.loader.exec_module(module)
+    VisionClass = getattr(module, class_name)
+    
+    # Create vision instance
+    vision = VisionClass(name="camera", **camera_config)
+    
+    try:
+        # Run calibration
+        updated_camera_settings = run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
+        
+        # Update the config with new calibration data
+        config['camera'] = updated_camera_settings
+        
+        # Save updated config back to dill file
+        print("\n" + "="*60)
+        print("Saving updated configuration to config.dill...")
+        with open(config_path, "wb") as f:
+            dill.dump(config, f)
+        print("✅ Configuration saved successfully!")
+        print("="*60)
+        
+    except Exception as e:
+        print(f"\n❌ Error during calibration: {e}")
+        raise
+    finally:
+        # Clean up
+        if vision.connected:
+            print("\nStopping vision system...")
+            vision.stop()
