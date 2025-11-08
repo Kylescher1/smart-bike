@@ -121,10 +121,78 @@ def generate_camera_frame(camera_side):
         print(f"Error generating {camera_side} camera frame: {e}")
         return None
 
+def generate_stereo_calibration_frame():
+    """Generate side-by-side camera view for calibration with checkerboard detection."""
+    if state.vision is None or not state.vision.connected:
+        return None
+    
+    try:
+        # Get frames from both cameras
+        left_frame = state.vision.left_camera.read_frame()
+        right_frame = state.vision.right_camera.read_frame()
+        
+        if left_frame is None or right_frame is None:
+            return None
+        
+        # Convert to grayscale for checkerboard detection
+        gray_left = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
+        gray_right = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
+        
+        # Try to detect checkerboard
+        retL, cornersL = cv2.findChessboardCorners(gray_left, state.checkerboard_size, None)
+        retR, cornersR = cv2.findChessboardCorners(gray_right, state.checkerboard_size, None)
+        
+        # Draw checkerboard if detected
+        if retL:
+            cv2.drawChessboardCorners(left_frame, state.checkerboard_size, cornersL, retL)
+            cv2.putText(left_frame, "DETECTED!", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        else:
+            cv2.putText(left_frame, "NO PATTERN", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        
+        if retR:
+            cv2.drawChessboardCorners(right_frame, state.checkerboard_size, cornersR, retR)
+            cv2.putText(right_frame, "DETECTED!", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        else:
+            cv2.putText(right_frame, "NO PATTERN", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        
+        # Add labels
+        cv2.putText(left_frame, "LEFT CAMERA", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(right_frame, "RIGHT CAMERA", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # Resize to half width each
+        h, w = left_frame.shape[:2]
+        left_half = cv2.resize(left_frame, (w // 2, h // 2))
+        right_half = cv2.resize(right_frame, (w // 2, h // 2))
+        
+        # Combine side by side
+        combined = np.hstack([left_half, right_half])
+        
+        # Add progress overlay
+        pairs_count = len(state.captured_pairs)
+        progress_text = f"Captured: {pairs_count}/{state.min_pairs}"
+        cv2.putText(combined, progress_text, (combined.shape[1]//2 - 100, combined.shape[0] - 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+        
+        return combined
+        
+    except Exception as e:
+        print(f"Error generating stereo calibration frame: {e}")
+        return None
+
 def generate_debug_frame():
     """Generate a single debug frame (simple depth visualization)."""
     if state.vision is None or not state.vision.connected:
         return None
+    
+    # Check if in calibration mode
+    if state.calibrating_maps:
+        return generate_stereo_calibration_frame()
     
     # Check which view to show
     if state.view == "left":
@@ -175,6 +243,10 @@ def generate_calibrate_frame():
     """Generate a calibration frame with current parameters applied."""
     if state.vision is None or not state.vision.connected:
         return None
+    
+    # Check if in calibration mode
+    if state.calibrating_maps:
+        return generate_stereo_calibration_frame()
     
     # Check which view to show
     if state.view == "left":
@@ -338,10 +410,14 @@ def start_map_calibration():
         state.mode = "calibrate_maps"
         state.calibrating_maps = True
         state.captured_pairs = []
-        state.view = "stereo"  # Special view for side-by-side cameras
     
     print("📐 Starting map calibration mode")
-    return jsonify({'status': 'success', 'pairs_captured': 0, 'min_pairs': state.min_pairs})
+    return jsonify({
+        'status': 'success', 
+        'pairs_captured': 0, 
+        'min_pairs': state.min_pairs,
+        'checkerboard_size': f"{state.checkerboard_size[0]}x{state.checkerboard_size[1]}"
+    })
 
 @app.route('/capture_calibration_pair', methods=['POST'])
 def capture_calibration_pair():
