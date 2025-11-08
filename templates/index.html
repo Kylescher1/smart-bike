@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Smart Bike - Depth Camera Stream</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #1a1a1a;
+            color: #ffffff;
+            padding: 10px;
+            overflow-x: hidden;
+        }
+        
+        .header {
+            text-align: center;
+            padding: 15px 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 10px;
+            margin-bottom: 15px;
+        }
+        
+        .header h1 {
+            font-size: 24px;
+            font-weight: 700;
+        }
+        
+        .header p {
+            font-size: 14px;
+            opacity: 0.9;
+            margin-top: 5px;
+        }
+        
+        .video-container {
+            width: 100%;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 15px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
+        
+        .video-container img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        
+        .mode-selector {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        
+        .mode-btn {
+            flex: 1;
+            padding: 15px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .mode-btn.debug {
+            background: #2ecc71;
+            color: white;
+        }
+        
+        .mode-btn.calibrate {
+            background: #3498db;
+            color: white;
+        }
+        
+        .mode-btn.active {
+            transform: scale(0.95);
+            box-shadow: inset 0 2px 10px rgba(0,0,0,0.3);
+        }
+        
+        .mode-btn:active {
+            transform: scale(0.9);
+        }
+        
+        .controls-container {
+            background: #2a2a2a;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .controls-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            cursor: pointer;
+            user-select: none;
+        }
+        
+        .controls-header h2 {
+            font-size: 18px;
+        }
+        
+        .toggle-icon {
+            font-size: 24px;
+            transition: transform 0.3s;
+        }
+        
+        .toggle-icon.collapsed {
+            transform: rotate(-90deg);
+        }
+        
+        .controls-content {
+            display: none;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        
+        .controls-content.expanded {
+            display: block;
+        }
+        
+        .param-group {
+            margin-bottom: 20px;
+        }
+        
+        .param-group h3 {
+            font-size: 14px;
+            color: #667eea;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .param-item {
+            margin-bottom: 15px;
+        }
+        
+        .param-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 13px;
+        }
+        
+        .param-name {
+            font-weight: 500;
+        }
+        
+        .param-value {
+            color: #667eea;
+            font-weight: 600;
+        }
+        
+        .param-slider {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: #3a3a3a;
+            outline: none;
+            -webkit-appearance: none;
+        }
+        
+        .param-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #667eea;
+            cursor: pointer;
+        }
+        
+        .param-slider::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #667eea;
+            cursor: pointer;
+            border: none;
+        }
+        
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 28px;
+        }
+        
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #3a3a3a;
+            transition: .3s;
+            border-radius: 28px;
+        }
+        
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 20px;
+            width: 20px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .3s;
+            border-radius: 50%;
+        }
+        
+        input:checked + .toggle-slider {
+            background-color: #667eea;
+        }
+        
+        input:checked + .toggle-slider:before {
+            transform: translateX(22px);
+        }
+        
+        .save-btn {
+            width: 100%;
+            padding: 15px;
+            font-size: 16px;
+            font-weight: 600;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 15px;
+            transition: all 0.3s;
+        }
+        
+        .save-btn:active {
+            transform: scale(0.95);
+        }
+        
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            background: #2ecc71;
+            color: white;
+            border-radius: 8px;
+            font-weight: 600;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            z-index: 1000;
+            animation: slideIn 0.3s ease-out;
+            display: none;
+        }
+        
+        .notification.show {
+            display: block;
+        }
+        
+        .notification.error {
+            background: #e74c3c;
+        }
+        
+        @keyframes slideIn {
+            from {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+        
+        .status-bar {
+            background: #2a2a2a;
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 13px;
+            text-align: center;
+            color: #888;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #2ecc71;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+        
+        /* Scrollbar styling */
+        .controls-content::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        .controls-content::-webkit-scrollbar-track {
+            background: #1a1a1a;
+            border-radius: 4px;
+        }
+        
+        .controls-content::-webkit-scrollbar-thumb {
+            background: #667eea;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🚴 Smart Bike Depth Camera</h1>
+        <p>Real-time Depth Map Visualization</p>
+    </div>
+    
+    <div class="video-container">
+        <img id="videoStream" src="{{ url_for('video_feed') }}" alt="Depth Map Stream">
+    </div>
+    
+    <div class="mode-selector">
+        <button class="mode-btn debug active" onclick="setMode('debug')">
+            🔍 Debug Mode
+        </button>
+        <button class="mode-btn calibrate" onclick="setMode('calibrate')">
+            🎛️ Calibrate Mode
+        </button>
+    </div>
+    
+    <div class="controls-container" id="calibrationControls" style="display: none;">
+        <div class="controls-header" onclick="toggleControls()">
+            <h2>⚙️ Calibration Parameters</h2>
+            <span class="toggle-icon collapsed">▼</span>
+        </div>
+        
+        <div class="controls-content" id="controlsContent">
+            <!-- Core Parameters -->
+            <div class="param-group">
+                <h3>Core Stereo Parameters</h3>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Block Size</span>
+                        <span class="param-value" id="blockSize-value">11</span>
+                    </div>
+                    <input type="range" class="param-slider" id="blockSize" 
+                           min="5" max="51" step="2" value="11"
+                           onchange="updateParameter('blockSize', this.value)">
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Num Disparities K</span>
+                        <span class="param-value" id="numDisparitiesK-value">2</span>
+                    </div>
+                    <input type="range" class="param-slider" id="numDisparitiesK" 
+                           min="1" max="16" step="1" value="2"
+                           onchange="updateParameter('numDisparitiesK', this.value)">
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Uniqueness Ratio</span>
+                        <span class="param-value" id="uniquenessRatio-value">1</span>
+                    </div>
+                    <input type="range" class="param-slider" id="uniquenessRatio" 
+                           min="0" max="100" step="1" value="1"
+                           onchange="updateParameter('uniquenessRatio', this.value)">
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Pre Filter Cap</span>
+                        <span class="param-value" id="preFilterCap-value">43</span>
+                    </div>
+                    <input type="range" class="param-slider" id="preFilterCap" 
+                           min="1" max="100" step="1" value="43"
+                           onchange="updateParameter('preFilterCap', this.value)">
+                </div>
+            </div>
+            
+            <!-- Filtering Parameters -->
+            <div class="param-group">
+                <h3>Filtering & Refinement</h3>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Use WLS Filter</span>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="useWLS" checked
+                                   onchange="updateParameter('useWLS', this.checked ? 1 : 0)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">WLS Lambda</span>
+                        <span class="param-value" id="wlsLambda-value">2389</span>
+                    </div>
+                    <input type="range" class="param-slider" id="wlsLambda" 
+                           min="100" max="10000" step="100" value="2389"
+                           onchange="updateParameter('wlsLambda', this.value)">
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">WLS Sigma</span>
+                        <span class="param-value" id="wlsSigma-value">2.1</span>
+                    </div>
+                    <input type="range" class="param-slider" id="wlsSigma" 
+                           min="0.1" max="5.0" step="0.1" value="2.1"
+                           onchange="updateParameter('wlsSigma', this.value)">
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Use Morphological</span>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="useMorph" checked
+                                   onchange="updateParameter('useMorph', this.checked ? 1 : 0)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Morph Iterations</span>
+                        <span class="param-value" id="morphIter-value">5</span>
+                    </div>
+                    <input type="range" class="param-slider" id="morphIter" 
+                           min="1" max="20" step="1" value="5"
+                           onchange="updateParameter('morphIter', this.value)">
+                </div>
+            </div>
+            
+            <!-- Pre-processing -->
+            <div class="param-group">
+                <h3>Pre-processing</h3>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Down Sample %</span>
+                        <span class="param-value" id="downSample-value">57</span>
+                    </div>
+                    <input type="range" class="param-slider" id="downSample" 
+                           min="0" max="100" step="1" value="57"
+                           onchange="updateParameter('downSample', this.value)">
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Crop (pixels)</span>
+                        <span class="param-value" id="crop-value">128</span>
+                    </div>
+                    <input type="range" class="param-slider" id="crop" 
+                           min="0" max="300" step="1" value="128"
+                           onchange="updateParameter('crop', this.value)">
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Near Cutoff %</span>
+                        <span class="param-value" id="nearCutoff-value">72</span>
+                    </div>
+                    <input type="range" class="param-slider" id="nearCutoff" 
+                           min="0" max="100" step="1" value="72"
+                           onchange="updateParameter('nearCutoff', this.value)">
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Far Cutoff %</span>
+                        <span class="param-value" id="farCutoff-value">5</span>
+                    </div>
+                    <input type="range" class="param-slider" id="farCutoff" 
+                           min="0" max="100" step="1" value="5"
+                           onchange="updateParameter('farCutoff', this.value)">
+                </div>
+            </div>
+        </div>
+        
+        <button class="save-btn" onclick="saveParameters()">
+            💾 Save Parameters
+        </button>
+    </div>
+    
+    <div class="status-bar">
+        <span class="status-indicator"></span>
+        Connected to Smart Bike Camera
+    </div>
+    
+    <div class="notification" id="notification"></div>
+    
+    <script>
+        let currentMode = 'debug';
+        let controlsExpanded = false;
+        
+        // Set mode (debug or calibrate)
+        function setMode(mode) {
+            fetch('/set_mode', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ mode: mode })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    currentMode = mode;
+                    
+                    // Update button states
+                    document.querySelectorAll('.mode-btn').forEach(btn => {
+                        btn.classList.remove('active');
+                    });
+                    event.target.classList.add('active');
+                    
+                    // Show/hide calibration controls
+                    const controls = document.getElementById('calibrationControls');
+                    if (mode === 'calibrate') {
+                        controls.style.display = 'block';
+                        loadParameters();
+                    } else {
+                        controls.style.display = 'none';
+                    }
+                    
+                    showNotification(`Switched to ${mode} mode`);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showNotification('Failed to switch mode', true);
+            });
+        }
+        
+        // Toggle controls panel
+        function toggleControls() {
+            controlsExpanded = !controlsExpanded;
+            const content = document.getElementById('controlsContent');
+            const icon = document.querySelector('.toggle-icon');
+            
+            if (controlsExpanded) {
+                content.classList.add('expanded');
+                icon.classList.remove('collapsed');
+            } else {
+                content.classList.remove('expanded');
+                icon.classList.add('collapsed');
+            }
+        }
+        
+        // Load current parameters from server
+        function loadParameters() {
+            fetch('/get_parameters')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    const params = data.parameters;
+                    
+                    // Update all sliders and displays
+                    for (const [name, value] of Object.entries(params)) {
+                        const slider = document.getElementById(name);
+                        const display = document.getElementById(name + '-value');
+                        
+                        if (slider && slider.type === 'range') {
+                            slider.value = value;
+                            if (display) display.textContent = value;
+                        } else if (slider && slider.type === 'checkbox') {
+                            slider.checked = value;
+                        }
+                    }
+                }
+            })
+            .catch(error => console.error('Error loading parameters:', error));
+        }
+        
+        // Update a single parameter
+        function updateParameter(name, value) {
+            // Update display
+            const display = document.getElementById(name + '-value');
+            if (display) {
+                display.textContent = value;
+            }
+            
+            // Send to server
+            fetch('/update_parameter', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ name: name, value: value })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status !== 'success') {
+                    console.error('Failed to update parameter:', data.message);
+                }
+            })
+            .catch(error => console.error('Error:', error));
+        }
+        
+        // Save parameters to config
+        function saveParameters() {
+            fetch('/save_parameters', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    showNotification('✅ Parameters saved!');
+                } else {
+                    showNotification('❌ Failed to save', true);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showNotification('❌ Save error', true);
+            });
+        }
+        
+        // Show notification
+        function showNotification(message, isError = false) {
+            const notification = document.getElementById('notification');
+            notification.textContent = message;
+            notification.classList.add('show');
+            
+            if (isError) {
+                notification.classList.add('error');
+            } else {
+                notification.classList.remove('error');
+            }
+            
+            setTimeout(() => {
+                notification.classList.remove('show');
+            }, 3000);
+        }
+        
+        // Handle image load errors
+        document.getElementById('videoStream').onerror = function() {
+            console.log('Stream error, reloading...');
+            setTimeout(() => {
+                this.src = "{{ url_for('video_feed') }}?" + new Date().getTime();
+            }, 1000);
+        };
+    </script>
+</body>
+</html>
+
