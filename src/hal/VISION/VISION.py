@@ -215,17 +215,23 @@ class VISION:
     def debug(self):
         """
         Debug mode that continuously displays the depth map.
-        Press 'q' to quit the debug view.
+        Press 'o' to start recording, 'p' to stop recording, 'q' to quit.
         """
         if not self.connected:
             print(f"{self.name}: Cannot start debug mode. Vision system not connected. Call start() first.")
             return
         
         print(f"{self.name}: Starting debug mode - displaying depth map...")
-        print(f"{self.name}: Press 'q' to exit debug mode")
+        print(f"{self.name}: Press 'o' to start recording | 'p' to stop | 'q' to exit")
         
         window_name = f"{self.name} - Depth Map Debug"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        
+        # Video recording state
+        video_writer = None
+        recording = False
+        video_counter = 0
+        frame_size = None
         
         try:
             while True:
@@ -250,6 +256,10 @@ class VISION:
                 # Apply colormap for better visualization
                 depth_colored = cv2.applyColorMap(depth_display, cv2.COLORMAP_JET)
                 
+                # Store frame size for video writer initialization
+                if frame_size is None:
+                    frame_size = (depth_colored.shape[1], depth_colored.shape[0])
+                
                 # Add metadata text overlay
                 timestamp = metadata.get('timestamp', 'N/A')
                 num_disp = metadata.get('num_disparities', 'N/A')
@@ -258,18 +268,56 @@ class VISION:
                 cv2.putText(depth_colored, f"Num Disparities: {num_disp}", (10, 60), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 
+                # Add recording indicator
+                if recording:
+                    cv2.circle(depth_colored, (depth_colored.shape[1] - 30, 30), 10, (0, 0, 255), -1)
+                    cv2.putText(depth_colored, "REC", (depth_colored.shape[1] - 70, 35), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                
+                # Write frame to video if recording
+                if recording and video_writer is not None:
+                    video_writer.write(depth_colored)
+                
                 # Display the depth map
                 cv2.imshow(window_name, depth_colored)
                 
-                # Check for quit key
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                # Check for keys
+                key = cv2.waitKey(1) & 0xFF
+                
+                if key == ord('q'):
                     break
+                elif key == ord('o'):
+                    if not recording:
+                        # Start recording
+                        video_counter += 1
+                        filename = f"disparity_recording_{video_counter}.avi"
+                        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                        video_writer = cv2.VideoWriter(filename, fourcc, 20.0, frame_size)
+                        recording = True
+                        print(f"🔴 Recording started: {filename}")
+                    else:
+                        print("⚠️ Already recording. Press 'p' to stop first.")
+                elif key == ord('p'):
+                    if recording:
+                        # Stop recording
+                        recording = False
+                        if video_writer is not None:
+                            video_writer.release()
+                            video_writer = None
+                        print(f"⏹️ Recording stopped: disparity_recording_{video_counter}.avi")
+                    else:
+                        print("⚠️ Not currently recording.")
                     
         except KeyboardInterrupt:
             print(f"\n{self.name}: Debug mode interrupted by user")
         except Exception as e:
             print(f"{self.name}: Error in debug mode: {e}")
         finally:
+            # Clean up video writer if still recording
+            if video_writer is not None:
+                video_writer.release()
+                print(f"⏹️ Recording stopped (cleanup): disparity_recording_{video_counter}.avi")
+            
             cv2.destroyWindow(window_name)
             print(f"{self.name}: Debug mode ended")
     
@@ -294,5 +342,14 @@ class VISION:
             self.stereo,
             getattr(self, 'Q', None),
             debug=self.debug_mode,
+            downSample=getattr(self, 'downSample', 0),
+            crop=getattr(self, 'crop', 0),
+            nearCutoff=getattr(self, 'nearCutoff', 0),
+            farCutoff=getattr(self, 'farCutoff', 0),
+            useMorph=getattr(self, 'useMorph', False),
+            morphIter=getattr(self, 'morphIter', 5),
+            useWLS=getattr(self, 'useWLS', False),
+            wlsLambda=getattr(self, 'wlsLambda', 8000.0),
+            wlsSigma=getattr(self, 'wlsSigma', 1.5),
         )
 

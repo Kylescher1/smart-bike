@@ -25,8 +25,8 @@ def create_trackbars(window_name, disparity_params):
     cv2.createTrackbar("downSample", window_name, disparity_params["downSample"], 100, lambda x: None)
     cv2.createTrackbar("crop", window_name, disparity_params["crop"], 300, lambda x: None)
     cv2.createTrackbar("farEnhance", window_name, disparity_params["farEnhance"], 100, lambda x: None)
-    cv2.createTrackbar("nearCutoff", window_name, disparity_params["nearCutoff"], 255, lambda x: None)
-    cv2.createTrackbar("farCutoff", window_name, disparity_params["farCutoff"], 255, lambda x: None)
+    cv2.createTrackbar("nearCutoff %", window_name, disparity_params["nearCutoff"], 100, lambda x: None)
+    cv2.createTrackbar("farCutoff %", window_name, disparity_params["farCutoff"], 100, lambda x: None)
     
     # Morphological filtering
     cv2.createTrackbar("useMorph", window_name, int(disparity_params["useMorph"]), 1, lambda x: None)
@@ -87,8 +87,8 @@ def get_trackbar_values(window_name):
     params["downSample"] = cv2.getTrackbarPos("downSample", window_name)
     params["crop"] = cv2.getTrackbarPos("crop", window_name)
     params["farEnhance"] = cv2.getTrackbarPos("farEnhance", window_name)
-    params["nearCutoff"] = cv2.getTrackbarPos("nearCutoff", window_name)
-    params["farCutoff"] = cv2.getTrackbarPos("farCutoff", window_name)
+    params["nearCutoff"] = cv2.getTrackbarPos("nearCutoff %", window_name)
+    params["farCutoff"] = cv2.getTrackbarPos("farCutoff %", window_name)
     
     # Morphological filtering
     params["useMorph"] = bool(cv2.getTrackbarPos("useMorph", window_name))
@@ -139,10 +139,13 @@ def run_disparity_calibration(vision, camera_config):
     print("=" * 60)
     print("Instructions:")
     print("  - Adjust trackbars to tune disparity parameters")
+    print("  - Press 'w' to toggle WLS on/off quickly")
     print("  - Press 's' to save current parameters")
     print("  - Press 'r' to reset to original parameters")
     print("  - Press 'q' to quit without saving")
     print("  - Press 'Space' to pause/resume live updates")
+    print("\n💡 TIP: Turn OFF WLS while tuning core stereo parameters!")
+    print("   Then turn it ON to see the final refined result.")
     print("=" * 60 + "\n")
     
     window_name = "Disparity Calibration"
@@ -216,11 +219,19 @@ def run_disparity_calibration(vision, camera_config):
                 for param_name, param_value in original_params.items():
                     if param_name in ["wlsSigma", "edgeCannyKLow", "edgeCannyKHigh"]:
                         cv2.setTrackbarPos(f"{param_name} x10", window_name, int(param_value * 10))
+                    elif param_name in ["nearCutoff", "farCutoff"]:
+                        cv2.setTrackbarPos(f"{param_name} %", window_name, int(param_value))
                     else:
                         cv2.setTrackbarPos(param_name, window_name, int(param_value))
             elif key == ord(' '):
                 paused = not paused
                 print(f"{'⏸️ Paused' if paused else '▶️ Resumed'}")
+            elif key == ord('w'):
+                # Quick toggle WLS on/off
+                current_wls = cv2.getTrackbarPos("useWLS", window_name)
+                new_wls = 0 if current_wls else 1
+                cv2.setTrackbarPos("useWLS", window_name, new_wls)
+                print(f"🔄 WLS: {'ON' if new_wls else 'OFF'}")
             
             if not paused:
                 # Get current parameter values
@@ -275,14 +286,20 @@ def run_disparity_calibration(vision, camera_config):
                         depth_display = cv2.resize(depth_colormap, (display_width, display_height))
                         
                         # Add parameter text overlay
-                        cv2.putText(depth_display, "Press 's' to save, 'r' to reset, 'q' to quit, 'Space' to pause", 
+                        cv2.putText(depth_display, "Press 'w' to toggle WLS | 's' save | 'r' reset | 'q' quit", 
                                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                         cv2.putText(depth_display, f"blockSize: {current_params['blockSize']}", 
                                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                         cv2.putText(depth_display, f"numDisparities: {current_params['numDisparities']}", 
                                    (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                        cv2.putText(depth_display, f"useWLS: {current_params['useWLS']}", 
+                        cv2.putText(depth_display, f"uniquenessRatio: {current_params['uniquenessRatio']}", 
                                    (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        
+                        # WLS status with color coding
+                        wls_color = (0, 255, 0) if current_params['useWLS'] else (0, 0, 255)  # Green if ON, Red if OFF
+                        wls_text = "WLS: ON (Final Refinement)" if current_params['useWLS'] else "WLS: OFF (Raw Disparity)"
+                        cv2.putText(depth_display, wls_text, 
+                                   (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, wls_color, 2)
                         
                         cv2.imshow("Depth Preview", depth_display)
                     else:
