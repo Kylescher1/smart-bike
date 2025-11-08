@@ -476,6 +476,87 @@ def capture_calibration_pair():
         print(f"❌ Error capturing pair: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+def process_stereo_calibration(captured_pairs, checkerboard_size, square_size_mm, img_shape):
+    """Process captured stereo pairs and return calibration data."""
+    print(f"\n📸 Processing {len(captured_pairs)} captured stereo pairs...")
+    
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 150, 1e-6)
+    
+    # Prepare object points
+    objp = np.zeros((1, checkerboard_size[0] * checkerboard_size[1], 3), np.float32)
+    objp[0, :, :2] = np.mgrid[0:checkerboard_size[0], 0:checkerboard_size[1]].T.reshape(-1, 2)
+    objp *= square_size_mm
+    
+    objpoints, imgpointsL, imgpointsR = [], [], []
+    
+    for i, (imgL, imgR, cornersL, cornersR) in enumerate(captured_pairs):
+        objpoints.append(objp)
+        imgpointsL.append(cornersL.reshape(1, -1, 2))
+        imgpointsR.append(cornersR.reshape(1, -1, 2))
+        print(f"  ✓ Processed pair {i + 1}/{len(captured_pairs)}")
+    
+    N_OK = len(objpoints)
+    print(f"✅ Using {N_OK} valid pairs for calibration")
+    
+    # Initialize camera matrices
+    K1 = np.eye(3)
+    D1 = np.zeros((4, 1))
+    K2 = np.eye(3)
+    D2 = np.zeros((4, 1))
+    
+    print("\n--- Stereo Calibration (Fisheye) ---")
+    
+    # Perform stereo calibration
+    rms, K1, D1, K2, D2, R, T, rvecs, tvecs = cv2.fisheye.stereoCalibrate(
+        objpoints,
+        imgpointsL,
+        imgpointsR,
+        K1,
+        D1,
+        K2,
+        D2,
+        img_shape,
+        criteria=criteria,
+        flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC,
+    )
+    
+    print(f"RMS reprojection error: {rms:.4f}")
+    
+    # Stereo rectification
+    R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(
+        K1,
+        D1,
+        K2,
+        D2,
+        img_shape,
+        R,
+        T,
+        flags=cv2.CALIB_ZERO_DISPARITY,
+        balance=0.0,
+        fov_scale=1.2,
+    )
+    
+    # Generate undistort/rectify maps
+    leftMapX, leftMapY = cv2.fisheye.initUndistortRectifyMap(
+        K1, D1, R1, P1, img_shape, cv2.CV_32FC1
+    )
+    rightMapX, rightMapY = cv2.fisheye.initUndistortRectifyMap(
+        K2, D2, R2, P2, img_shape, cv2.CV_32FC1
+    )
+    
+    print(f"\n💾 Calibration complete")
+    print(f"   Maps shape: {leftMapX.shape}")
+    print(f"   Image size: {img_shape}")
+    
+    return {
+        'leftMapX': leftMapX,
+        'leftMapY': leftMapY,
+        'rightMapX': rightMapX,
+        'rightMapY': rightMapY,
+        'Q': Q,
+        'imageSize': img_shape
+    }
+
 @app.route('/finish_map_calibration', methods=['POST'])
 def finish_map_calibration():
     """Process captured pairs and perform stereo calibration."""
@@ -491,18 +572,16 @@ def finish_map_calibration():
     try:
         print(f"\n📐 Processing {len(state.captured_pairs)} captured pairs...")
         
-        # Import calibration module
-        import Calibrate
+        # Get image shape from first captured pair
+        img_shape = state.captured_pairs[0][0].shape[::-1]  # (width, height)
         
-        # Run calibration (this might take a while)
-        result = Calibrate.calibrate_stereo_cameras(
+        # Run calibration processing
+        result = process_stereo_calibration(
             state.captured_pairs,
             state.checkerboard_size,
-            state.square_size_mm
+            state.square_size_mm,
+            img_shape
         )
-        
-        if result is None:
-            return jsonify({'status': 'error', 'message': 'Calibration failed'}), 500
         
         # Update config with new calibration
         with state.lock:
