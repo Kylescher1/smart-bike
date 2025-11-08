@@ -31,6 +31,7 @@ class StreamState:
         self.vision = None
         self.camera_config = None
         self.mode = "debug"  # "debug" or "calibrate"
+        self.view = "depth"  # "left", "right", or "depth"
         self.lock = Lock()
         self.latest_frame = None
         self.latest_frame_bytes = None
@@ -80,11 +81,49 @@ def initialize_vision(camera_config):
     
     return vision
 
+def generate_camera_frame(camera_side):
+    """Generate a frame from left or right camera."""
+    if state.vision is None or not state.vision.connected:
+        return None
+    
+    try:
+        # Get raw frame from the appropriate camera
+        if camera_side == "left":
+            frame = state.vision.left_camera.read_frame()
+            label = "LEFT CAMERA"
+        else:  # right
+            frame = state.vision.right_camera.read_frame()
+            label = "RIGHT CAMERA"
+        
+        if frame is None:
+            return None
+        
+        # Convert to color if grayscale
+        if len(frame.shape) == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        
+        # Add label
+        cv2.putText(frame, label, (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        return frame
+        
+    except Exception as e:
+        print(f"Error generating {camera_side} camera frame: {e}")
+        return None
+
 def generate_debug_frame():
     """Generate a single debug frame (simple depth visualization)."""
     if state.vision is None or not state.vision.connected:
         return None
     
+    # Check which view to show
+    if state.view == "left":
+        return generate_camera_frame("left")
+    elif state.view == "right":
+        return generate_camera_frame("right")
+    
+    # Otherwise show depth map
     try:
         # Get depth data
         result = state.vision.read()
@@ -106,7 +145,7 @@ def generate_debug_frame():
         timestamp = metadata.get('timestamp', 'N/A')[-8:]  # Just show time part
         num_disp = metadata.get('num_disparities', 'N/A')
         
-        cv2.putText(depth_colored, f"DEBUG MODE", (10, 30), 
+        cv2.putText(depth_colored, f"DEPTH MAP", (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         cv2.putText(depth_colored, f"Time: {timestamp}", (10, 60), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -124,6 +163,13 @@ def generate_calibrate_frame():
     if state.vision is None or not state.vision.connected:
         return None
     
+    # Check which view to show
+    if state.view == "left":
+        return generate_camera_frame("left")
+    elif state.view == "right":
+        return generate_camera_frame("right")
+    
+    # Otherwise show depth map
     try:
         # Get depth data with current parameters
         result = state.vision.read()
@@ -140,8 +186,8 @@ def generate_calibrate_frame():
         depth_colored = cv2.applyColorMap(depth_display, cv2.COLORMAP_JET)
         
         # Add calibration mode overlay
-        cv2.putText(depth_colored, "CALIBRATION MODE", (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(depth_colored, "DEPTH MAP - CALIBRATION", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
         # Show key parameters
         y_offset = 60
@@ -229,6 +275,19 @@ def set_mode():
         return jsonify({'status': 'success', 'mode': state.mode})
     else:
         return jsonify({'status': 'error', 'message': 'Invalid mode'}), 400
+
+@app.route('/toggle_view', methods=['POST'])
+def toggle_view():
+    """Cycle through camera views: depth -> left -> right -> depth."""
+    with state.lock:
+        if state.view == "depth":
+            state.view = "left"
+        elif state.view == "left":
+            state.view = "right"
+        else:  # right
+            state.view = "depth"
+    
+    return jsonify({'status': 'success', 'view': state.view})
 
 @app.route('/get_parameters', methods=['GET'])
 def get_parameters():

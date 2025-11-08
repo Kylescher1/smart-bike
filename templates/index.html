@@ -110,6 +110,26 @@
             transform: scale(0.9);
         }
         
+        .view-toggle-btn {
+            width: 100%;
+            padding: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 10px;
+            transition: all 0.3s;
+        }
+        
+        .view-toggle-btn:active {
+            transform: scale(0.95);
+        }
+        
         .controls-container {
             background: #2a2a2a;
             border-radius: 10px;
@@ -367,6 +387,10 @@
                 🎛️ Calibrate Mode
             </button>
         </div>
+        
+        <button class="view-toggle-btn" onclick="toggleView()" id="viewToggle">
+            📷 View: Depth Map
+        </button>
     </div>
     
     <!-- Scrollable content area -->
@@ -542,6 +566,7 @@
     
     <script>
         let currentMode = 'debug';
+        let currentView = 'depth';
         let controlsExpanded = false;
         
         // Set mode (debug or calibrate)
@@ -584,6 +609,38 @@
             .catch(error => {
                 console.error('Error:', error);
                 showNotification('Failed to switch mode', true);
+            });
+        }
+        
+        // Toggle camera view
+        function toggleView() {
+            fetch('/toggle_view', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    currentView = data.view;
+                    
+                    // Update button text
+                    const btn = document.getElementById('viewToggle');
+                    if (currentView === 'depth') {
+                        btn.textContent = '📷 View: Depth Map';
+                    } else if (currentView === 'left') {
+                        btn.textContent = '📷 View: Left Camera';
+                    } else {
+                        btn.textContent = '📷 View: Right Camera';
+                    }
+                    
+                    showNotification(`Switched to ${currentView} view`);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showNotification('Failed to toggle view', true);
             });
         }
         
