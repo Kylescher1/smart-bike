@@ -17,7 +17,7 @@ import os
 import importlib.util
 from pathlib import Path
 from flask import Flask, render_template, Response, request, jsonify
-from threading import Lock
+from threading import Lock, Thread
 import time
 
 # Make sure src folder is on sys.path
@@ -33,7 +33,10 @@ class StreamState:
         self.mode = "debug"  # "debug" or "calibrate"
         self.lock = Lock()
         self.latest_frame = None
+        self.latest_frame_bytes = None
         self.parameters = {}
+        self.frame_ready = False
+        self.capturing = False
         
 state = StreamState()
 
@@ -160,24 +163,48 @@ def generate_calibrate_frame():
         print(f"Error generating calibrate frame: {e}")
         return None
 
-def generate_frames():
-    """Generator function to continuously yield frames for MJPEG streaming."""
-    while True:
-        with state.lock:
-            if state.mode == "debug":
-                frame = generate_debug_frame()
-            else:  # calibrate mode
-                frame = generate_calibrate_frame()
-        
-        if frame is not None:
-            # Encode frame as JPEG
-            ret, buffer = cv2.imencode('.jpg', frame)
-            if ret:
-                frame_bytes = buffer.tobytes()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+def capture_frames_continuously():
+    """Background thread that continuously captures and encodes frames."""
+    print("📹 Frame capture thread started")
+    while state.capturing:
+        try:
+            with state.lock:
+                if state.mode == "debug":
+                    frame = generate_debug_frame()
+                else:  # calibrate mode
+                    frame = generate_calibrate_frame()
+            
+            if frame is not None:
+                # Encode frame as JPEG
+                ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ret:
+                    with state.lock:
+                        state.latest_frame_bytes = buffer.tobytes()
+                        state.frame_ready = True
+        except Exception as e:
+            print(f"Error in frame capture: {e}")
         
         time.sleep(0.033)  # ~30 FPS
+    print("📹 Frame capture thread stopped")
+
+def generate_frames():
+    """Generator function that yields frames from the shared buffer.
+    Multiple clients can call this simultaneously."""
+    # Wait for first frame to be ready
+    while not state.frame_ready:
+        time.sleep(0.1)
+    
+    while True:
+        # Get the latest frame from shared buffer
+        with state.lock:
+            if state.latest_frame_bytes is not None:
+                frame_bytes = state.latest_frame_bytes
+        
+        # Yield the frame to this client
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        
+        time.sleep(0.033)  # ~30 FPS per client
 
 @app.route('/')
 def index():
@@ -334,12 +361,18 @@ def save_parameters():
 
 def main():
     """Initialize and run the Flask web server."""
+    capture_thread = None
     try:
         # Load configuration
         state.camera_config = load_config()
         
         # Initialize vision system
         state.vision = initialize_vision(state.camera_config)
+        
+        # Start background frame capture thread
+        state.capturing = True
+        capture_thread = Thread(target=capture_frames_continuously, daemon=True)
+        capture_thread.start()
         
         # Get local IP for display
         import socket
@@ -351,6 +384,7 @@ def main():
         print("="*60)
         print(f"📱 Open on your phone: http://{local_ip}:5000")
         print(f"💻 Or locally: http://localhost:5000")
+        print(f"👥 Multiple users supported!")
         print("="*60 + "\n")
         
         # Run Flask app
@@ -363,6 +397,11 @@ def main():
         import traceback
         traceback.print_exc()
     finally:
+        # Stop frame capture
+        state.capturing = False
+        if capture_thread:
+            capture_thread.join(timeout=2)
+        
         # Clean up
         if state.vision and state.vision.connected:
             print("Stopping vision system...")

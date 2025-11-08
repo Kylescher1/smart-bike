@@ -15,8 +15,22 @@
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
             background: #1a1a1a;
             color: #ffffff;
-            padding: 10px;
+            padding: 0;
+            margin: 0;
             overflow-x: hidden;
+        }
+        
+        .container {
+            padding: 10px;
+        }
+        
+        .sticky-top {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #1a1a1a;
+            padding: 10px;
+            padding-bottom: 15px;
         }
         
         .header {
@@ -43,7 +57,7 @@
             background: #000;
             border-radius: 10px;
             overflow: hidden;
-            margin-bottom: 15px;
+            margin-bottom: 10px;
             box-shadow: 0 4px 20px rgba(0,0,0,0.5);
         }
         
@@ -56,7 +70,12 @@
         .mode-selector {
             display: flex;
             gap: 10px;
-            margin-bottom: 15px;
+            margin-bottom: 0;
+        }
+        
+        .scrollable-content {
+            padding: 10px;
+            padding-top: 5px;
         }
         
         .mode-btn {
@@ -122,8 +141,8 @@
         
         .controls-content {
             display: none;
-            max-height: 500px;
-            overflow-y: auto;
+            max-height: none;
+            overflow-y: visible;
         }
         
         .controls-content.expanded {
@@ -334,24 +353,29 @@
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>🚴 Smart Bike Depth Camera</h1>
-        <p>Real-time Depth Map Visualization</p>
+    <!-- Sticky header with video and mode selector -->
+    <div class="sticky-top">
+        <div class="header">
+            <h1>🚴 Smart Bike Depth Camera</h1>
+            <p>Real-time Depth Map Visualization</p>
+        </div>
+        
+        <div class="video-container">
+            <img id="videoStream" src="{{ url_for('video_feed') }}" alt="Depth Map Stream">
+        </div>
+        
+        <div class="mode-selector">
+            <button class="mode-btn debug active" onclick="setMode('debug')">
+                🔍 Debug Mode
+            </button>
+            <button class="mode-btn calibrate" onclick="setMode('calibrate')">
+                🎛️ Calibrate Mode
+            </button>
+        </div>
     </div>
     
-    <div class="video-container">
-        <img id="videoStream" src="{{ url_for('video_feed') }}" alt="Depth Map Stream">
-    </div>
-    
-    <div class="mode-selector">
-        <button class="mode-btn debug active" onclick="setMode('debug')">
-            🔍 Debug Mode
-        </button>
-        <button class="mode-btn calibrate" onclick="setMode('calibrate')">
-            🎛️ Calibrate Mode
-        </button>
-    </div>
-    
+    <!-- Scrollable content area -->
+    <div class="scrollable-content">
     <div class="controls-container" id="calibrationControls" style="display: none;">
         <div class="controls-header" onclick="toggleControls()">
             <h2>⚙️ Calibration Parameters</h2>
@@ -512,10 +536,12 @@
         </button>
     </div>
     
-    <div class="status-bar">
-        <span class="status-indicator"></span>
-        Connected to Smart Bike Camera
+        <div class="status-bar">
+            <span class="status-indicator"></span>
+            Connected to Smart Bike Camera
+        </div>
     </div>
+    <!-- End scrollable content -->
     
     <div class="notification" id="notification"></div>
     
@@ -541,7 +567,12 @@
                     document.querySelectorAll('.mode-btn').forEach(btn => {
                         btn.classList.remove('active');
                     });
-                    event.target.classList.add('active');
+                    
+                    // Add active class to the clicked mode button
+                    const activeBtn = document.querySelector(`.mode-btn.${mode}`);
+                    if (activeBtn) {
+                        activeBtn.classList.add('active');
+                    }
                     
                     // Show/hide calibration controls
                     const controls = document.getElementById('calibrationControls');
