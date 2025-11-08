@@ -110,23 +110,51 @@
             transform: scale(0.9);
         }
         
+        .button-row {
+            display: flex;
+            gap: 10px;
+            padding: 0 10px;
+            margin-top: 15px;
+            margin-bottom: 20px;
+        }
+        
         .view-toggle-btn {
-            width: 100%;
-            padding: 12px;
-            font-size: 15px;
-            font-weight: 600;
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            flex: 2;
+            padding: 15px;
+            font-size: 16px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             border: none;
-            border-radius: 8px;
+            border-radius: 10px;
             cursor: pointer;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            margin-top: 10px;
             transition: all 0.3s;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
         }
         
         .view-toggle-btn:active {
+            transform: scale(0.95);
+        }
+        
+        .restart-btn {
+            flex: 1;
+            padding: 15px;
+            font-size: 16px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            transition: all 0.3s;
+            box-shadow: 0 4px 15px rgba(240, 147, 251, 0.4);
+        }
+        
+        .restart-btn:active {
             transform: scale(0.95);
         }
         
@@ -387,14 +415,19 @@
                 🎛️ Calibrate Mode
             </button>
         </div>
-        
-        <button class="view-toggle-btn" onclick="toggleView()" id="viewToggle">
-            📷 View: Depth Map
-        </button>
     </div>
     
     <!-- Scrollable content area -->
     <div class="scrollable-content">
+        <div class="button-row">
+            <button class="view-toggle-btn" onclick="toggleView()" id="viewToggle">
+                📷 View: Depth Map
+            </button>
+            <button class="restart-btn" onclick="restartVision()">
+                🔄 Restart
+            </button>
+        </div>
+        
     <div class="controls-container" id="calibrationControls" style="display: none;">
         <div class="controls-header" onclick="toggleControls()">
             <h2>⚙️ Calibration Parameters</h2>
@@ -641,6 +674,30 @@
             .catch(error => {
                 console.error('Error:', error);
                 showNotification('Failed to toggle view', true);
+            });
+        }
+        
+        // Restart vision system
+        function restartVision() {
+            showNotification('Restarting cameras...');
+            
+            fetch('/restart_vision', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    showNotification('✅ Cameras restarted!');
+                } else {
+                    showNotification('❌ Restart failed: ' + data.message, true);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showNotification('❌ Restart error', true);
             });
         }
         

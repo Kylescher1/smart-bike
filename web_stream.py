@@ -255,7 +255,11 @@ def generate_frames():
 @app.route('/')
 def index():
     """Render the main web interface."""
-    return render_template('index.html')
+    response = app.make_response(render_template('index.html'))
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 @app.route('/video_feed')
 def video_feed():
@@ -288,6 +292,26 @@ def toggle_view():
             state.view = "depth"
     
     return jsonify({'status': 'success', 'view': state.view})
+
+@app.route('/restart_vision', methods=['POST'])
+def restart_vision():
+    """Restart the vision system (cameras and depth processing)."""
+    try:
+        print("🔄 Restarting vision system...")
+        
+        with state.lock:
+            if state.vision and state.vision.connected:
+                state.vision.stop()
+                print("  Stopped cameras")
+            
+            # Restart
+            state.vision.start()
+            print("  ✅ Vision system restarted")
+        
+        return jsonify({'status': 'success', 'message': 'Vision system restarted'})
+    except Exception as e:
+        print(f"  ❌ Error restarting: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/get_parameters', methods=['GET'])
 def get_parameters():
