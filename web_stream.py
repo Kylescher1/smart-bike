@@ -30,7 +30,7 @@ class StreamState:
     def __init__(self):
         self.vision = None
         self.camera_config = None
-        self.mode = "debug"  # "debug" or "calibrate"
+        self.mode = "debug"  # "debug", "calibrate", or "calibrate_maps"
         self.view = "depth"  # "left", "right", or "depth"
         self.lock = Lock()
         self.latest_frame = None
@@ -38,6 +38,15 @@ class StreamState:
         self.parameters = {}
         self.frame_ready = False
         self.capturing = False
+        # Calibration state
+        self.calibrating_maps = False
+        self.captured_pairs = []
+        self.checkerboard_size = (7, 10)
+        self.square_size_mm = 20.0
+        self.min_pairs = 5
+        # Colormap
+        self.colormap = cv2.COLORMAP_JET  # Default colormap
+        self.invert_colormap = False  # Invert colormap colors
         
 state = StreamState()
 
@@ -138,8 +147,12 @@ def generate_debug_frame():
         depth_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
         depth_display = depth_normalized.astype(np.uint8)
         
+        # Invert if needed
+        if state.invert_colormap:
+            depth_display = 255 - depth_display
+        
         # Apply colormap for better visualization
-        depth_colored = cv2.applyColorMap(depth_display, cv2.COLORMAP_JET)
+        depth_colored = cv2.applyColorMap(depth_display, state.colormap)
         
         # Add metadata text overlay
         timestamp = metadata.get('timestamp', 'N/A')[-8:]  # Just show time part
@@ -183,7 +196,12 @@ def generate_calibrate_frame():
         # Normalize depth map for visualization
         depth_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
         depth_display = depth_normalized.astype(np.uint8)
-        depth_colored = cv2.applyColorMap(depth_display, cv2.COLORMAP_JET)
+        
+        # Invert if needed
+        if state.invert_colormap:
+            depth_display = 255 - depth_display
+        
+        depth_colored = cv2.applyColorMap(depth_display, state.colormap)
         
         # Add calibration mode overlay
         cv2.putText(depth_colored, "DEPTH MAP - CALIBRATION", (10, 30), 
@@ -312,6 +330,202 @@ def restart_vision():
     except Exception as e:
         print(f"  ❌ Error restarting: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/start_map_calibration', methods=['POST'])
+def start_map_calibration():
+    """Start the map calibration process."""
+    with state.lock:
+        state.mode = "calibrate_maps"
+        state.calibrating_maps = True
+        state.captured_pairs = []
+        state.view = "stereo"  # Special view for side-by-side cameras
+    
+    print("📐 Starting map calibration mode")
+    return jsonify({'status': 'success', 'pairs_captured': 0, 'min_pairs': state.min_pairs})
+
+@app.route('/capture_calibration_pair', methods=['POST'])
+def capture_calibration_pair():
+    """Capture a stereo pair with checkerboard detection."""
+    if not state.calibrating_maps:
+        return jsonify({'status': 'error', 'message': 'Not in calibration mode'}), 400
+    
+    try:
+        # Get frames from cameras
+        left_frame = state.vision.left_camera.read_frame()
+        right_frame = state.vision.right_camera.read_frame()
+        
+        if left_frame is None or right_frame is None:
+            return jsonify({'status': 'error', 'message': 'Failed to grab frames'}), 500
+        
+        # Convert to grayscale
+        gray_left = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
+        gray_right = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
+        
+        # Try to find checkerboard
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 150, 1e-6)
+        retL, cornersL = cv2.findChessboardCorners(gray_left, state.checkerboard_size, None)
+        retR, cornersR = cv2.findChessboardCorners(gray_right, state.checkerboard_size, None)
+        
+        if retL and retR:
+            # Refine corners
+            cornersL_refined = cv2.cornerSubPix(gray_left, cornersL, (11, 11), (-1, -1), criteria)
+            cornersR_refined = cv2.cornerSubPix(gray_right, cornersR, (11, 11), (-1, -1), criteria)
+            
+            with state.lock:
+                state.captured_pairs.append((gray_left.copy(), gray_right.copy(), cornersL_refined, cornersR_refined))
+            
+            pairs_count = len(state.captured_pairs)
+            print(f"✅ Captured pair {pairs_count}: Checkerboard detected in both cameras")
+            
+            return jsonify({
+                'status': 'success',
+                'pairs_captured': pairs_count,
+                'min_pairs': state.min_pairs,
+                'ready': pairs_count >= state.min_pairs
+            })
+        else:
+            missing = []
+            if not retL:
+                missing.append('left')
+            if not retR:
+                missing.append('right')
+            
+            return jsonify({
+                'status': 'error',
+                'message': f'Checkerboard not detected in {" and ".join(missing)} camera(s)',
+                'pairs_captured': len(state.captured_pairs)
+            }), 400
+            
+    except Exception as e:
+        print(f"❌ Error capturing pair: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/finish_map_calibration', methods=['POST'])
+def finish_map_calibration():
+    """Process captured pairs and perform stereo calibration."""
+    if not state.calibrating_maps:
+        return jsonify({'status': 'error', 'message': 'Not in calibration mode'}), 400
+    
+    if len(state.captured_pairs) < state.min_pairs:
+        return jsonify({
+            'status': 'error',
+            'message': f'Need at least {state.min_pairs} pairs, only have {len(state.captured_pairs)}'
+        }), 400
+    
+    try:
+        print(f"\n📐 Processing {len(state.captured_pairs)} captured pairs...")
+        
+        # Import calibration module
+        import Calibrate
+        
+        # Run calibration (this might take a while)
+        result = Calibrate.calibrate_stereo_cameras(
+            state.captured_pairs,
+            state.checkerboard_size,
+            state.square_size_mm
+        )
+        
+        if result is None:
+            return jsonify({'status': 'error', 'message': 'Calibration failed'}), 500
+        
+        # Update config with new calibration
+        with state.lock:
+            state.camera_config['left']['map_x'] = result['leftMapX']
+            state.camera_config['left']['map_y'] = result['leftMapY']
+            state.camera_config['right']['map_x'] = result['rightMapX']
+            state.camera_config['right']['map_y'] = result['rightMapY']
+            state.camera_config['imageSize'] = result['imageSize']
+            state.camera_config['Q'] = result['Q']
+            
+            # Save to config.dill
+            config_path = "config.dill"
+            with open(config_path, "rb") as f:
+                full_config = dill.load(f)
+            
+            full_config['camera'] = state.camera_config
+            
+            with open(config_path, "wb") as f:
+                dill.dump(full_config, f)
+            
+            # Reset calibration state
+            state.calibrating_maps = False
+            state.captured_pairs = []
+            state.mode = "debug"
+            state.view = "depth"
+        
+        # Restart vision with new calibration
+        state.vision.stop()
+        state.vision = initialize_vision(state.camera_config)
+        
+        print("✅ Calibration complete and saved!")
+        
+        return jsonify({'status': 'success', 'message': 'Calibration complete!'})
+        
+    except Exception as e:
+        print(f"❌ Error during calibration: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/cancel_map_calibration', methods=['POST'])
+def cancel_map_calibration():
+    """Cancel the map calibration process."""
+    with state.lock:
+        state.calibrating_maps = False
+        state.captured_pairs = []
+        state.mode = "debug"
+        state.view = "depth"
+    
+    print("❌ Map calibration cancelled")
+    return jsonify({'status': 'success'})
+
+@app.route('/set_colormap', methods=['POST'])
+def set_colormap():
+    """Change the depth map colormap."""
+    data = request.get_json()
+    colormap_name = data.get('colormap', 'JET')
+    
+    # Map colormap names to OpenCV constants
+    colormap_dict = {
+        'JET': cv2.COLORMAP_JET,
+        'BONE': cv2.COLORMAP_BONE,
+        'HOT': cv2.COLORMAP_HOT,
+        'RAINBOW': cv2.COLORMAP_RAINBOW,
+        'VIRIDIS': cv2.COLORMAP_VIRIDIS,
+        'PLASMA': cv2.COLORMAP_PLASMA,
+        'INFERNO': cv2.COLORMAP_INFERNO,
+        'MAGMA': cv2.COLORMAP_MAGMA,
+        'COOL': cv2.COLORMAP_COOL,
+        'SPRING': cv2.COLORMAP_SPRING,
+        'SUMMER': cv2.COLORMAP_SUMMER,
+        'AUTUMN': cv2.COLORMAP_AUTUMN,
+        'WINTER': cv2.COLORMAP_WINTER,
+        'OCEAN': cv2.COLORMAP_OCEAN,
+        'PINK': cv2.COLORMAP_PINK,
+        'HSV': cv2.COLORMAP_HSV,
+        'PARULA': cv2.COLORMAP_PARULA,
+        'TURBO': cv2.COLORMAP_TURBO,
+    }
+    
+    if colormap_name in colormap_dict:
+        with state.lock:
+            state.colormap = colormap_dict[colormap_name]
+        print(f"🎨 Colormap changed to {colormap_name}")
+        return jsonify({'status': 'success', 'colormap': colormap_name})
+    else:
+        return jsonify({'status': 'error', 'message': 'Invalid colormap'}), 400
+
+@app.route('/toggle_colormap_invert', methods=['POST'])
+def toggle_colormap_invert():
+    """Toggle colormap inversion."""
+    data = request.get_json()
+    invert = data.get('invert', False)
+    
+    with state.lock:
+        state.invert_colormap = invert
+    
+    print(f"🎨 Colormap invert: {'ON' if invert else 'OFF'}")
+    return jsonify({'status': 'success', 'invert': state.invert_colormap})
 
 @app.route('/get_parameters', methods=['GET'])
 def get_parameters():

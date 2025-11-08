@@ -110,6 +110,26 @@
             transform: scale(0.9);
         }
         
+        .calibrate-maps-btn {
+            width: 100%;
+            padding: 12px;
+            font-size: 14px;
+            font-weight: 600;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 10px;
+            transition: all 0.3s;
+        }
+        
+        .calibrate-maps-btn:active {
+            transform: scale(0.95);
+        }
+        
         .button-row {
             display: flex;
             gap: 10px;
@@ -156,6 +176,63 @@
         
         .restart-btn:active {
             transform: scale(0.95);
+        }
+        
+        .colormap-selector {
+            padding: 0 10px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .colormap-selector label {
+            font-size: 15px;
+            font-weight: 600;
+            color: #ffffff;
+            white-space: nowrap;
+        }
+        
+        .colormap-selector select {
+            flex: 1;
+            padding: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            background: #2a2a2a;
+            color: #ffffff;
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            cursor: pointer;
+            outline: none;
+        }
+        
+        .colormap-selector select:focus {
+            border-color: #764ba2;
+            box-shadow: 0 0 10px rgba(102, 126, 234, 0.5);
+        }
+        
+        .colormap-invert {
+            padding: 0 10px;
+            margin-bottom: 20px;
+        }
+        
+        .colormap-invert label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            font-size: 14px;
+            color: #ffffff;
+        }
+        
+        .colormap-invert input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+        
+        .colormap-invert span {
+            flex: 1;
         }
         
         .controls-container {
@@ -415,6 +492,10 @@
                 🎛️ Calibrate Mode
             </button>
         </div>
+        
+        <button class="calibrate-maps-btn" onclick="startMapCalibration()">
+            📐 Calibrate Camera Maps
+        </button>
     </div>
     
     <!-- Scrollable content area -->
@@ -426,6 +507,37 @@
             <button class="restart-btn" onclick="restartVision()">
                 🔄 Restart
             </button>
+        </div>
+        
+        <div class="colormap-selector">
+            <label for="colormapSelect">🎨 Colormap:</label>
+            <select id="colormapSelect" onchange="changeColormap(this.value)">
+                <option value="JET" selected>JET (Rainbow)</option>
+                <option value="BONE">BONE (X-ray)</option>
+                <option value="HOT">HOT (Fire)</option>
+                <option value="RAINBOW">RAINBOW</option>
+                <option value="VIRIDIS">VIRIDIS</option>
+                <option value="PLASMA">PLASMA</option>
+                <option value="INFERNO">INFERNO</option>
+                <option value="MAGMA">MAGMA</option>
+                <option value="COOL">COOL</option>
+                <option value="SPRING">SPRING</option>
+                <option value="SUMMER">SUMMER</option>
+                <option value="AUTUMN">AUTUMN</option>
+                <option value="WINTER">WINTER</option>
+                <option value="OCEAN">OCEAN</option>
+                <option value="PINK">PINK</option>
+                <option value="HSV">HSV</option>
+                <option value="PARULA">PARULA</option>
+                <option value="TURBO">TURBO</option>
+            </select>
+        </div>
+        
+        <div class="colormap-invert">
+            <label>
+                <input type="checkbox" id="invertColormap" onchange="toggleColormapInvert(this.checked)">
+                <span>🔄 Invert Colors (Far=Dark, Near=Light)</span>
+            </label>
         </div>
         
     <div class="controls-container" id="calibrationControls" style="display: none;">
@@ -699,6 +811,77 @@
                 console.error('Error:', error);
                 showNotification('❌ Restart error', true);
             });
+        }
+        
+        // Change colormap
+        function changeColormap(colormap) {
+            fetch('/set_colormap', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ colormap: colormap })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    showNotification(`🎨 Colormap: ${colormap}`);
+                } else {
+                    showNotification('❌ Failed to change colormap', true);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showNotification('❌ Colormap error', true);
+            });
+        }
+        
+        // Toggle colormap inversion
+        function toggleColormapInvert(invert) {
+            fetch('/toggle_colormap_invert', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ invert: invert })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    showNotification(invert ? '🔄 Colors inverted' : '🔄 Colors normal');
+                } else {
+                    showNotification('❌ Failed to invert', true);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showNotification('❌ Invert error', true);
+            });
+        }
+        
+        // Start map calibration
+        function startMapCalibration() {
+            if (confirm('Start camera calibration? You will need a checkerboard pattern (7x10).')) {
+                fetch('/start_map_calibration', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        showNotification('📐 Map calibration started! Hold checkerboard in view.');
+                        // TODO: Show calibration UI
+                    } else {
+                        showNotification('❌ Failed to start calibration', true);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    showNotification('❌ Calibration error', true);
+                });
+            }
         }
         
         // Toggle controls panel
