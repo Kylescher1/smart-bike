@@ -142,11 +142,12 @@ class VISION:
     
     def read(self):
         """
-        Capture frames, process depth, and return dictionary with depth_map and metadata.
+        Capture frames, process depth, and return dictionary with depth_map, disparity_map and metadata.
         
         Returns:
             dict: {
                 'depth_map': np.ndarray,
+                'disparity_map': np.ndarray,
                 'metadata': {
                     'timestamp': str,
                     'num_disparities': int
@@ -163,6 +164,7 @@ class VISION:
         if left_frame is None or right_frame is None:
             return {
                 'depth_map': np.array([]),
+                'disparity_map': np.array([]),
                 'metadata': {
                     'timestamp': datetime.now().isoformat(),
                     'num_disparities': 0,
@@ -177,8 +179,12 @@ class VISION:
 
             depth_map, metadata = self.depth_processor.process_frames(left_frame, right_frame)
             
+            # Extract disparity_map from metadata and add to top level
+            disparity_map = metadata.pop('disparity_map', np.array([]))
+            
             return {
                 'depth_map': depth_map,
+                'disparity_map': disparity_map,
                 'metadata': metadata
             }
         except Exception as e:
@@ -186,6 +192,7 @@ class VISION:
                 print(f"{self.name}: Error processing depth: {e}")
             return {
                 'depth_map': np.array([]),
+                'disparity_map': np.array([]),
                 'metadata': {
                     'timestamp': datetime.now().isoformat(),
                     'num_disparities': 0,

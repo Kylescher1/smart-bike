@@ -195,6 +195,7 @@ class DepthProcessor:
         metadata = {
             "timestamp": datetime.now().isoformat(),
             "num_disparities": int(self.stereo_matcher.getNumDisparities()) if self.stereo_matcher else 0,
+            "disparity_map": disparity,  # Include disparity map in metadata
         }
 
         return depth_map, metadata

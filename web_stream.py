@@ -31,7 +31,7 @@ class StreamState:
         self.vision = None
         self.camera_config = None
         self.mode = "debug"  # "debug", "calibrate", or "calibrate_maps"
-        self.view = "depth"  # "left", "right", or "depth"
+        self.view = "depth"  # "left", "right", "depth", or "disparity"
         self.lock = Lock()
         self.latest_frame = None
         self.latest_frame_bytes = None
@@ -200,40 +200,74 @@ def generate_debug_frame():
     elif state.view == "right":
         return generate_camera_frame("right")
     
-    # Otherwise show depth map
+    # Otherwise show depth or disparity map
     try:
         # Get depth data
         result = state.vision.read()
         depth_map = result.get('depth_map')
+        disparity_map = result.get('disparity_map')
         metadata = result.get('metadata', {})
         
         # Check for errors
-        if 'error' in metadata or depth_map is None or depth_map.size == 0:
+        if 'error' in metadata:
             return None
         
-        # Normalize depth map for visualization (0-255 range)
-        depth_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
-        depth_display = depth_normalized.astype(np.uint8)
-        
-        # Invert if needed
-        if state.invert_colormap:
-            depth_display = 255 - depth_display
-        
-        # Apply colormap for better visualization
-        depth_colored = cv2.applyColorMap(depth_display, state.colormap)
-        
-        # Add metadata text overlay
-        timestamp = metadata.get('timestamp', 'N/A')[-8:]  # Just show time part
-        num_disp = metadata.get('num_disparities', 'N/A')
-        
-        cv2.putText(depth_colored, f"DEPTH MAP", (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(depth_colored, f"Time: {timestamp}", (10, 60), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(depth_colored, f"Disparities: {num_disp}", (10, 85), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        return depth_colored
+        # Show disparity map if selected
+        if state.view == "disparity":
+            if disparity_map is None or disparity_map.size == 0:
+                return None
+            
+            # Normalize disparity map for visualization (0-255 range)
+            disparity_normalized = cv2.normalize(disparity_map, None, 0, 255, cv2.NORM_MINMAX)
+            disparity_display = disparity_normalized.astype(np.uint8)
+            
+            # Invert if needed
+            if state.invert_colormap:
+                disparity_display = 255 - disparity_display
+            
+            # Apply colormap for better visualization
+            disparity_colored = cv2.applyColorMap(disparity_display, state.colormap)
+            
+            # Add metadata text overlay
+            timestamp = metadata.get('timestamp', 'N/A')[-8:]  # Just show time part
+            num_disp = metadata.get('num_disparities', 'N/A')
+            
+            cv2.putText(disparity_colored, f"DISPARITY MAP", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(disparity_colored, f"Time: {timestamp}", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(disparity_colored, f"Disparities: {num_disp}", (10, 85), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            return disparity_colored
+        else:
+            # Show depth map (default)
+            if depth_map is None or depth_map.size == 0:
+                return None
+            
+            # Normalize depth map for visualization (0-255 range)
+            depth_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
+            depth_display = depth_normalized.astype(np.uint8)
+            
+            # Invert if needed
+            if state.invert_colormap:
+                depth_display = 255 - depth_display
+            
+            # Apply colormap for better visualization
+            depth_colored = cv2.applyColorMap(depth_display, state.colormap)
+            
+            # Add metadata text overlay
+            timestamp = metadata.get('timestamp', 'N/A')[-8:]  # Just show time part
+            num_disp = metadata.get('num_disparities', 'N/A')
+            
+            cv2.putText(depth_colored, f"DEPTH MAP", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(depth_colored, f"Time: {timestamp}", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(depth_colored, f"Disparities: {num_disp}", (10, 85), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            return depth_colored
         
     except Exception as e:
         print(f"Error generating debug frame: {e}")
@@ -254,46 +288,86 @@ def generate_calibrate_frame():
     elif state.view == "right":
         return generate_camera_frame("right")
     
-    # Otherwise show depth map
+    # Otherwise show depth or disparity map
     try:
         # Get depth data with current parameters
         result = state.vision.read()
         depth_map = result.get('depth_map')
+        disparity_map = result.get('disparity_map')
         metadata = result.get('metadata', {})
         
         # Check for errors
-        if 'error' in metadata or depth_map is None or depth_map.size == 0:
+        if 'error' in metadata:
             return None
         
-        # Normalize depth map for visualization
-        depth_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
-        depth_display = depth_normalized.astype(np.uint8)
-        
-        # Invert if needed
-        if state.invert_colormap:
-            depth_display = 255 - depth_display
-        
-        depth_colored = cv2.applyColorMap(depth_display, state.colormap)
-        
-        # Add calibration mode overlay
-        cv2.putText(depth_colored, "DEPTH MAP - CALIBRATION", (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        # Show key parameters
-        y_offset = 60
-        params_to_show = [
-            ('blockSize', state.vision.blockSize),
-            ('numDisparities', state.vision.numDisparities),
-            ('uniqueness', state.vision.uniquenessRatio),
-            ('WLS', 'ON' if state.vision.useWLS else 'OFF'),
-        ]
-        
-        for param_name, param_value in params_to_show:
-            cv2.putText(depth_colored, f"{param_name}: {param_value}", (10, y_offset), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            y_offset += 20
-        
-        return depth_colored
+        # Show disparity map if selected
+        if state.view == "disparity":
+            if disparity_map is None or disparity_map.size == 0:
+                return None
+            
+            # Normalize disparity map for visualization
+            disparity_normalized = cv2.normalize(disparity_map, None, 0, 255, cv2.NORM_MINMAX)
+            disparity_display = disparity_normalized.astype(np.uint8)
+            
+            # Invert if needed
+            if state.invert_colormap:
+                disparity_display = 255 - disparity_display
+            
+            disparity_colored = cv2.applyColorMap(disparity_display, state.colormap)
+            
+            # Add calibration mode overlay
+            cv2.putText(disparity_colored, "DISPARITY MAP - CALIBRATION", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            # Show key parameters
+            y_offset = 60
+            params_to_show = [
+                ('blockSize', state.vision.blockSize),
+                ('numDisparities', state.vision.numDisparities),
+                ('uniqueness', state.vision.uniquenessRatio),
+                ('WLS', 'ON' if state.vision.useWLS else 'OFF'),
+            ]
+            
+            for param_name, param_value in params_to_show:
+                cv2.putText(disparity_colored, f"{param_name}: {param_value}", (10, y_offset), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                y_offset += 20
+            
+            return disparity_colored
+        else:
+            # Show depth map (default)
+            if depth_map is None or depth_map.size == 0:
+                return None
+            
+            # Normalize depth map for visualization
+            depth_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
+            depth_display = depth_normalized.astype(np.uint8)
+            
+            # Invert if needed
+            if state.invert_colormap:
+                depth_display = 255 - depth_display
+            
+            depth_colored = cv2.applyColorMap(depth_display, state.colormap)
+            
+            # Add calibration mode overlay
+            cv2.putText(depth_colored, "DEPTH MAP - CALIBRATION", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            # Show key parameters
+            y_offset = 60
+            params_to_show = [
+                ('blockSize', state.vision.blockSize),
+                ('numDisparities', state.vision.numDisparities),
+                ('uniqueness', state.vision.uniquenessRatio),
+                ('WLS', 'ON' if state.vision.useWLS else 'OFF'),
+            ]
+            
+            for param_name, param_value in params_to_show:
+                cv2.putText(depth_colored, f"{param_name}: {param_value}", (10, y_offset), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                y_offset += 20
+            
+            return depth_colored
         
     except Exception as e:
         print(f"Error generating calibrate frame: {e}")
@@ -372,9 +446,11 @@ def set_mode():
 
 @app.route('/toggle_view', methods=['POST'])
 def toggle_view():
-    """Cycle through camera views: depth -> left -> right -> depth."""
+    """Cycle through camera views: depth -> disparity -> left -> right -> depth."""
     with state.lock:
         if state.view == "depth":
+            state.view = "disparity"
+        elif state.view == "disparity":
             state.view = "left"
         elif state.view == "left":
             state.view = "right"
