@@ -303,6 +303,31 @@
         .restart-btn:active {
             transform: scale(0.95);
         }
+
+        .record-btn {
+            flex: 1;
+            padding: 15px;
+            font-size: 16px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #ff5858 0%, #fb3d7d 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            transition: all 0.3s;
+            box-shadow: 0 4px 15px rgba(251, 61, 125, 0.4);
+        }
+
+        .record-btn.active {
+            background: linear-gradient(135deg, #2ecc71 0%, #27ae60 100%);
+            box-shadow: 0 4px 15px rgba(39, 174, 96, 0.4);
+        }
+
+        .record-btn:active {
+            transform: scale(0.95);
+        }
         
         .colormap-selector {
             padding: 0 10px;
@@ -666,6 +691,9 @@
             <button class="restart-btn" onclick="restartVision()">
                 🔄 Restart
             </button>
+            <button class="record-btn" onclick="toggleRecording()" id="recordBtn">
+                ⏺️ Start Recording
+            </button>
         </div>
         
         <div class="colormap-selector">
@@ -921,6 +949,8 @@
     <script>
         let currentMode = 'debug';
         let currentView = 'depth';
+        let isRecording = false;
+        let currentRecordingPath = null;
         let controlsExpanded = false;
         
         // Set mode (debug or calibrate)
@@ -1025,6 +1055,86 @@
             .catch(error => {
                 console.error('Error:', error);
                 showNotification('❌ Restart error', true);
+            });
+        }
+
+        function updateRecordingButton() {
+            const btn = document.getElementById('recordBtn');
+            if (!btn) return;
+            if (isRecording) {
+                btn.textContent = '⏹ Stop Recording';
+                btn.classList.add('active');
+            } else {
+                btn.textContent = '⏺️ Start Recording';
+                btn.classList.remove('active');
+            }
+        }
+
+        function toggleRecording() {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        }
+
+        function startRecording() {
+            fetch('/start_recording', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    isRecording = true;
+                    updateRecordingButton();
+                    currentRecordingPath = data.path || null;
+                    const label = data.path ? data.path.split(/[\\/]/).pop() : '';
+                    showNotification(label ? `🎥 Recording started (${label})` : '🎥 Recording started');
+                } else {
+                    if (data.message && data.message.includes('already in progress')) {
+                        isRecording = true;
+                        updateRecordingButton();
+                    }
+                    showNotification('❌ ' + (data.message || 'Failed to start recording'), true);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showNotification('❌ Recording error', true);
+            });
+        }
+
+        function stopRecording() {
+            fetch('/stop_recording', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    isRecording = false;
+                    updateRecordingButton();
+                    const path = data.path || currentRecordingPath;
+                    currentRecordingPath = null;
+                    const seconds = data.duration ? data.duration.toFixed(1) : '0.0';
+                    const label = path ? path.split(/[\\/]/).pop() : '';
+                    showNotification(label ? `💾 Saved ${label} (${seconds}s)` : `💾 Saved recording (${seconds}s)`);
+                } else {
+                    if (data.message && data.message.includes('No active recording')) {
+                        isRecording = false;
+                        updateRecordingButton();
+                    }
+                    showNotification('❌ ' + (data.message || 'Failed to stop recording'), true);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showNotification('❌ Stop recording error', true);
             });
         }
         
@@ -1331,6 +1441,8 @@
                 this.src = "{{ url_for('video_feed') }}?" + new Date().getTime();
             }, 1000);
         };
+
+        updateRecordingButton();
     </script>
 </body>
 </html>

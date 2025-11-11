@@ -19,6 +19,7 @@ from pathlib import Path
 from flask import Flask, render_template, Response, request, jsonify
 from threading import Lock, Thread
 import time
+from datetime import datetime
 
 # Make sure src folder is on sys.path
 sys.path.append(str(Path(__file__).resolve().parent / "src"))
@@ -38,6 +39,12 @@ class StreamState:
         self.parameters = {}
         self.frame_ready = False
         self.capturing = False
+        # Recording state
+        self.recording = False
+        self.recording_writer = None
+        self.recording_path = None
+        self.recording_start_time = None
+        self.recording_view = None
         # Calibration state
         self.calibrating_maps = False
         self.captured_pairs = []
@@ -357,6 +364,36 @@ def capture_frames_continuously():
                     frame = generate_calibrate_frame()
             
             if frame is not None:
+                with state.lock:
+                    state.latest_frame = frame
+                    if state.recording:
+                        if state.recording_writer is None:
+                            try:
+                                Path("recordings").mkdir(parents=True, exist_ok=True)
+                                h, w = frame.shape[:2]
+                                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                                writer = cv2.VideoWriter(
+                                    state.recording_path,
+                                    fourcc,
+                                    30.0,
+                                    (w, h)
+                                )
+                                if not writer.isOpened():
+                                    print(f"❌ Failed to open video writer for {state.recording_path}")
+                                    writer.release()
+                                    state.recording = False
+                                    state.recording_path = None
+                                    state.recording_start_time = None
+                                else:
+                                    state.recording_writer = writer
+                                    print(f"🎥 Recording initialized: {state.recording_path}")
+                            except Exception as err:
+                                print(f"❌ Error initializing recording: {err}")
+                                state.recording = False
+                                state.recording_path = None
+                                state.recording_start_time = None
+                        if state.recording_writer is not None:
+                            state.recording_writer.write(frame)
                 # Encode frame as JPEG
                 ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 if ret:
@@ -367,6 +404,17 @@ def capture_frames_continuously():
             print(f"Error in frame capture: {e}")
         
         time.sleep(0.033)  # ~30 FPS
+    # Cleanup recording writer if still open
+    with state.lock:
+        writer = state.recording_writer
+        state.recording_writer = None
+        state.recording = False
+        state.recording_path = None
+        state.recording_start_time = None
+        state.recording_view = None
+    if writer is not None:
+        writer.release()
+        print("🎥 Recording writer released on capture stop")
     print("📹 Frame capture thread stopped")
 
 def generate_frames():
@@ -428,6 +476,54 @@ def toggle_view():
         state.view = views[(current_index + 1) % len(views)]
     
     return jsonify({'status': 'success', 'view': state.view})
+
+@app.route('/start_recording', methods=['POST'])
+def start_recording():
+    """Start saving the active view to disk."""
+    with state.lock:
+        if not state.capturing:
+            return jsonify({'status': 'error', 'message': 'Stream not running'}), 400
+        if state.recording:
+            return jsonify({'status': 'error', 'message': 'Recording already in progress'}), 400
+        
+        Path("recordings").mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{timestamp}_{state.view}.mp4"
+        recording_path = str(Path("recordings") / filename)
+        
+        state.recording = True
+        state.recording_writer = None  # initialized on next frame
+        state.recording_path = recording_path
+        state.recording_start_time = time.time()
+        state.recording_view = state.view
+    
+    print(f"🎥 Recording requested: {recording_path}")
+    return jsonify({'status': 'success', 'path': recording_path})
+
+@app.route('/stop_recording', methods=['POST'])
+def stop_recording():
+    """Stop recording and finalize the file."""
+    with state.lock:
+        if not state.recording:
+            return jsonify({'status': 'error', 'message': 'No active recording'}), 400
+        
+        writer = state.recording_writer
+        recording_path = state.recording_path
+        duration = 0.0
+        if state.recording_start_time is not None:
+            duration = time.time() - state.recording_start_time
+        
+        state.recording = False
+        state.recording_writer = None
+        state.recording_path = None
+        state.recording_start_time = None
+        state.recording_view = None
+    
+    if writer is not None:
+        writer.release()
+    print(f"💾 Recording saved: {recording_path}")
+    
+    return jsonify({'status': 'success', 'path': recording_path, 'duration': duration})
 
 @app.route('/restart_vision', methods=['POST'])
 def restart_vision():
