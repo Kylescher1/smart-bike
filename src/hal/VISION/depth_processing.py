@@ -206,7 +206,7 @@ class DepthProcessor:
         
         return depth
 
-    def process_frames(self, left_frame: np.ndarray, right_frame: np.ndarray) -> Tuple[np.ndarray, Dict]:
+    def process_frames(self, left_frame: np.ndarray, right_frame: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Dict]:
         # Apply downsampling if specified (0-100% scale)
         if self.downSample > 0:
             scale_percent = 100 - self.downSample
@@ -234,5 +234,5 @@ class DepthProcessor:
             "num_disparities": int(self.stereo_matcher.getNumDisparities()) if self.stereo_matcher else 0,
         }
 
-        return depth_map, metadata
+        return depth_map, disparity, metadata
 

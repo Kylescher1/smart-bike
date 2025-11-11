@@ -31,7 +31,7 @@ class StreamState:
         self.vision = None
         self.camera_config = None
         self.mode = "debug"  # "debug", "calibrate", or "calibrate_maps"
-        self.view = "depth"  # "left", "right", or "depth"
+        self.view = "depth"  # "depth", "disparity", "left", or "right"
         self.lock = Lock()
         self.latest_frame = None
         self.latest_frame_bytes = None
@@ -205,35 +205,59 @@ def generate_debug_frame():
         # Get depth data
         result = state.vision.read()
         depth_map = result.get('depth_map')
+        disparity_map = result.get('disparity_map')
         metadata = result.get('metadata', {})
         
+        # Select data based on view
+        if state.view == "disparity":
+            data_map = disparity_map
+            label = "DISPARITY MAP"
+        else:
+            data_map = depth_map
+            label = "DEPTH MAP"
+        
         # Check for errors
-        if 'error' in metadata or depth_map is None or depth_map.size == 0:
+        if ('error' in metadata 
+            or data_map is None 
+            or not hasattr(data_map, 'size') 
+            or data_map.size == 0):
             return None
         
+        data_map = np.nan_to_num(data_map, nan=0.0, posinf=0.0, neginf=0.0)
+        
         # Normalize depth map for visualization (0-255 range)
-        depth_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
-        depth_display = depth_normalized.astype(np.uint8)
+        normalized = cv2.normalize(data_map, None, 0, 255, cv2.NORM_MINMAX)
+        display = normalized.astype(np.uint8)
         
         # Invert if needed
         if state.invert_colormap:
-            depth_display = 255 - depth_display
+            display = 255 - display
         
         # Apply colormap for better visualization
-        depth_colored = cv2.applyColorMap(depth_display, state.colormap)
+        colored = cv2.applyColorMap(display, state.colormap)
         
         # Add metadata text overlay
-        timestamp = metadata.get('timestamp', 'N/A')[-8:]  # Just show time part
+        timestamp_raw = metadata.get('timestamp', 'N/A')
+        timestamp_str = str(timestamp_raw)
+        timestamp = timestamp_str[-8:] if len(timestamp_str) >= 8 else timestamp_str
         num_disp = metadata.get('num_disparities', 'N/A')
         
-        cv2.putText(depth_colored, f"DEPTH MAP", (10, 30), 
+        cv2.putText(colored, label, (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(depth_colored, f"Time: {timestamp}", (10, 60), 
+        cv2.putText(colored, f"Time: {timestamp}", (10, 60), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(depth_colored, f"Disparities: {num_disp}", (10, 85), 
+        cv2.putText(colored, f"Disparities: {num_disp}", (10, 85), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        return depth_colored
+        if state.view == "disparity":
+            nonzero = data_map[data_map > 0]
+            if nonzero.size > 0:
+                disp_min = float(np.min(nonzero))
+                disp_max = float(np.max(nonzero))
+                cv2.putText(colored, f"Range: {disp_min:.2f} - {disp_max:.2f}", (10, 110),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        return colored
         
     except Exception as e:
         print(f"Error generating debug frame: {e}")
@@ -259,24 +283,37 @@ def generate_calibrate_frame():
         # Get depth data with current parameters
         result = state.vision.read()
         depth_map = result.get('depth_map')
+        disparity_map = result.get('disparity_map')
         metadata = result.get('metadata', {})
         
+        if state.view == "disparity":
+            data_map = disparity_map
+            label = "DISPARITY MAP - CALIBRATION"
+        else:
+            data_map = depth_map
+            label = "DEPTH MAP - CALIBRATION"
+        
         # Check for errors
-        if 'error' in metadata or depth_map is None or depth_map.size == 0:
+        if ('error' in metadata 
+            or data_map is None 
+            or not hasattr(data_map, 'size') 
+            or data_map.size == 0):
             return None
         
+        data_map = np.nan_to_num(data_map, nan=0.0, posinf=0.0, neginf=0.0)
+        
         # Normalize depth map for visualization
-        depth_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
-        depth_display = depth_normalized.astype(np.uint8)
+        normalized = cv2.normalize(data_map, None, 0, 255, cv2.NORM_MINMAX)
+        display = normalized.astype(np.uint8)
         
         # Invert if needed
         if state.invert_colormap:
-            depth_display = 255 - depth_display
+            display = 255 - display
         
-        depth_colored = cv2.applyColorMap(depth_display, state.colormap)
+        display_colored = cv2.applyColorMap(display, state.colormap)
         
         # Add calibration mode overlay
-        cv2.putText(depth_colored, "DEPTH MAP - CALIBRATION", (10, 30), 
+        cv2.putText(display_colored, label, (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
         # Show key parameters
@@ -289,11 +326,18 @@ def generate_calibrate_frame():
         ]
         
         for param_name, param_value in params_to_show:
-            cv2.putText(depth_colored, f"{param_name}: {param_value}", (10, y_offset), 
+            cv2.putText(display_colored, f"{param_name}: {param_value}", (10, y_offset), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
             y_offset += 20
         
-        return depth_colored
+        if state.view == "disparity":
+            nonzero = data_map[data_map > 0]
+            if nonzero.size > 0:
+                cv2.putText(display_colored, f"Range: {np.min(nonzero):.2f} - {np.max(nonzero):.2f}", (10, y_offset), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                y_offset += 20
+        
+        return display_colored
         
     except Exception as e:
         print(f"Error generating calibrate frame: {e}")
@@ -372,14 +416,14 @@ def set_mode():
 
 @app.route('/toggle_view', methods=['POST'])
 def toggle_view():
-    """Cycle through camera views: depth -> left -> right -> depth."""
+    """Cycle through camera views: depth -> disparity -> left -> right -> depth."""
     with state.lock:
-        if state.view == "depth":
-            state.view = "left"
-        elif state.view == "left":
-            state.view = "right"
-        else:  # right
-            state.view = "depth"
+        views = ["depth", "disparity", "left", "right"]
+        try:
+            current_index = views.index(state.view)
+        except ValueError:
+            current_index = 0
+        state.view = views[(current_index + 1) % len(views)]
     
     return jsonify({'status': 'success', 'view': state.view})
 

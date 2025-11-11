@@ -961,15 +961,21 @@
                     
                     // Update button text
                     const btn = document.getElementById('viewToggle');
-                    if (currentView === 'depth') {
-                        btn.textContent = '📷 View: Depth Map';
-                    } else if (currentView === 'left') {
-                        btn.textContent = '📷 View: Left Camera';
-                    } else {
-                        btn.textContent = '📷 View: Right Camera';
-                    }
+                    const viewLabels = {
+                        depth: '📷 View: Depth Map',
+                        disparity: '📷 View: Disparity Map',
+                        left: '📷 View: Left Camera',
+                        right: '📷 View: Right Camera'
+                    };
+                    const notificationLabels = {
+                        depth: 'depth',
+                        disparity: 'disparity',
+                        left: 'left camera',
+                        right: 'right camera'
+                    };
                     
-                    showNotification(`Switched to ${currentView} view`);
+                    btn.textContent = viewLabels[currentView] || '📷 View: Depth Map';
+                    showNotification(`Switched to ${notificationLabels[currentView] || currentView} view`);
                 }
             })
             .catch(error => {

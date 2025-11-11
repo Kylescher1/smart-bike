@@ -154,6 +154,7 @@ class VISION:
         Returns:
             dict: {
                 'depth_map': np.ndarray,
+                'disparity_map': np.ndarray,
                 'metadata': {
                     'timestamp': str,
                     'num_disparities': int
@@ -168,8 +169,10 @@ class VISION:
         right_frame = self.right_camera.read_frame()
         
         if left_frame is None or right_frame is None:
+            empty = np.array([])
             return {
-                'depth_map': np.array([]),
+                'depth_map': empty,
+                'disparity_map': empty,
                 'metadata': {
                     'timestamp': datetime.now().isoformat(),
                     'num_disparities': 0,
@@ -182,17 +185,20 @@ class VISION:
             if self.depth_processor is None:
                 raise RuntimeError("Depth processor not initialized. Call start() first.")
 
-            depth_map, metadata = self.depth_processor.process_frames(left_frame, right_frame)
+            depth_map, disparity_map, metadata = self.depth_processor.process_frames(left_frame, right_frame)
             
             return {
                 'depth_map': depth_map,
+                'disparity_map': disparity_map,
                 'metadata': metadata
             }
         except Exception as e:
             if self.debug_mode:
                 print(f"{self.name}: Error processing depth: {e}")
+            empty = np.array([])
             return {
-                'depth_map': np.array([]),
+                'depth_map': empty,
+                'disparity_map': empty,
                 'metadata': {
                     'timestamp': datetime.now().isoformat(),
                     'num_disparities': 0,
