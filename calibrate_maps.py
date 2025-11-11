@@ -2,12 +2,25 @@ import cv2
 import numpy as np
 from typing import List, Tuple
 import dill
-import quaternion
 import sys, os
 import importlib.util
-import Calibrate
 
 config_path = r"config.dill"
+
+def detect_corners(gray, pattern):
+    if hasattr(cv2, "findChessboardCornersSB"):
+        return cv2.findChessboardCornersSB(
+            gray,
+            pattern,
+            flags=cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY,
+        )
+    flags = (
+        cv2.CALIB_CB_ADAPTIVE_THRESH
+        | cv2.CALIB_CB_NORMALIZE_IMAGE
+        | cv2.CALIB_CB_FAST_CHECK
+    )
+    return cv2.findChessboardCorners(gray, pattern, flags)
+
 
 def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5):
     """Perform stereo calibration using the active cameras on the provided vision instance."""
@@ -18,7 +31,7 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
 
     CHECKERBOARD = checkerboard
     SQUARE_SIZE = square_size
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 150, 1e-6)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 1e-7)
 
     print("\n" + "=" * 60)
     print("STEREO CALIBRATION - IMAGE CAPTURE")
@@ -46,12 +59,12 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
             preview_right = cv2.resize(right_frame, (800, 600))
 
             # Every 5 frames, try to detect and draw checkerboard pattern
-            if frame_count % 1 == 0:
+            if frame_count % 5 == 0:
                 gray_left_viz = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
                 gray_right_viz = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
 
-                retL_viz, cornersL_viz = cv2.findChessboardCorners(gray_left_viz, CHECKERBOARD, None)
-                retR_viz, cornersR_viz = cv2.findChessboardCorners(gray_right_viz, CHECKERBOARD, None)
+                retL_viz, cornersL_viz = detect_corners(gray_left_viz, CHECKERBOARD)
+                retR_viz, cornersR_viz = detect_corners(gray_right_viz, CHECKERBOARD)
 
                 # Draw checkerboard corners on the preview frames
                 if retL_viz:
@@ -89,14 +102,15 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
                 gray_left = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
                 gray_right = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
 
-                retL, cornersL = cv2.findChessboardCorners(gray_left, CHECKERBOARD, None)
-                retR, cornersR = cv2.findChessboardCorners(gray_right, CHECKERBOARD, None)
+                retL, cornersL = detect_corners(gray_left, CHECKERBOARD)
+                retR, cornersR = detect_corners(gray_right, CHECKERBOARD)
 
                 if retL and retR:
-                    cornersL_refined = cv2.cornerSubPix(gray_left, cornersL, (11, 11), (-1, -1), criteria)
-                    cornersR_refined = cv2.cornerSubPix(gray_right, cornersR, (11, 11), (-1, -1), criteria)
+                    if not hasattr(cv2, "findChessboardCornersSB"):
+                        cornersL = cv2.cornerSubPix(gray_left, cornersL, (11, 11), (-1, -1), criteria)
+                        cornersR = cv2.cornerSubPix(gray_right, cornersR, (11, 11), (-1, -1), criteria)
 
-                    captured_pairs.append((gray_left.copy(), gray_right.copy(), cornersL_refined, cornersR_refined))
+                    captured_pairs.append((gray_left.copy(), gray_right.copy(), cornersL, cornersR))
                     print(f"✅ Captured pair {len(captured_pairs)}: Checkerboard detected in both images")
                 else:
                     print(f"⚠️ Pair {pair_count + 1}: Checkerboard not detected in both images. Skipping...")
@@ -114,7 +128,7 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
 
     vision.img_shape = captured_pairs[0][0].shape[::-1]
 
-    objp = np.zeros((1, CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
+    objp = np.zeros((1, CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float64)
     objp[0, :, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
     objp *= SQUARE_SIZE
 
@@ -122,8 +136,8 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
 
     for i, (imgL, imgR, cornersL, cornersR) in enumerate(captured_pairs):
         objpoints.append(objp)
-        imgpointsL.append(cornersL.reshape(1, -1, 2))
-        imgpointsR.append(cornersR.reshape(1, -1, 2))
+        imgpointsL.append(cornersL.reshape(1, -1, 2).astype(np.float64))
+        imgpointsR.append(cornersR.reshape(1, -1, 2).astype(np.float64))
         print(f"  ✓ Processed pair {i + 1}/{len(captured_pairs)}")
 
     N_OK = len(objpoints)
@@ -187,7 +201,7 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
         flags=stereo_flags,
     )
 
-    print(f"RMS reprojection error: {rms:.4f}")
+    print(f"RMS reprojection error: {rms:.4f}, baseline: {np.linalg.norm(T):.3f} units")
 
     R1, R2, P1, P2, vision.Q = cv2.fisheye.stereoRectify(
         K1,
@@ -206,17 +220,31 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
         with open(config_path, "rb") as f:
             current_dill = dill.load(f)
     except Exception as e:
-        raise RuntimeError(f"No config dill FOUND!: {e}")
+        raise RuntimeError(f"No config dill found: {e}")
 
     camera_settings = current_dill['camera'] #just camera
 
 
     #modify values we care abt to locations in dill (not dynamic cause Kyle_scher is evil)
+    R1, R2, P1, P2, vision.Q = cv2.fisheye.stereoRectify(
+        K1,
+        D1,
+        K2,
+        D2,
+        vision.img_shape,
+        R,
+        T,
+        flags=cv2.fisheye.CALIB_ZERO_DISPARITY,
+        balance=0.0,
+        fov_scale=1.2,
+    )
+    newK1, newK2 = P1[:, :3].copy(), P2[:, :3].copy()
+
     camera_settings["left"]["map_x"], camera_settings["left"]["map_y"] = cv2.fisheye.initUndistortRectifyMap(
-        K1, D1, R1, P1, vision.img_shape, cv2.CV_32FC1
+        K1, D1, R1, newK1, vision.img_shape, cv2.CV_32FC1
     )
     camera_settings["right"]["map_x"], camera_settings["right"]["map_y"] = cv2.fisheye.initUndistortRectifyMap(
-        K2, D2, R2, P2, vision.img_shape, cv2.CV_32FC1
+        K2, D2, R2, newK2, vision.img_shape, cv2.CV_32FC1
     )
 
     # Persist single-camera intrinsics and distortion
@@ -233,6 +261,11 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
     print(f"\n💾 Calibration complete")
     print(f"   Maps shape: {camera_settings['left']['map_x'].shape}")
     print(f"   Image size: {vision.img_shape}")
+
+    os.makedirs("calib_pairs", exist_ok=True)
+    for i, (imgL, imgR, *_ ) in enumerate(captured_pairs):
+        cv2.imwrite(f"calib_pairs/left_{i:03d}.png", imgL)
+        cv2.imwrite(f"calib_pairs/right_{i:03d}.png", imgR)
 
 
 

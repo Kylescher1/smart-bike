@@ -14,8 +14,8 @@ def get_default_backend():
 CAMERA_CONFIG: Dict[str, int | str] = {
     #"backend": cv2.CAP_V4L2,
     "backend": get_default_backend(),
-    "width": 1024,
-    "height": 768,
+    "width": 1920,
+    "height": 1200,
     "fps": 60,
     "fourcc": "MJPG",  # string form for clarity
 }

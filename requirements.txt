@@ -1,10 +1,10 @@
 # Core Scientific Computing
-numpy==1.24.3
-opencv-python==4.7.0.72
-scipy==1.10.1
+numpy==1.26.4
+opencv-contrib-python==4.8.1.78
+scipy
 matplotlib  # For plotting and visualization (used by SpinningLidar)
 dill  # For serializing configuration and functions
-quaternion  # For quaternion math (used in sensor configuration) - install via: pip install numpy-quaternion
+numpy-quaternion  # For quaternion math (used in sensor configuration) - install via: pip install numpy-quaternion
 
 # Sensor Interfaces
 pyserial==3.5  # For LIDAR and other serial devices
@@ -25,4 +25,7 @@ black==23.3.0
 
 # Performance Profiling
 memory-profiler==0.60.0
-line-profiler==4.0.3
+line-profiler
+
+Flask==3.1.2
+
