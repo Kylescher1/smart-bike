@@ -116,6 +116,11 @@ config = {
             "wlsLambda": 2389,
             "wlsSigma": 2.1,
 
+            # Post-processing filters
+            "smoothingKernel": 0,
+            "confidenceWindow": 5,
+            "confidenceThreshold": 0.0,
+
             # Object detection thresholds
             "objectThresholdMM": 1095,
             "wsSigma": 2,

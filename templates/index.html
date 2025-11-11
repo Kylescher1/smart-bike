@@ -806,6 +806,36 @@
                            min="1" max="20" step="1" value="5"
                            onchange="updateParameter('morphIter', this.value)">
                 </div>
+
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Smoothing Kernel</span>
+                        <span class="param-value" id="smoothingKernel-value">0</span>
+                    </div>
+                    <input type="range" class="param-slider" id="smoothingKernel"
+                           min="0" max="21" step="1" value="0"
+                           onchange="updateParameter('smoothingKernel', this.value)">
+                </div>
+
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Confidence Window</span>
+                        <span class="param-value" id="confidenceWindow-value">5</span>
+                    </div>
+                    <input type="range" class="param-slider" id="confidenceWindow"
+                           min="3" max="21" step="2" value="5"
+                           onchange="updateParameter('confidenceWindow', this.value)">
+                </div>
+
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Confidence Threshold %</span>
+                        <span class="param-value" id="confidenceThreshold-value">0</span>
+                    </div>
+                    <input type="range" class="param-slider" id="confidenceThreshold"
+                           min="0" max="100" step="1" value="0"
+                           onchange="updateParameter('confidenceThreshold', this.value)">
+                </div>
             </div>
             
             <!-- Pre-processing -->

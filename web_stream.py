@@ -716,6 +716,9 @@ def get_parameters():
         'useWLS': state.vision.useWLS,
         'wlsLambda': state.vision.wlsLambda,
         'wlsSigma': state.vision.wlsSigma,
+        'smoothingKernel': getattr(state.vision, 'smoothingKernel', 0),
+        'confidenceWindow': getattr(state.vision, 'confidenceWindow', 5),
+        'confidenceThreshold': getattr(state.vision, 'confidenceThreshold', 0.0),
     }
     
     return jsonify({'status': 'success', 'parameters': params})
@@ -736,7 +739,7 @@ def update_parameter():
             if param_name in ['useMorph', 'useBilateral', 'useWLS']:
                 param_value = bool(param_value)
             # Handle float parameters
-            elif param_name in ['wlsSigma']:
+            elif param_name in ['wlsSigma', 'confidenceThreshold']:
                 param_value = float(param_value)
             else:
                 param_value = int(param_value)
@@ -788,6 +791,7 @@ def save_parameters():
             'disp12MaxDiff', 'medianBlurK', 'downSample', 'crop', 'farEnhance',
             'nearCutoff', 'farCutoff', 'useMorph', 'morphIter', 'useBilateral',
             'bilateralStrength', 'useWLS', 'wlsLambda', 'wlsSigma',
+            'smoothingKernel', 'confidenceWindow', 'confidenceThreshold',
         ]
         
         for param_name in params_to_save:

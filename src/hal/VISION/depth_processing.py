@@ -23,6 +23,9 @@ class DepthProcessor:
         useWLS: bool = False,
         wlsLambda: float = 8000.0,
         wlsSigma: float = 1.5,
+        smoothingKernel: int = 0,
+        confidenceWindow: int = 5,
+        confidenceThreshold: float = 0.0,
     ) -> None:
         self.left_config = left_config
         self.right_config = right_config
@@ -46,10 +49,29 @@ class DepthProcessor:
         self.wlsSigma = wlsSigma
         self.wls_filter = None
         self.right_matcher = None
+
+        # Post-processing filters
+        self.smoothingKernel = int(max(0, smoothingKernel))
+        self._smooth_kernel = self._normalize_kernel(self.smoothingKernel)
+
+        self.confidenceWindow = int(max(0, confidenceWindow))
+        self._confidence_kernel = self._normalize_kernel(
+            self.confidenceWindow if self.confidenceWindow > 0 else 5
+        )
+        self.confidenceThreshold = float(max(0.0, min(100.0, confidenceThreshold)))
         
         # Initialize WLS filter if enabled
         if self.useWLS and self.stereo_matcher is not None:
             self._init_wls_filter()
+
+    @staticmethod
+    def _normalize_kernel(value: int) -> int:
+        """Ensure kernels are odd and >=3. Returns 0 if below usable size."""
+        if value <= 0:
+            return 0
+        if value < 3:
+            return 0
+        return value if value % 2 == 1 else value + 1
 
     def update_matcher(self, stereo_matcher: Optional[cv2.StereoSGBM]) -> None:
         self.stereo_matcher = stereo_matcher
@@ -141,6 +163,16 @@ class DepthProcessor:
             disparity = disparity_left.astype(np.float32) / 16.0
         
         disparity[disparity < 0] = 0
+
+        if self.confidenceThreshold > 0 and self._confidence_kernel >= 3:
+            valid_mask = (disparity > 0).astype(np.float32)
+            neighborhood = cv2.boxFilter(
+                valid_mask,
+                ddepth=-1,
+                ksize=(self._confidence_kernel, self._confidence_kernel),
+                normalize=True,
+            )
+            disparity[neighborhood * 100.0 < self.confidenceThreshold] = 0
         
         return disparity
 
@@ -191,6 +223,11 @@ class DepthProcessor:
         rect_left, rect_right = self.rectify(left_frame, right_frame)
         disparity = self.compute_disparity(rect_left, rect_right)
         depth_map = self.disparity_to_depth(disparity)
+
+        if self._smooth_kernel >= 3:
+            depth_map = cv2.GaussianBlur(
+                depth_map, (self._smooth_kernel, self._smooth_kernel), 0
+            )
 
         metadata = {
             "timestamp": datetime.now().isoformat(),

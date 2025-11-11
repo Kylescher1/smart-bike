@@ -45,6 +45,13 @@ class VISION:
             if hasattr(self, field):
                 setattr(self, field, bool(getattr(self, field)))
 
+        if not hasattr(self, 'smoothingKernel'):
+            self.smoothingKernel = 0
+        if not hasattr(self, 'confidenceWindow'):
+            self.confidenceWindow = 5
+        if not hasattr(self, 'confidenceThreshold'):
+            self.confidenceThreshold = 0.0
+
         # Extract calibration maps from camera.left and camera.right
         # Maps are stored as map_x and map_y under each camera
 
@@ -351,5 +358,8 @@ class VISION:
             useWLS=getattr(self, 'useWLS', False),
             wlsLambda=getattr(self, 'wlsLambda', 8000.0),
             wlsSigma=getattr(self, 'wlsSigma', 1.5),
+            smoothingKernel=getattr(self, 'smoothingKernel', 0),
+            confidenceWindow=getattr(self, 'confidenceWindow', 5),
+            confidenceThreshold=getattr(self, 'confidenceThreshold', 0.0),
         )
 
