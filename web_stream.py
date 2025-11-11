@@ -32,7 +32,7 @@ class StreamState:
         self.vision = None
         self.camera_config = None
         self.mode = "debug"  # "debug", "calibrate", or "calibrate_maps"
-        self.view = "depth"  # "depth", "disparity", "left", or "right"
+        self.view = "depth"  # "depth", "disparity", "left", "right", or "left_overlay"
         self.lock = Lock()
         self.latest_frame = None
         self.latest_frame_bytes = None
@@ -219,6 +219,9 @@ def generate_debug_frame():
         if state.view == "disparity":
             data_map = disparity_map
             label = "DISPARITY MAP"
+        elif state.view == "left_overlay":
+            data_map = depth_map
+            label = "LEFT + DEPTH OVERLAY"
         else:
             data_map = depth_map
             label = "DEPTH MAP"
@@ -242,18 +245,31 @@ def generate_debug_frame():
         
         # Apply colormap for better visualization
         colored = cv2.applyColorMap(display, state.colormap)
-        
+
+        # Prepare final frame depending on view
+        frame_to_show = colored
+        if state.view == "left_overlay":
+            left_frame = state.vision.left_camera.read_frame()
+            if left_frame is None:
+                return None
+            if len(left_frame.shape) == 2:
+                left_frame = cv2.cvtColor(left_frame, cv2.COLOR_GRAY2BGR)
+            h, w = left_frame.shape[:2]
+            if colored.shape[0] != h or colored.shape[1] != w:
+                colored = cv2.resize(colored, (w, h), interpolation=cv2.INTER_LINEAR)
+            frame_to_show = cv2.addWeighted(left_frame, 0.6, colored, 0.4, 0)
+
         # Add metadata text overlay
         timestamp_raw = metadata.get('timestamp', 'N/A')
         timestamp_str = str(timestamp_raw)
         timestamp = timestamp_str[-8:] if len(timestamp_str) >= 8 else timestamp_str
         num_disp = metadata.get('num_disparities', 'N/A')
         
-        cv2.putText(colored, label, (10, 30), 
+        cv2.putText(frame_to_show, label, (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(colored, f"Time: {timestamp}", (10, 60), 
+        cv2.putText(frame_to_show, f"Time: {timestamp}", (10, 60), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(colored, f"Disparities: {num_disp}", (10, 85), 
+        cv2.putText(frame_to_show, f"Disparities: {num_disp}", (10, 85), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         if state.view == "disparity":
@@ -261,10 +277,10 @@ def generate_debug_frame():
             if nonzero.size > 0:
                 disp_min = float(np.min(nonzero))
                 disp_max = float(np.max(nonzero))
-                cv2.putText(colored, f"Range: {disp_min:.2f} - {disp_max:.2f}", (10, 110),
+                cv2.putText(frame_to_show, f"Range: {disp_min:.2f} - {disp_max:.2f}", (10, 110),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        return colored
+        return frame_to_show
         
     except Exception as e:
         print(f"Error generating debug frame: {e}")
@@ -296,6 +312,9 @@ def generate_calibrate_frame():
         if state.view == "disparity":
             data_map = disparity_map
             label = "DISPARITY MAP - CALIBRATION"
+        elif state.view == "left_overlay":
+            data_map = depth_map
+            label = "LEFT + DEPTH OVERLAY - CALIBRATION"
         else:
             data_map = depth_map
             label = "DEPTH MAP - CALIBRATION"
@@ -318,10 +337,23 @@ def generate_calibrate_frame():
             display = 255 - display
         
         display_colored = cv2.applyColorMap(display, state.colormap)
+
+        # Prepare final frame depending on view
+        frame_to_show = display_colored
+        if state.view == "left_overlay":
+            left_frame = state.vision.left_camera.read_frame()
+            if left_frame is None:
+                return None
+            if len(left_frame.shape) == 2:
+                left_frame = cv2.cvtColor(left_frame, cv2.COLOR_GRAY2BGR)
+            h, w = left_frame.shape[:2]
+            if display_colored.shape[0] != h or display_colored.shape[1] != w:
+                display_colored = cv2.resize(display_colored, (w, h), interpolation=cv2.INTER_LINEAR)
+            frame_to_show = cv2.addWeighted(left_frame, 0.6, display_colored, 0.4, 0)
         
         # Add calibration mode overlay
-        cv2.putText(display_colored, label, (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(frame_to_show, label, (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if state.view != "left_overlay" else (255, 255, 255), 2)
         
         # Show key parameters
         y_offset = 60
@@ -335,18 +367,18 @@ def generate_calibrate_frame():
         ]
         
         for param_name, param_value in params_to_show:
-            cv2.putText(display_colored, f"{param_name}: {param_value}", (10, y_offset), 
+            cv2.putText(frame_to_show, f"{param_name}: {param_value}", (10, y_offset), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
             y_offset += 20
         
         if state.view == "disparity":
             nonzero = data_map[data_map > 0]
             if nonzero.size > 0:
-                cv2.putText(display_colored, f"Range: {np.min(nonzero):.2f} - {np.max(nonzero):.2f}", (10, y_offset), 
+                cv2.putText(frame_to_show, f"Range: {np.min(nonzero):.2f} - {np.max(nonzero):.2f}", (10, y_offset), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
                 y_offset += 20
         
-        return display_colored
+        return frame_to_show
         
     except Exception as e:
         print(f"Error generating calibrate frame: {e}")
@@ -466,9 +498,9 @@ def set_mode():
 
 @app.route('/toggle_view', methods=['POST'])
 def toggle_view():
-    """Cycle through camera views: depth -> disparity -> left -> right -> depth."""
+    """Cycle through camera views: depth -> disparity -> left -> right -> left overlay -> depth."""
     with state.lock:
-        views = ["depth", "disparity", "left", "right"]
+        views = ["depth", "disparity", "left", "right", "left_overlay"]
         try:
             current_index = views.index(state.view)
         except ValueError:
