@@ -12,5 +12,8 @@ ENV/
 .env
 .venv
 
+*.avi
+*.mp4
+
 
 *.pyc
