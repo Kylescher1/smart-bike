@@ -323,6 +323,8 @@ def generate_calibrate_frame():
             ('numDisparities', state.vision.numDisparities),
             ('uniqueness', state.vision.uniquenessRatio),
             ('WLS', 'ON' if state.vision.useWLS else 'OFF'),
+            ('speckleWindowSize', state.vision.speckleWindowSize),
+            ('speckleRange', state.vision.speckleRange),
         ]
         
         for param_name, param_value in params_to_show:

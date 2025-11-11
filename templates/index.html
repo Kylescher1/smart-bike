@@ -749,6 +749,26 @@
                            min="1" max="100" step="1" value="43"
                            onchange="updateParameter('preFilterCap', this.value)">
                 </div>
+
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Speckle Window Size</span>
+                        <span class="param-value" id="speckleWindowSize-value">0</span>
+                    </div>
+                    <input type="range" class="param-slider" id="speckleWindowSize" 
+                           min="0" max="200" step="1" value="0"
+                           onchange="updateParameter('speckleWindowSize', this.value)">
+                </div>
+
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Speckle Range</span>
+                        <span class="param-value" id="speckleRange-value">0</span>
+                    </div>
+                    <input type="range" class="param-slider" id="speckleRange" 
+                           min="0" max="64" step="1" value="0"
+                           onchange="updateParameter('speckleRange', this.value)">
+                </div>
             </div>
             
             <!-- Filtering Parameters -->
