@@ -7,6 +7,30 @@ import importlib.util
 
 config_path = r"config.dill"
 
+
+def check_maps(map_x: np.ndarray, map_y: np.ndarray, size: Tuple[int, int], name: str) -> None:
+    """Validate rectification maps before persisting/using them."""
+    width, height = size
+    expected_shape = (height, width)
+
+    if map_x.shape != expected_shape or map_y.shape != expected_shape:
+        raise ValueError(f"{name}: map shape mismatch {map_x.shape}/{map_y.shape} vs {expected_shape}")
+
+    if not np.isfinite(map_x).all() or not np.isfinite(map_y).all():
+        raise ValueError(f"{name}: map contains NaN/Inf values (likely wrong projection matrix or size)")
+
+    if (
+        map_x.min() < -1
+        or map_x.max() > width
+        or map_y.min() < -1
+        or map_y.max() > height
+    ):
+        print(
+            f"{name}: warning, map samples extend beyond source image "
+            f"(min/max x: {map_x.min():.2f}/{map_x.max():.2f}, "
+            f"y: {map_y.min():.2f}/{map_y.max():.2f})"
+        )
+
 def detect_corners(gray, pattern):
     if hasattr(cv2, "findChessboardCornersSB"):
         return cv2.findChessboardCornersSB(
@@ -59,7 +83,7 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
             preview_right = cv2.resize(right_frame, (800, 600))
 
             # Every 5 frames, try to detect and draw checkerboard pattern
-            if frame_count % 5 == 0:
+            if frame_count % 1 == 0:
                 gray_left_viz = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
                 gray_right_viz = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
 
@@ -211,10 +235,23 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
         vision.img_shape,
         R,
         T,
-        flags=cv2.CALIB_ZERO_DISPARITY,
+        flags=cv2.fisheye.CALIB_ZERO_DISPARITY,
         balance=0.0,
         fov_scale=1.2,
     )
+
+    newK1 = P1[:, :3].astype(np.float64, copy=True)
+    newK2 = P2[:, :3].astype(np.float64, copy=True)
+
+    map1x, map1y = cv2.fisheye.initUndistortRectifyMap(
+        K1, D1, R1, newK1, vision.img_shape, cv2.CV_32FC1
+    )
+    map2x, map2y = cv2.fisheye.initUndistortRectifyMap(
+        K2, D2, R2, newK2, vision.img_shape, cv2.CV_32FC1
+    )
+
+    check_maps(map1x, map1y, vision.img_shape, "left")
+    check_maps(map2x, map2y, vision.img_shape, "right")
 
     try:  # Load in dill settings
         with open(config_path, "rb") as f:
@@ -224,39 +261,42 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
 
     camera_settings = current_dill['camera'] #just camera
 
+    # store rectification outputs and maps
+    camera_settings.setdefault("left", {})
+    camera_settings.setdefault("right", {})
 
-    #modify values we care abt to locations in dill (not dynamic cause Kyle_scher is evil)
-    R1, R2, P1, P2, vision.Q = cv2.fisheye.stereoRectify(
-        K1,
-        D1,
-        K2,
-        D2,
-        vision.img_shape,
-        R,
-        T,
-        flags=cv2.fisheye.CALIB_ZERO_DISPARITY,
-        balance=0.0,
-        fov_scale=1.2,
-    )
-    newK1, newK2 = P1[:, :3].copy(), P2[:, :3].copy()
-
-    camera_settings["left"]["map_x"], camera_settings["left"]["map_y"] = cv2.fisheye.initUndistortRectifyMap(
-        K1, D1, R1, newK1, vision.img_shape, cv2.CV_32FC1
-    )
-    camera_settings["right"]["map_x"], camera_settings["right"]["map_y"] = cv2.fisheye.initUndistortRectifyMap(
-        K2, D2, R2, newK2, vision.img_shape, cv2.CV_32FC1
-    )
-
-    # Persist single-camera intrinsics and distortion
-    camera_settings["left"]["K"] = K1
-    camera_settings["left"]["D"] = D1
+    camera_settings["left"]["map_x"] = np.ascontiguousarray(map1x, dtype=np.float32)
+    camera_settings["left"]["map_y"] = np.ascontiguousarray(map1y, dtype=np.float32)
+    camera_settings["left"]["K"] = np.asarray(K1, dtype=np.float64)
+    camera_settings["left"]["D"] = np.asarray(D1, dtype=np.float64)
+    camera_settings["left"]["R"] = np.asarray(R1, dtype=np.float64)
+    camera_settings["left"]["P"] = np.asarray(P1, dtype=np.float64)
+    camera_settings["left"]["newK"] = newK1
     camera_settings["left"]["rms"] = float(left_rms)
-    camera_settings["right"]["K"] = K2
-    camera_settings["right"]["D"] = D2
+
+    camera_settings["right"]["map_x"] = np.ascontiguousarray(map2x, dtype=np.float32)
+    camera_settings["right"]["map_y"] = np.ascontiguousarray(map2y, dtype=np.float32)
+    camera_settings["right"]["K"] = np.asarray(K2, dtype=np.float64)
+    camera_settings["right"]["D"] = np.asarray(D2, dtype=np.float64)
+    camera_settings["right"]["R"] = np.asarray(R2, dtype=np.float64)
+    camera_settings["right"]["P"] = np.asarray(P2, dtype=np.float64)
+    camera_settings["right"]["newK"] = newK2
     camera_settings["right"]["rms"] = float(right_rms)
 
-    #assign Q new value
-    camera_settings["Q"] = vision.Q
+    camera_settings["stereo"] = {
+        "R": np.asarray(R, dtype=np.float64),
+        "T": np.asarray(T, dtype=np.float64),
+        "Q": np.asarray(vision.Q, dtype=np.float64),
+        "flags": int(stereo_flags),
+        "balance": 0.0,
+        "fov_scale": 1.2,
+    }
+
+    # Persist calibration resolution for reference
+    camera_settings["resolution"] = tuple(int(x) for x in vision.img_shape)
+    camera_settings["left"]["map_size"] = tuple(map1x.shape[::-1])
+    camera_settings["right"]["map_size"] = tuple(map2x.shape[::-1])
+    camera_settings["Q"] = np.asarray(vision.Q, dtype=np.float64)
 
     print(f"\n💾 Calibration complete")
     print(f"   Maps shape: {camera_settings['left']['map_x'].shape}")
