@@ -132,12 +132,47 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
     if N_OK < min_pairs:
         raise RuntimeError(f"Not enough valid pairs ({N_OK}). Need at least {min_pairs}.")
 
+    print("\n--- Single-Camera Calibration (Fisheye) ---")
+    single_flags = (
+        cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC
+        | cv2.fisheye.CALIB_CHECK_COND
+        | cv2.fisheye.CALIB_FIX_SKEW
+    )
+
     K1 = np.eye(3)
     D1 = np.zeros((4, 1))
+    print("Calibrating left camera...")
+    left_rms, K1, D1, left_rvecs, left_tvecs = cv2.fisheye.calibrate(
+        objpoints,
+        imgpointsL,
+        vision.img_shape,
+        K1,
+        D1,
+        None,
+        None,
+        flags=single_flags,
+        criteria=criteria,
+    )
+    print(f"  Left RMS reprojection error: {left_rms:.4f}")
+
     K2 = np.eye(3)
     D2 = np.zeros((4, 1))
+    print("Calibrating right camera...")
+    right_rms, K2, D2, right_rvecs, right_tvecs = cv2.fisheye.calibrate(
+        objpoints,
+        imgpointsR,
+        vision.img_shape,
+        K2,
+        D2,
+        None,
+        None,
+        flags=single_flags,
+        criteria=criteria,
+    )
+    print(f"  Right RMS reprojection error: {right_rms:.4f}")
 
     print("\n--- Stereo Calibration (Fisheye) ---")
+    stereo_flags = cv2.fisheye.CALIB_FIX_INTRINSIC
 
     rms, K1, D1, K2, D2, R, T, rvecs, tvecs = cv2.fisheye.stereoCalibrate(
         objpoints,
@@ -149,7 +184,7 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
         D2,
         vision.img_shape,
         criteria=criteria,
-        flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC,
+        flags=stereo_flags,
     )
 
     print(f"RMS reprojection error: {rms:.4f}")
@@ -167,10 +202,10 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
         fov_scale=1.2,
     )
 
-    try: #Load in dill settings
+    try:  # Load in dill settings
         with open(config_path, "rb") as f:
             current_dill = dill.load(f)
-    except:
+    except Exception as e:
         raise RuntimeError(f"No config dill FOUND!: {e}")
 
     camera_settings = current_dill['camera'] #just camera
@@ -183,6 +218,14 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
     camera_settings["right"]["map_x"], camera_settings["right"]["map_y"] = cv2.fisheye.initUndistortRectifyMap(
         K2, D2, R2, P2, vision.img_shape, cv2.CV_32FC1
     )
+
+    # Persist single-camera intrinsics and distortion
+    camera_settings["left"]["K"] = K1
+    camera_settings["left"]["D"] = D1
+    camera_settings["left"]["rms"] = float(left_rms)
+    camera_settings["right"]["K"] = K2
+    camera_settings["right"]["D"] = D2
+    camera_settings["right"]["rms"] = float(right_rms)
 
     #assign Q new value
     camera_settings["Q"] = vision.Q
