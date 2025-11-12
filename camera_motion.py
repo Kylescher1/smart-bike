@@ -1,49 +1,63 @@
 import cv2
 import numpy as np
+import os
 
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    print("Camera not found")
+LEFT_IMAGE_PATH = os.path.join("src", "hal", "cam", "calibrate", "stereo_pairs", "left_000.png")
+RIGHT_IMAGE_PATH = os.path.join("src", "hal", "cam", "calibrate", "stereo_pairs", "right_000.png")
+
+left_frame = cv2.imread(LEFT_IMAGE_PATH)
+right_frame = cv2.imread(RIGHT_IMAGE_PATH)
+
+if left_frame is None:
+    print(f"Failed to load {LEFT_IMAGE_PATH}")
     exit()
 
-# Read one frame to initialize background
-ret, background = cap.read()
-if not ret:
-    print("Failed to grab frame")
+if right_frame is None:
+    print(f"Failed to load {RIGHT_IMAGE_PATH}")
     exit()
 
-background_gray = cv2.cvtColor(background, cv2.COLOR_BGR2GRAY)
-background_gray = cv2.GaussianBlur(background_gray, (21, 21), 0)
+import dill
 
-print("Press 'q' to quit")
+# Load rectification maps from config.dill
+config_path = "config.dill"
+with open(config_path, "rb") as f:
+    config = dill.load(f)
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+camera_cfg = config.get("camera", {})
+left_cfg = camera_cfg.get("left", {})
+right_cfg = camera_cfg.get("right", {})
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (21, 21), 0)
+left_map_x = left_cfg.get("map_x")
+left_map_y = left_cfg.get("map_y")
+right_map_x = right_cfg.get("map_x")
+right_map_y = right_cfg.get("map_y")
 
-    # Absolute difference with initial frame
-    delta = cv2.absdiff(background_gray, gray)
-    thresh = cv2.threshold(delta, 25, 255, cv2.THRESH_BINARY)[1]
-    thresh = cv2.dilate(thresh, None, iterations=2)
+if left_map_x is None or left_map_y is None or right_map_x is None or right_map_y is None:
+    print("One or more rectification maps are missing in config.dill under camera.left/right map_x/map_y.")
+    exit()
 
-    # Count nonzero pixels to estimate motion
-    motion = np.sum(thresh) / 255
-    if motion > 10000:  # adjust threshold
-        text = "Object detected ahead"
-        color = (0, 0, 255)
-    else:
-        text = "Clear"
-        color = (0, 255, 0)
+left_map_x = np.asarray(left_map_x, dtype=np.float32)
+left_map_y = np.asarray(left_map_y, dtype=np.float32)
+right_map_x = np.asarray(right_map_x, dtype=np.float32)
+right_map_y = np.asarray(right_map_y, dtype=np.float32)
 
-    cv2.putText(frame, text, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-    cv2.imshow("View", frame)
+# Rectify the images and convert to grayscale (StereoBM requires CV_8UC1)
+left_rectified = cv2.remap(left_frame, left_map_x, left_map_y, cv2.INTER_LINEAR)
+right_rectified = cv2.remap(right_frame, right_map_x, right_map_y, cv2.INTER_LINEAR)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+left_gray = cv2.cvtColor(left_rectified, cv2.COLOR_BGR2GRAY)
+right_gray = cv2.cvtColor(right_rectified, cv2.COLOR_BGR2GRAY)
 
-cap.release()
+# Create and compute disparity map
+stereo_bm = cv2.StereoBM_create(numDisparities=16 * 6, blockSize=15)
+disparity = stereo_bm.compute(left_gray, right_gray).astype(np.float32) / 16.0
+
+# Normalize for display
+disparity_display = cv2.normalize(disparity, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+disparity_display = np.uint8(disparity_display)
+
+cv2.imshow("Disparity Map", disparity_display)
+
+print("Press any key to close")
+cv2.waitKey(0)
 cv2.destroyAllWindows()

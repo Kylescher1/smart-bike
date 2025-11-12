@@ -1,0 +1,38 @@
+### RKNN Conversion Summary
+
+- `yolo11n.rknn`, `yolov8n.rknn`, and `yolov8s-seg.rknn` now live in `C:\smart-bike\yolo`.
+
+### How to Convert Models Next Time
+
+1. **Open Ubuntu (WSL) and activate your env**
+   ```
+   wsl
+   source ~/rknn-venv310/bin/activate
+   ```
+
+2. **Download ONNX (if not already)**
+   ```
+   cd /mnt/c/rknn_model_zoo/examples/<example>/model
+   ./download_model.sh            # or use curl if wget missing
+   ```
+
+3. **Convert ONNX → RKNN**
+   ```
+   cd ../python
+   python convert.py ../model/<input>.onnx rk3588 i8 ../model/<output>.rknn
+   ```
+   - `rk3588` = target platform
+   - `i8` = quantized; use `fp` for float if needed
+   - adjust `<input>` / `<output>` names to match the model
+
+4. **(Optional) Test in Python**
+   ```
+   python <demo>.py --model_path ../model/<output>.rknn --target rk3588 --img_show
+   ```
+
+5. **Copy result to your project**
+   ```
+   cp /mnt/c/rknn_model_zoo/examples/<example>/model/<output>.rknn /mnt/c/smart-bike/yolo/
+   ```
+
+Ready to deploy these RKNN models to the Rock Pi or integrate them into your pipeline. Let me know when you’re ready for the next step (Android/Linux demo build, Python inference on board, etc.).
