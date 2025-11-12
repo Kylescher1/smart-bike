@@ -54,6 +54,18 @@ class StreamState:
         # Colormap
         self.colormap = cv2.COLORMAP_JET  # Default colormap
         self.invert_colormap = False  # Invert colormap colors
+        # Auto-calibration state
+        self.autocal_active = False
+        self.autocal_baseline_params = None
+        self.autocal_current_params = None
+        self.autocal_profile_a = None
+        self.autocal_profile_b = None
+        self.autocal_current_param_name = None
+        self.autocal_param_list = []
+        self.autocal_param_index = 0
+        self.autocal_iteration = 0
+        self.autocal_best_params = None
+        self.autocal_waiting_for_choice = False
         
 state = StreamState()
 
@@ -485,11 +497,11 @@ def video_feed():
 
 @app.route('/set_mode', methods=['POST'])
 def set_mode():
-    """Switch between debug and calibrate modes."""
+    """Switch between debug, calibrate, and autocal modes."""
     data = request.get_json()
     new_mode = data.get('mode', 'debug')
     
-    if new_mode in ['debug', 'calibrate']:
+    if new_mode in ['debug', 'calibrate', 'autocal']:
         with state.lock:
             state.mode = new_mode
         return jsonify({'status': 'success', 'mode': state.mode})
@@ -979,8 +991,8 @@ def save_parameters():
         # Update camera_config with current parameters
         params_to_save = [
             'minDisparity', 'numDisparitiesK', 'numDisparities', 'blockSize',
-            'preFilterCap', 'uniquenessRatio', 'speckleWindowSize', 'speckleRange',
-            'disp12MaxDiff', 'medianBlurK', 'downSample', 'crop', 'farEnhance',
+            'P1', 'P2', 'preFilterCap', 'uniquenessRatio', 'speckleWindowSize', 'speckleRange',
+            'disp12MaxDiff', 'sgbmMode', 'medianBlurK', 'downSample', 'crop', 'farEnhance',
             'nearCutoff', 'farCutoff', 'useMorph', 'morphIter', 'useBilateral',
             'bilateralStrength', 'useWLS', 'wlsLambda', 'wlsSigma',
             'smoothingKernel', 'confidenceWindow', 'confidenceThreshold',
@@ -1005,6 +1017,456 @@ def save_parameters():
         
     except Exception as e:
         print(f"❌ Error saving parameters: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+def _get_param_ranges():
+    """Get parameter ranges and step sizes for auto-calibration."""
+    return {
+        'minDisparity': {'min': 0, 'max': 100, 'step': 5, 'default': 0},
+        'blockSize': {'min': 5, 'max': 51, 'step': 2, 'default': 11},
+        'numDisparitiesK': {'min': 1, 'max': 16, 'step': 1, 'default': 2},
+        'P1': {'min': 0, 'max': 10000, 'step': 200, 'default': 968},
+        'P2': {'min': 0, 'max': 50000, 'step': 1000, 'default': 3872},
+        'preFilterCap': {'min': 1, 'max': 100, 'step': 5, 'default': 43},
+        'uniquenessRatio': {'min': 0, 'max': 100, 'step': 5, 'default': 1},
+        'speckleWindowSize': {'min': 0, 'max': 200, 'step': 10, 'default': 196},
+        'speckleRange': {'min': 0, 'max': 64, 'step': 2, 'default': 34},
+        'disp12MaxDiff': {'min': 0, 'max': 100, 'step': 5, 'default': 18},
+        'sgbmMode': {'min': 0, 'max': 2, 'step': 1, 'default': 2},
+        'downSample': {'min': 0, 'max': 100, 'step': 5, 'default': 57},
+        'crop': {'min': 0, 'max': 300, 'step': 10, 'default': 128},
+        'nearCutoff': {'min': 0, 'max': 100, 'step': 5, 'default': 72},
+        'farCutoff': {'min': 0, 'max': 100, 'step': 5, 'default': 5},
+        'wlsLambda': {'min': 100, 'max': 10000, 'step': 500, 'default': 2389},
+        'wlsSigma': {'min': 0.1, 'max': 5.0, 'step': 0.2, 'default': 2.1},
+        'morphIter': {'min': 1, 'max': 20, 'step': 1, 'default': 5},
+    }
+
+def _apply_params_to_vision(params):
+    """Apply a parameter set to the vision system."""
+    print(f"[AUTOCAL] _apply_params_to_vision called with {len(params)} parameters")
+    
+    if state.vision is None:
+        print("[AUTOCAL] ERROR: Vision is None")
+        return False
+    
+    try:
+        print("[AUTOCAL] Acquiring lock for _apply_params_to_vision...")
+        with state.lock:
+            print("[AUTOCAL] Lock acquired in _apply_params_to_vision")
+            for param_name, param_value in params.items():
+                setattr(state.vision, param_name, param_value)
+            
+            print("[AUTOCAL] All parameters set, checking if stereo matcher needs recreation...")
+            # Recreate stereo matcher if core params changed
+            stereo_params = ['minDisparity', 'numDisparitiesK', 'numDisparities', 
+                           'blockSize', 'P1', 'P2', 'preFilterCap', 'uniquenessRatio', 
+                           'speckleWindowSize', 'speckleRange', 'disp12MaxDiff', 'sgbmMode']
+            
+            if any(p in params for p in stereo_params):
+                print("[AUTOCAL] Recreating stereo matcher...")
+                block_size = int(getattr(state.vision, 'blockSize', 11))
+                block_size = block_size if block_size % 2 == 1 else block_size + 1
+                num_disparities = int(max(16, 16 * int(getattr(state.vision, 'numDisparitiesK', 2))))
+                
+                P1 = int(getattr(state.vision, 'P1', 8 * 1 * block_size * block_size))
+                P2 = int(getattr(state.vision, 'P2', 32 * 1 * block_size * block_size))
+                
+                sgbm_mode = int(getattr(state.vision, 'sgbmMode', 2))
+                mode_map = {
+                    0: cv2.STEREO_SGBM_MODE_SGBM,
+                    1: cv2.STEREO_SGBM_MODE_HH,
+                    2: cv2.STEREO_SGBM_MODE_SGBM_3WAY,
+                }
+                mode = mode_map.get(sgbm_mode, cv2.STEREO_SGBM_MODE_SGBM_3WAY)
+                
+                min_disparity = int(getattr(state.vision, 'minDisparity', 0))
+                pre_filter_cap = int(getattr(state.vision, 'preFilterCap', 43))
+                uniqueness_ratio = int(getattr(state.vision, 'uniquenessRatio', 1))
+                speckle_window_size = int(getattr(state.vision, 'speckleWindowSize', 196))
+                speckle_range = int(getattr(state.vision, 'speckleRange', 34))
+                disp12_max_diff = int(getattr(state.vision, 'disp12MaxDiff', 18))
+                
+                print(f"[AUTOCAL] Creating stereo matcher with blockSize={block_size}, numDisparities={num_disparities}, P1={P1}, P2={P2}, mode={mode}")
+                state.vision.stereo = cv2.StereoSGBM_create(
+                    minDisparity=min_disparity,
+                    numDisparities=num_disparities,
+                    blockSize=max(3, block_size),
+                    P1=P1,
+                    P2=P2,
+                    preFilterCap=pre_filter_cap,
+                    uniquenessRatio=uniqueness_ratio,
+                    speckleWindowSize=speckle_window_size,
+                    speckleRange=speckle_range,
+                    disp12MaxDiff=disp12_max_diff,
+                    mode=mode,
+                )
+                print("[AUTOCAL] Stereo matcher created")
+            
+            print("[AUTOCAL] Refreshing depth processor...")
+            state.vision._refresh_depth_processor()
+            print("[AUTOCAL] Depth processor refreshed")
+        
+        print("[AUTOCAL] Lock released, _apply_params_to_vision complete")
+        return True
+    except Exception as e:
+        print(f"[AUTOCAL] ERROR in _apply_params_to_vision: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def _generate_next_comparison():
+    """Generate next A/B comparison for current parameter."""
+    print(f"[AUTOCAL] _generate_next_comparison called, param_index={state.autocal_param_index}, list_len={len(state.autocal_param_list)}")
+    
+    if state.autocal_param_index >= len(state.autocal_param_list):
+        print("[AUTOCAL] All parameters processed, finishing")
+        state.autocal_waiting_for_choice = False
+        return
+    
+    param_name = state.autocal_param_list[state.autocal_param_index]
+    print(f"[AUTOCAL] Processing parameter: {param_name}")
+    param_ranges = _get_param_ranges()
+    
+    if param_name not in param_ranges:
+        print(f"[AUTOCAL] Warning: Parameter {param_name} not in ranges, skipping")
+        state.autocal_param_index += 1
+        _generate_next_comparison()
+        return
+    
+    param_info = param_ranges[param_name]
+    
+    current_value = state.autocal_best_params.get(param_name, param_info['default'])
+    print(f"[AUTOCAL] Current value for {param_name}: {current_value}")
+    
+    # Generate test values: lower, current, higher
+    step = param_info['step']
+    min_val = param_info['min']
+    max_val = param_info['max']
+    
+    # Use larger step for more noticeable differences (2x step)
+    effective_step = max(step, (max_val - min_val) * 0.1)  # At least 10% of range
+    
+    # Profile A: lower value (use larger step)
+    value_a = max(min_val, current_value - effective_step)
+    # Profile B: higher value (use larger step)
+    value_b = min(max_val, current_value + effective_step)
+    
+    # If at boundary, try opposite direction
+    if value_a == current_value:
+        value_a = min(max_val, current_value + effective_step)
+    if value_b == current_value:
+        value_b = max(min_val, current_value - effective_step)
+    
+    # Ensure we have different values and they're meaningfully different
+    if value_a == value_b:
+        # Make them more different
+        if current_value < (min_val + max_val) / 2:
+            value_a = max(min_val, current_value - effective_step)
+            value_b = min(max_val, current_value + effective_step * 2)
+        else:
+            value_a = max(min_val, current_value - effective_step * 2)
+            value_b = min(max_val, current_value + effective_step)
+    
+    # Ensure minimum difference (at least 5% of range or 1 unit, whichever is larger)
+    min_diff = max(1, (max_val - min_val) * 0.05)
+    if abs(value_b - value_a) < min_diff:
+        mid = (value_a + value_b) / 2
+        value_a = max(min_val, mid - min_diff / 2)
+        value_b = min(max_val, mid + min_diff / 2)
+    
+    print(f"[AUTOCAL] Generated values - Profile A: {value_a}, Profile B: {value_b} (current: {current_value}, diff: {abs(value_b - value_a)})")
+    
+    # Create profile copies
+    state.autocal_profile_a = state.autocal_best_params.copy()
+    state.autocal_profile_a[param_name] = value_a
+    
+    state.autocal_profile_b = state.autocal_best_params.copy()
+    state.autocal_profile_b[param_name] = value_b
+    
+    state.autocal_current_param_name = param_name
+    state.autocal_waiting_for_choice = True
+    
+    # Apply profile A first (without sleep - let it happen async)
+    print(f"[AUTOCAL] Applying profile A to vision system...")
+    try:
+        _apply_params_to_vision(state.autocal_profile_a)
+        print(f"[AUTOCAL] Profile A applied successfully")
+    except Exception as e:
+        print(f"[AUTOCAL] Error applying profile A: {e}")
+        import traceback
+        traceback.print_exc()
+        state.autocal_waiting_for_choice = False
+
+@app.route('/start_autocal', methods=['POST'])
+def start_autocal():
+    """Start auto-calibration process."""
+    print("[AUTOCAL] Start autocal requested")
+    
+    if state.vision is None:
+        print("[AUTOCAL] ERROR: Vision not initialized")
+        return jsonify({'status': 'error', 'message': 'Vision not initialized'}), 500
+    
+    if not state.vision.connected:
+        print("[AUTOCAL] ERROR: Vision system not connected")
+        return jsonify({'status': 'error', 'message': 'Vision system not connected'}), 500
+    
+    try:
+        print("[AUTOCAL] Acquiring lock...")
+        with state.lock:
+            print("[AUTOCAL] Lock acquired, saving baseline parameters...")
+            # Save current parameters as baseline
+            param_ranges = _get_param_ranges()
+            print(f"[AUTOCAL] Got {len(param_ranges)} parameter ranges")
+            state.autocal_baseline_params = {}
+            state.autocal_best_params = {}
+            
+            # Read current parameters safely
+            for param_name in param_ranges.keys():
+                try:
+                    if hasattr(state.vision, param_name):
+                        value = getattr(state.vision, param_name)
+                        state.autocal_baseline_params[param_name] = value
+                        state.autocal_best_params[param_name] = value
+                    else:
+                        # Use default if attribute doesn't exist
+                        default_val = param_ranges[param_name]['default']
+                        state.autocal_baseline_params[param_name] = default_val
+                        state.autocal_best_params[param_name] = default_val
+                except Exception as e:
+                    print(f"[AUTOCAL] Warning: Could not read parameter {param_name}: {e}")
+                    # Use default on error
+                    default_val = param_ranges[param_name]['default']
+                    state.autocal_baseline_params[param_name] = default_val
+                    state.autocal_best_params[param_name] = default_val
+            
+            print(f"[AUTOCAL] Saved {len(state.autocal_baseline_params)} baseline parameters")
+            
+            # Create parameter list (focus on core SGBM params first)
+            priority_params = [
+                'blockSize', 'numDisparitiesK', 'P1', 'P2', 'preFilterCap',
+                'uniquenessRatio', 'speckleWindowSize', 'speckleRange', 'disp12MaxDiff',
+                'sgbmMode', 'minDisparity', 'downSample', 'crop', 'nearCutoff',
+                'farCutoff', 'wlsLambda', 'wlsSigma', 'morphIter'
+            ]
+            
+            state.autocal_param_list = [p for p in priority_params if p in param_ranges]
+            print(f"[AUTOCAL] Created parameter list with {len(state.autocal_param_list)} parameters: {state.autocal_param_list}")
+            state.autocal_param_index = 0
+            state.autocal_iteration = 0
+            state.autocal_active = True
+            state.autocal_waiting_for_choice = False
+        
+        print("[AUTOCAL] Lock released, generating first comparison...")
+        # Generate first comparison OUTSIDE the lock to avoid deadlock
+        _generate_next_comparison()
+        print("[AUTOCAL] First comparison generated successfully")
+        
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        import traceback
+        print(f"[AUTOCAL] EXCEPTION: {e}")
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/get_autocal_status', methods=['GET'])
+def get_autocal_status():
+    """Get current auto-calibration status."""
+    if not state.autocal_active:
+        return jsonify({
+            'status': 'success',
+            'state': 'ready',
+            'iteration': 0,
+            'total_iterations': 0,
+            'current_parameter': ''
+        })
+    
+    total_iterations = len(state.autocal_param_list) * 2  # Rough estimate
+    
+    if state.autocal_waiting_for_choice:
+        state_str = 'comparing'
+    elif state.autocal_param_index >= len(state.autocal_param_list):
+        state_str = 'finished'
+    else:
+        state_str = 'comparing'
+    
+    return jsonify({
+        'status': 'success',
+        'state': state_str,
+        'iteration': state.autocal_iteration,
+        'total_iterations': total_iterations,
+        'current_parameter': state.autocal_current_param_name or '',
+        'progress': state.autocal_param_index / len(state.autocal_param_list) if state.autocal_param_list else 0
+    })
+
+@app.route('/autocal_choice', methods=['POST'])
+def autocal_choice():
+    """Submit user's choice for A/B comparison."""
+    print(f"[AUTOCAL] autocal_choice called")
+    
+    if not state.autocal_active:
+        print("[AUTOCAL] ERROR: Auto-calibration not active")
+        return jsonify({'status': 'error', 'message': 'Auto-calibration not active'}), 400
+    
+    data = request.get_json()
+    choice = data.get('choice', '').upper()
+    print(f"[AUTOCAL] User selected: {choice}")
+    
+    if choice not in ['A', 'B', 'KEEP']:
+        print(f"[AUTOCAL] ERROR: Invalid choice: {choice}")
+        return jsonify({'status': 'error', 'message': 'Invalid choice'}), 400
+    
+    if not state.autocal_waiting_for_choice:
+        print("[AUTOCAL] ERROR: Not waiting for choice")
+        return jsonify({'status': 'error', 'message': 'Not waiting for choice'}), 400
+    
+    try:
+        # Get the selected profile and param info while holding lock briefly
+        selected_profile = None
+        param_name = None
+        with state.lock:
+            param_name = state.autocal_current_param_name
+            if choice == 'A':
+                selected_profile = state.autocal_profile_a.copy()
+                state.autocal_best_params[param_name] = state.autocal_profile_a[param_name]
+                print(f"[AUTOCAL] Selected Profile A, value: {state.autocal_profile_a[param_name]}")
+            elif choice == 'B':
+                selected_profile = state.autocal_profile_b.copy()
+                state.autocal_best_params[param_name] = state.autocal_profile_b[param_name]
+                print(f"[AUTOCAL] Selected Profile B, value: {state.autocal_profile_b[param_name]}")
+            else:  # choice == 'KEEP'
+                # Keep current value - don't change best_params, just skip to next
+                current_value = state.autocal_best_params.get(param_name)
+                print(f"[AUTOCAL] Selected No Change (KEEP), keeping current value: {current_value}")
+                selected_profile = None  # Don't apply any changes
+            
+            state.autocal_iteration += 1
+            state.autocal_param_index += 1
+            state.autocal_waiting_for_choice = False
+        
+        # Apply the selected profile OUTSIDE the lock (only if not KEEP)
+        if selected_profile is not None:
+            print(f"[AUTOCAL] Applying selected profile {choice}...")
+            _apply_params_to_vision(selected_profile)
+        else:
+            print(f"[AUTOCAL] Skipping parameter change, keeping current value")
+        
+        # Generate next comparison OUTSIDE the lock
+        if state.autocal_param_index < len(state.autocal_param_list):
+            print(f"[AUTOCAL] Generating next comparison for parameter {state.autocal_param_index}...")
+            _generate_next_comparison()
+        else:
+            print("[AUTOCAL] All parameters processed!")
+        
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        print(f"[AUTOCAL] EXCEPTION in autocal_choice: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/finish_autocal', methods=['POST'])
+def finish_autocal():
+    """Finish auto-calibration and save best parameters."""
+    if not state.autocal_active:
+        return jsonify({'status': 'error', 'message': 'Auto-calibration not active'}), 400
+    
+    try:
+        with state.lock:
+            # Apply best parameters
+            _apply_params_to_vision(state.autocal_best_params)
+            
+            # Save to config
+            if state.camera_config:
+                for param_name, param_value in state.autocal_best_params.items():
+                    state.camera_config[param_name] = param_value
+                
+                config_path = "config.dill"
+                with open(config_path, "rb") as f:
+                    config = dill.load(f)
+                config['camera'] = state.camera_config
+                with open(config_path, "wb") as f:
+                    dill.dump(config, f)
+            
+            # Reset state
+            state.autocal_active = False
+            state.autocal_waiting_for_choice = False
+        
+        return jsonify({'status': 'success', 'message': 'Best parameters saved'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/switch_autocal_profile', methods=['POST'])
+def switch_autocal_profile():
+    """Switch between Profile A and B for comparison."""
+    print(f"[AUTOCAL] switch_autocal_profile called")
+    
+    if not state.autocal_active:
+        print("[AUTOCAL] ERROR: Auto-calibration not active")
+        return jsonify({'status': 'error', 'message': 'Auto-calibration not active'}), 400
+    
+    data = request.get_json()
+    profile = data.get('profile', '').upper()
+    print(f"[AUTOCAL] Switching to profile: {profile}")
+    
+    if profile not in ['A', 'B']:
+        print(f"[AUTOCAL] ERROR: Invalid profile: {profile}")
+        return jsonify({'status': 'error', 'message': 'Invalid profile'}), 400
+    
+    try:
+        # Get the profile to apply
+        profile_to_apply = None
+        with state.lock:
+            if profile == 'A' and state.autocal_profile_a:
+                profile_to_apply = state.autocal_profile_a.copy()
+                print(f"[AUTOCAL] Profile A found with {len(profile_to_apply)} parameters")
+            elif profile == 'B' and state.autocal_profile_b:
+                profile_to_apply = state.autocal_profile_b.copy()
+                print(f"[AUTOCAL] Profile B found with {len(profile_to_apply)} parameters")
+            else:
+                print(f"[AUTOCAL] ERROR: Profile {profile} not available")
+                return jsonify({'status': 'error', 'message': f'Profile {profile} not available'}), 400
+        
+        # Apply profile OUTSIDE the lock to avoid deadlock
+        if profile_to_apply:
+            print(f"[AUTOCAL] Applying profile {profile}...")
+            success = _apply_params_to_vision(profile_to_apply)
+            if success:
+                print(f"[AUTOCAL] Profile {profile} applied successfully")
+                return jsonify({'status': 'success'})
+            else:
+                print(f"[AUTOCAL] ERROR: Failed to apply profile {profile}")
+                return jsonify({'status': 'error', 'message': 'Failed to apply profile'}), 500
+        
+        return jsonify({'status': 'error', 'message': 'Profile not found'}), 500
+    except Exception as e:
+        print(f"[AUTOCAL] EXCEPTION in switch_autocal_profile: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/cancel_autocal', methods=['POST'])
+def cancel_autocal():
+    """Cancel auto-calibration and restore baseline parameters."""
+    try:
+        with state.lock:
+            # Restore baseline if available
+            if state.autocal_baseline_params and state.vision is not None:
+                try:
+                    _apply_params_to_vision(state.autocal_baseline_params)
+                except Exception as e:
+                    print(f"Error restoring baseline params: {e}")
+            
+            # Reset state
+            state.autocal_active = False
+            state.autocal_waiting_for_choice = False
+            state.autocal_param_index = 0
+            state.autocal_iteration = 0
+        
+        return jsonify({'status': 'success', 'message': 'Auto-calibration cancelled'})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 def main():

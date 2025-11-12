@@ -101,6 +101,11 @@
             color: white;
         }
         
+        .mode-btn.autocal {
+            background: #e67e22;
+            color: white;
+        }
+        
         .mode-btn.active {
             transform: scale(0.95);
             box-shadow: inset 0 2px 10px rgba(0,0,0,0.3);
@@ -642,6 +647,9 @@
             <button class="mode-btn calibrate" onclick="setMode('calibrate')">
                 🎛️ Calibrate Mode
             </button>
+            <button class="mode-btn autocal" onclick="setMode('autocal')">
+                🤖 Auto Cal
+            </button>
         </div>
         
         <button class="calibrate-maps-btn" onclick="startMapCalibration()" id="startCalibrationBtn">
@@ -684,6 +692,57 @@
     
     <!-- Scrollable content area -->
     <div class="scrollable-content" id="mainContent">
+        <!-- Auto Calibration Panel -->
+        <div class="calibration-panel" id="autocalPanel" style="display: none;">
+            <div class="calibration-header">
+                <h2>🤖 Auto Parameter Tuning</h2>
+                <p>Compare two profiles and select which looks better</p>
+            </div>
+            
+            <div class="calibration-progress">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="autocalProgressFill"></div>
+                </div>
+                <p id="autocalProgressText">Ready to start</p>
+            </div>
+            
+            <div class="calibration-instructions" id="autocalInstructions">
+                <p id="autocalStatusText">Click "Start Auto Cal" to begin parameter tuning</p>
+                <p id="autocalCurrentParam" style="font-weight: bold; color: #667eea; margin-top: 10px;"></p>
+            </div>
+            
+            <div class="calibration-buttons">
+                <button class="capture-btn" onclick="startAutoCal()" id="startAutoCalBtn">
+                    🚀 Start Auto Cal
+                </button>
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                    <button class="capture-btn" onclick="switchToProfileA()" id="viewABtn" style="flex: 1; display: none; background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);">
+                        👁️ View Profile A
+                    </button>
+                    <button class="capture-btn" onclick="switchToProfileB()" id="viewBBtn" style="flex: 1; display: none; background: linear-gradient(135deg, #9b59b6 0%, #8e44ad 100%);">
+                        👁️ View Profile B
+                    </button>
+                </div>
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                    <button class="finish-calibration-btn" onclick="selectProfileA()" id="selectABtn" style="flex: 1; display: none;">
+                        ✅ Profile A Better
+                    </button>
+                    <button class="finish-calibration-btn" onclick="selectProfileB()" id="selectBBtn" style="flex: 1; display: none;">
+                        ✅ Profile B Better
+                    </button>
+                </div>
+                <button class="cancel-calibration-btn" onclick="selectNoChange()" id="noChangeBtn" style="display: none; margin-top: 10px; background: linear-gradient(135deg, #95a5a6 0%, #7f8c8d 100%);">
+                    ⏭️ No Change (Keep Current)
+                </button>
+                <button class="finish-calibration-btn" onclick="finishAutoCal()" id="finishAutoCalBtn" style="display: none;">
+                    ✅ Finish & Save Best Profile
+                </button>
+                <button class="cancel-calibration-btn" onclick="cancelAutoCal()" id="cancelAutoCalBtn" style="display: none;">
+                    ❌ Cancel
+                </button>
+            </div>
+        </div>
+        
         <div class="button-row">
             <button class="view-toggle-btn" onclick="toggleView()" id="viewToggle">
                 📷 View: Depth Map
@@ -1033,11 +1092,17 @@
                     
                     // Show/hide calibration controls
                     const controls = document.getElementById('calibrationControls');
+                    const autocalPanel = document.getElementById('autocalPanel');
                     if (mode === 'calibrate') {
                         controls.style.display = 'block';
+                        autocalPanel.style.display = 'none';
                         loadParameters();
+                    } else if (mode === 'autocal') {
+                        controls.style.display = 'none';
+                        autocalPanel.style.display = 'block';
                     } else {
                         controls.style.display = 'none';
+                        autocalPanel.style.display = 'none';
                     }
                     
                     showNotification(`Switched to ${mode} mode`);
@@ -1517,6 +1582,282 @@
                 this.src = "{{ url_for('video_feed') }}?" + new Date().getTime();
             }, 1000);
         };
+
+        // Auto Calibration Functions
+        let autocalActive = false;
+        let autocalComparisonInterval = null;
+        
+        function startAutoCal() {
+            console.log('[AUTOCAL] Start button clicked');
+            showNotification('🚀 Starting Auto Cal...', false);
+            
+            fetch('/start_autocal', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => {
+                console.log('[AUTOCAL] Response received:', response.status);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('[AUTOCAL] Response data:', data);
+                if (data.status === 'success') {
+                    console.log('[AUTOCAL] Success, updating UI...');
+                    autocalActive = true;
+                    document.getElementById('startAutoCalBtn').style.display = 'none';
+                    document.getElementById('viewABtn').style.display = 'block';
+                    document.getElementById('viewBBtn').style.display = 'block';
+                    document.getElementById('selectABtn').style.display = 'block';
+                    document.getElementById('selectBBtn').style.display = 'block';
+                    document.getElementById('noChangeBtn').style.display = 'block';
+                    document.getElementById('finishAutoCalBtn').style.display = 'block';
+                    document.getElementById('cancelAutoCalBtn').style.display = 'block';
+                    
+                    // Start polling for comparison updates
+                    autocalComparisonInterval = setInterval(checkAutoCalStatus, 2000);
+                    checkAutoCalStatus();
+                    
+                    showNotification('🤖 Auto Cal started! Comparing profiles...');
+                } else {
+                    console.error('[AUTOCAL] Failed:', data.message);
+                    showNotification('❌ Failed to start: ' + data.message, true);
+                }
+            })
+            .catch(error => {
+                console.error('[AUTOCAL] Fetch error:', error);
+                showNotification('❌ Auto Cal error: ' + error.message, true);
+            });
+        }
+        
+        function checkAutoCalStatus() {
+            if (!autocalActive) return;
+            
+            fetch('/get_autocal_status')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    updateAutoCalUI(data);
+                }
+            })
+            .catch(error => console.error('Error checking status:', error));
+        }
+        
+        function updateAutoCalUI(data) {
+            const progress = data.progress || 0;
+            const currentParam = data.current_parameter || '';
+            const status = data.state || data.status || 'ready';
+            const iteration = data.iteration || 0;
+            const totalIterations = data.total_iterations || 0;
+            
+            // Update progress bar
+            const progressPercent = totalIterations > 0 ? (iteration / totalIterations) * 100 : 0;
+            document.getElementById('autocalProgressFill').style.width = progressPercent + '%';
+            
+            // Update status text
+            let statusText = '';
+            if (status === 'comparing') {
+                statusText = `Comparing Profile A vs Profile B\nIteration ${iteration}/${totalIterations}`;
+                document.getElementById('autocalStatusText').textContent = '👀 Look at both profiles and select which looks better';
+                document.getElementById('autocalCurrentParam').textContent = `Tuning: ${currentParam}`;
+            } else if (status === 'finished') {
+                statusText = '✅ Tuning complete!';
+                document.getElementById('autocalStatusText').textContent = 'All parameters tuned. Click "Finish" to save.';
+                document.getElementById('autocalCurrentParam').textContent = '';
+                clearInterval(autocalComparisonInterval);
+            } else {
+                statusText = 'Ready';
+                document.getElementById('autocalStatusText').textContent = 'Click "Start Auto Cal" to begin';
+                document.getElementById('autocalCurrentParam').textContent = '';
+            }
+            
+            document.getElementById('autocalProgressText').textContent = statusText;
+        }
+        
+        function switchToProfileA() {
+            console.log('[AUTOCAL] Switching to Profile A');
+            showNotification('🔄 Switching to Profile A...', false);
+            
+            fetch('/switch_autocal_profile', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ profile: 'A' })
+            })
+            .then(response => {
+                console.log('[AUTOCAL] Switch Profile A response:', response.status);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('[AUTOCAL] Switch Profile A data:', data);
+                if (data.status === 'success') {
+                    showNotification('👁️ Showing Profile A');
+                } else {
+                    showNotification('❌ Failed to switch: ' + data.message, true);
+                }
+            })
+            .catch(error => {
+                console.error('[AUTOCAL] Switch Profile A error:', error);
+                showNotification('❌ Error switching profile: ' + error.message, true);
+            });
+        }
+        
+        function switchToProfileB() {
+            console.log('[AUTOCAL] Switching to Profile B');
+            showNotification('🔄 Switching to Profile B...', false);
+            
+            fetch('/switch_autocal_profile', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ profile: 'B' })
+            })
+            .then(response => {
+                console.log('[AUTOCAL] Switch Profile B response:', response.status);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('[AUTOCAL] Switch Profile B data:', data);
+                if (data.status === 'success') {
+                    showNotification('👁️ Showing Profile B');
+                } else {
+                    showNotification('❌ Failed to switch: ' + data.message, true);
+                }
+            })
+            .catch(error => {
+                console.error('[AUTOCAL] Switch Profile B error:', error);
+                showNotification('❌ Error switching profile: ' + error.message, true);
+            });
+        }
+        
+        function selectProfileA() {
+            submitAutoCalChoice('A');
+        }
+        
+        function selectProfileB() {
+            submitAutoCalChoice('B');
+        }
+        
+        function selectNoChange() {
+            submitAutoCalChoice('KEEP');
+        }
+        
+        function submitAutoCalChoice(choice) {
+            console.log(`[AUTOCAL] Submitting choice: ${choice}`);
+            showNotification(`🔄 Processing choice ${choice}...`, false);
+            
+            fetch('/autocal_choice', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ choice: choice })
+            })
+            .then(response => {
+                console.log(`[AUTOCAL] Choice response:`, response.status);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log(`[AUTOCAL] Choice data:`, data);
+                if (data.status === 'success') {
+                    if (choice === 'KEEP') {
+                        showNotification(`⏭️ Keeping current value. Continuing...`);
+                    } else {
+                        showNotification(`✅ Selected Profile ${choice}. Continuing...`);
+                    }
+                    // Status will update on next poll
+                } else {
+                    showNotification('❌ Failed to submit choice: ' + data.message, true);
+                }
+            })
+            .catch(error => {
+                console.error('[AUTOCAL] Choice error:', error);
+                showNotification('❌ Choice error: ' + error.message, true);
+            });
+        }
+        
+        function finishAutoCal() {
+            fetch('/finish_autocal', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    autocalActive = false;
+                    clearInterval(autocalComparisonInterval);
+                    showNotification('✅ Best profile saved!');
+                    
+                    // Reset UI
+                    document.getElementById('startAutoCalBtn').style.display = 'block';
+                    document.getElementById('viewABtn').style.display = 'none';
+                    document.getElementById('viewBBtn').style.display = 'none';
+                    document.getElementById('selectABtn').style.display = 'none';
+                    document.getElementById('selectBBtn').style.display = 'none';
+                    document.getElementById('noChangeBtn').style.display = 'none';
+                    document.getElementById('finishAutoCalBtn').style.display = 'none';
+                    document.getElementById('cancelAutoCalBtn').style.display = 'none';
+                    updateAutoCalUI({ status: 'ready', iteration: 0, total_iterations: 0 });
+                } else {
+                    showNotification('❌ Failed to finish: ' + data.message, true);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showNotification('❌ Finish error', true);
+            });
+        }
+        
+        function cancelAutoCal() {
+            if (!confirm('Cancel auto calibration? Progress will be lost.')) {
+                return;
+            }
+            
+            fetch('/cancel_autocal', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                autocalActive = false;
+                clearInterval(autocalComparisonInterval);
+                
+                // Reset UI
+                document.getElementById('startAutoCalBtn').style.display = 'block';
+                document.getElementById('viewABtn').style.display = 'none';
+                document.getElementById('viewBBtn').style.display = 'none';
+                document.getElementById('selectABtn').style.display = 'none';
+                document.getElementById('selectBBtn').style.display = 'none';
+                document.getElementById('noChangeBtn').style.display = 'none';
+                document.getElementById('finishAutoCalBtn').style.display = 'none';
+                document.getElementById('cancelAutoCalBtn').style.display = 'none';
+                updateAutoCalUI({ status: 'ready', iteration: 0, total_iterations: 0 });
+                
+                showNotification('❌ Auto Cal cancelled');
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
 
         updateRecordingButton();
     </script>
