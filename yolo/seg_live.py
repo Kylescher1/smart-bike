@@ -93,6 +93,11 @@ def parse_args():
         action="store_true",
         help="Use optimized stereo matcher mode (SGBM_3WAY) - faster than regular SGBM",
     )
+    parser.add_argument(
+        "--use-bm",
+        action="store_true",
+        help="Use BM (Block Matching) instead of SGBM - much faster but less accurate",
+    )
     return parser.parse_args()
 
 
@@ -294,6 +299,9 @@ def main():
     
     vision = VISION(name="YOLODepth", **camera_config)
     
+    # Replace SGBM with BM if requested (after start, we'll replace the matcher)
+    use_bm = args.use_bm
+    
     window_name = "YOLO Segmentation + Depth"
     depth_window = "Depth Map"
     
@@ -314,10 +322,48 @@ def main():
         print("[INFO] Fast depth mode enabled - expensive filters disabled")
     if args.fast_stereo:
         print("[INFO] Fast stereo mode enabled - using optimized SGBM_3WAY")
+    if args.use_bm:
+        print("[INFO] BM (Block Matching) mode enabled - much faster than SGBM")
     print("[INFO] CPU-only mode - using optimized settings for CPU performance")
     
     try:
         vision.start()
+        
+        # Replace SGBM with BM if requested (BM is faster but less accurate)
+        if use_bm:
+            print("[INFO] Replacing SGBM with BM (Block Matching) for faster processing")
+            # Disable WLS when using BM (BM doesn't support WLS)
+            if vision.depth_processor:
+                vision.depth_processor.useWLS = False
+                vision.depth_processor.wls_filter = None
+                vision.depth_processor.right_matcher = None
+            
+            block_size = camera_config.get("blockSize", 11)
+            block_size = block_size if block_size % 2 == 1 else block_size + 1
+            num_disparities = max(16, 16 * camera_config.get("numDisparitiesK", 2))
+            
+            # Create StereoBM matcher (faster than SGBM)
+            bm_matcher = cv2.StereoBM_create(
+                numDisparities=num_disparities,
+                blockSize=max(5, block_size)  # BM requires blockSize >= 5
+            )
+            bm_matcher.setPreFilterType(1)  # 0 = PREFILTER_NORMALIZED_RESPONSE, 1 = PREFILTER_XSOBEL
+            bm_matcher.setPreFilterSize(camera_config.get("preFilterCap", 43))
+            bm_matcher.setPreFilterCap(31)
+            bm_matcher.setTextureThreshold(10)
+            bm_matcher.setUniquenessRatio(camera_config.get("uniquenessRatio", 1))
+            bm_matcher.setSpeckleWindowSize(camera_config.get("speckleWindowSize", 196))
+            bm_matcher.setSpeckleRange(camera_config.get("speckleRange", 34))
+            bm_matcher.setDisp12MaxDiff(camera_config.get("disp12MaxDiff", 18))
+            
+            # Replace the stereo matcher
+            vision.stereo = bm_matcher
+            # Update depth processor with new matcher
+            if vision.depth_processor:
+                vision.depth_processor.update_matcher(bm_matcher)
+            print(f"[INFO] BM matcher created: numDisparities={num_disparities}, blockSize={block_size}")
+            print("[INFO] WLS filtering disabled (not supported by BM)")
+        
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.namedWindow(depth_window, cv2.WINDOW_NORMAL)
         
