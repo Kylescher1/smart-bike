@@ -221,6 +221,122 @@ class VISION:
                 }
             }
     
+    def get_pointcloud(self, max_points=None, filters=None):
+        """
+        Generate 3D point cloud from current frame.
+        
+        Args:
+            max_points: Maximum number of points to return (None = all points)
+            filters: Optional dict with filter parameters:
+                {
+                    'min_x', 'max_x', 'min_y', 'max_y', 'min_z', 'max_z': float or None,
+                    'min_dist', 'max_dist': float or None  # distance from origin
+                }
+        
+        Returns:
+            dict: {
+                'points': np.ndarray (Nx3),  # 3D coordinates
+                'colors': np.ndarray (Nx3),   # BGR colors
+                'num_points': int,
+                'metadata': dict
+            }
+        """
+        if not self.connected:
+            raise RuntimeError(f"{self.name}: Not connected. Call start() first.")
+        
+        if self.Q is None:
+            raise RuntimeError(f"{self.name}: Q matrix not available. Calibration required.")
+        
+        # Get depth data
+        result = self.read()
+        disparity_map = result.get('disparity_map')
+        depth_map = result.get('depth_map')
+        
+        if disparity_map is None or disparity_map.size == 0:
+            return {
+                'points': np.array([]),
+                'colors': np.array([]),
+                'num_points': 0,
+                'metadata': result.get('metadata', {})
+            }
+        
+        # Get left camera frame for colors
+        left_frame = self.left_camera.read_frame()
+        if left_frame is None:
+            return {
+                'points': np.array([]),
+                'colors': np.array([]),
+                'num_points': 0,
+                'metadata': result.get('metadata', {})
+            }
+        
+        # Convert disparity to 3D points
+        points_3d = cv2.reprojectImageTo3D(disparity_map.astype(np.float32) * 16.0, self.Q)
+        
+        # Filter out invalid points
+        valid_mask = (depth_map > 0) & np.isfinite(points_3d[:, :, 2])
+        valid_mask = valid_mask & (points_3d[:, :, 2] > 0)
+        
+        # Get valid points and colors
+        h, w = disparity_map.shape[:2]
+        if left_frame.shape[:2] != (h, w):
+            left_frame = cv2.resize(left_frame, (w, h))
+        
+        points = points_3d[valid_mask]
+        colors = left_frame[valid_mask]
+        
+        if len(points) == 0:
+            return {
+                'points': np.array([]),
+                'colors': np.array([]),
+                'num_points': 0,
+                'metadata': result.get('metadata', {})
+            }
+        
+        # Apply optional filters
+        if filters is not None:
+            filter_mask = np.ones(len(points), dtype=bool)
+            
+            if filters.get('min_x') is not None:
+                filter_mask = filter_mask & (points[:, 0] >= filters['min_x'])
+            if filters.get('max_x') is not None:
+                filter_mask = filter_mask & (points[:, 0] <= filters['max_x'])
+            if filters.get('min_y') is not None:
+                filter_mask = filter_mask & (points[:, 1] >= filters['min_y'])
+            if filters.get('max_y') is not None:
+                filter_mask = filter_mask & (points[:, 1] <= filters['max_y'])
+            if filters.get('min_z') is not None:
+                filter_mask = filter_mask & (points[:, 2] >= filters['min_z'])
+            if filters.get('max_z') is not None:
+                filter_mask = filter_mask & (points[:, 2] <= filters['max_z'])
+            
+            # Distance filter
+            if filters.get('min_dist') is not None or filters.get('max_dist') is not None:
+                distances = np.linalg.norm(points, axis=1)
+                if filters.get('min_dist') is not None:
+                    filter_mask = filter_mask & (distances >= filters['min_dist'])
+                if filters.get('max_dist') is not None:
+                    filter_mask = filter_mask & (distances <= filters['max_dist'])
+            
+            points = points[filter_mask]
+            colors = colors[filter_mask]
+        
+        # Subsample if requested
+        if max_points is not None and len(points) > max_points:
+            subsample = len(points) // max_points
+            points = points[::subsample]
+            colors = colors[::subsample]
+        
+        metadata = result.get('metadata', {})
+        metadata['pointcloud_num_points'] = len(points)
+        
+        return {
+            'points': points,
+            'colors': colors,
+            'num_points': len(points),
+            'metadata': metadata
+        }
+    
     def calibrate(self, checkerboard=(7, 10), square_size=20.0, min_pairs=10):
         print("VISION/calibrate.py has been deprecated I hate kyle")
         return {}
@@ -250,7 +366,7 @@ class VISION:
             return
         
         print(f"{self.name}: Starting debug mode - displaying depth map...")
-        print(f"{self.name}: Press 'o' to start recording | 'p' to stop | 'q' to exit")
+        print(f"{self.name}: Press 'c' to output point cloud | 'o' to start recording | 'p' to stop | 'q' to exit")
         
         window_name = f"{self.name} - Depth Map Debug"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -314,6 +430,36 @@ class VISION:
                 
                 if key == ord('q'):
                     break
+                elif key == ord('c'):  # 'c' for point cloud
+                    # Generate and output point cloud
+                    try:
+                        pc_result = self.get_pointcloud(max_points=50000)
+                        if pc_result['num_points'] > 0:
+                            points = pc_result['points']
+                            colors = pc_result['colors']
+                            print(f"\n{self.name}: Point Cloud Output")
+                            print(f"  Total points: {pc_result['num_points']:,}")
+                            print(f"  X range: [{points[:, 0].min():.3f}, {points[:, 0].max():.3f}] meters")
+                            print(f"  Y range: [{points[:, 1].min():.3f}, {points[:, 1].max():.3f}] meters")
+                            print(f"  Z range: [{points[:, 2].min():.3f}, {points[:, 2].max():.3f}] meters")
+                            
+                            # Calculate center point
+                            center = np.mean(points, axis=0)
+                            print(f"  Center point: [{center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f}] meters")
+                            
+                            # Calculate distance statistics
+                            distances = np.linalg.norm(points, axis=1)
+                            print(f"  Distance from origin: min={distances.min():.3f}m, max={distances.max():.3f}m, mean={distances.mean():.3f}m")
+                            
+                            # Show first few points as example
+                            print(f"  Sample points (first 5):")
+                            for i in range(min(5, len(points))):
+                                print(f"    Point {i}: [{points[i, 0]:.3f}, {points[i, 1]:.3f}, {points[i, 2]:.3f}] "
+                                      f"Color: [{colors[i, 0]}, {colors[i, 1]}, {colors[i, 2]}]")
+                        else:
+                            print(f"{self.name}: No points in point cloud")
+                    except Exception as e:
+                        print(f"{self.name}: Error generating point cloud: {e}")
                 elif key == ord('o'):
                     if not recording:
                         # Start recording

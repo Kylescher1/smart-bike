@@ -54,6 +54,11 @@ class StreamState:
         # Colormap
         self.colormap = cv2.COLORMAP_JET  # Default colormap
         self.invert_colormap = False  # Invert colormap colors
+        # Point cloud rotation state
+        self.pc_azimuth = 0.0  # Rotation around Y axis (degrees)
+        self.pc_elevation = 0.0  # Rotation around X axis (degrees)
+        self.pc_roll = 0.0  # Rotation around Z axis (degrees)
+        self.pc_zoom = 1.0  # Zoom factor
         # Auto-calibration state
         self.autocal_active = False
         self.autocal_baseline_params = None
@@ -140,6 +145,267 @@ def generate_camera_frame(camera_side):
         print(f"Error generating {camera_side} camera frame: {e}")
         return None
 
+def rotate_points_3d(points, azimuth, elevation, roll):
+    """Rotate 3D points by azimuth (Y-axis), elevation (X-axis), and roll (Z-axis) in degrees."""
+    if len(points) == 0:
+        return points
+    
+    # Convert to radians
+    az_rad = np.deg2rad(azimuth)
+    el_rad = np.deg2rad(elevation)
+    roll_rad = np.deg2rad(roll)
+    
+    # Rotation matrices
+    # Rotation around Y-axis (azimuth)
+    cos_az, sin_az = np.cos(az_rad), np.sin(az_rad)
+    R_y = np.array([
+        [cos_az, 0, sin_az],
+        [0, 1, 0],
+        [-sin_az, 0, cos_az]
+    ])
+    
+    # Rotation around X-axis (elevation)
+    cos_el, sin_el = np.cos(el_rad), np.sin(el_rad)
+    R_x = np.array([
+        [1, 0, 0],
+        [0, cos_el, -sin_el],
+        [0, sin_el, cos_el]
+    ])
+    
+    # Rotation around Z-axis (roll)
+    cos_r, sin_r = np.cos(roll_rad), np.sin(roll_rad)
+    R_z = np.array([
+        [cos_r, -sin_r, 0],
+        [sin_r, cos_r, 0],
+        [0, 0, 1]
+    ])
+    
+    # Combined rotation: R = R_z * R_x * R_y
+    R = R_z @ R_x @ R_y
+    
+    # Apply rotation
+    return points @ R.T
+
+def project_points_to_2d(points, view_axis='xy', canvas_size=800):
+    """Project 3D points to 2D based on view axis."""
+    if len(points) == 0:
+        return np.array([]), np.array([]), 0, 0, 0, 0
+    
+    try:
+        # Select axes based on view
+        if view_axis == 'xy':  # Top view (X-Y plane, looking down Z)
+            coords = points[:, [0, 1]]
+            x_min, x_max = points[:, 0].min(), points[:, 0].max()
+            y_min, y_max = points[:, 1].min(), points[:, 1].max()
+            if (x_max - x_min) > 1e-6 and (y_max - y_min) > 1e-6:
+                scale = min(canvas_size / (x_max - x_min), canvas_size / (y_max - y_min)) * 0.8
+                offset_x = canvas_size // 2 - (x_min + x_max) / 2 * scale
+                offset_y = canvas_size // 2 - (y_min + y_max) / 2 * scale
+            else:
+                scale = 1.0
+                offset_x = offset_y = canvas_size // 2
+            x_coords = ((coords[:, 0] - x_min) * scale + offset_x).astype(int)
+            y_coords = ((coords[:, 1] - y_min) * scale + offset_y).astype(int)
+            return x_coords, y_coords, x_min, x_max, y_min, y_max
+        
+        elif view_axis == 'xz':  # Front view (X-Z plane, looking along Y)
+            coords = points[:, [0, 2]]
+            x_min, x_max = points[:, 0].min(), points[:, 0].max()
+            z_min, z_max = points[:, 2].min(), points[:, 2].max()
+            if (x_max - x_min) > 1e-6 and (z_max - z_min) > 1e-6:
+                scale = min(canvas_size / (x_max - x_min), canvas_size / (z_max - z_min)) * 0.8
+                offset_x = canvas_size // 2 - (x_min + x_max) / 2 * scale
+                offset_z = canvas_size // 2 - (z_min + z_max) / 2 * scale
+            else:
+                scale = 1.0
+                offset_x = offset_z = canvas_size // 2
+            x_coords = ((coords[:, 0] - x_min) * scale + offset_x).astype(int)
+            y_coords = ((coords[:, 1] - z_min) * scale + offset_z).astype(int)
+            return x_coords, y_coords, x_min, x_max, z_min, z_max
+        
+        elif view_axis == 'yz':  # Side view (Y-Z plane, looking along X)
+            coords = points[:, [1, 2]]
+            y_min, y_max = points[:, 1].min(), points[:, 1].max()
+            z_min, z_max = points[:, 2].min(), points[:, 2].max()
+            if (y_max - y_min) > 1e-6 and (z_max - z_min) > 1e-6:
+                scale = min(canvas_size / (y_max - y_min), canvas_size / (z_max - z_min)) * 0.8
+                offset_y = canvas_size // 2 - (y_min + y_max) / 2 * scale
+                offset_z = canvas_size // 2 - (z_min + z_max) / 2 * scale
+            else:
+                scale = 1.0
+                offset_y = offset_z = canvas_size // 2
+            x_coords = ((coords[:, 0] - y_min) * scale + offset_y).astype(int)
+            y_coords = ((coords[:, 1] - z_min) * scale + offset_z).astype(int)
+            return x_coords, y_coords, y_min, y_max, z_min, z_max
+        
+        elif view_axis == 'rotated':  # Isometric/rotated view
+            # Use rotated points and project to X-Y plane
+            coords = points[:, [0, 1]]
+            x_min, x_max = points[:, 0].min(), points[:, 0].max()
+            y_min, y_max = points[:, 1].min(), points[:, 1].max()
+            if (x_max - x_min) > 1e-6 and (y_max - y_min) > 1e-6:
+                scale = min(canvas_size / (x_max - x_min), canvas_size / (y_max - y_min)) * 0.8
+                offset_x = canvas_size // 2 - (x_min + x_max) / 2 * scale
+                offset_y = canvas_size // 2 - (y_min + y_max) / 2 * scale
+            else:
+                scale = 1.0
+                offset_x = offset_y = canvas_size // 2
+            x_coords = ((coords[:, 0] - x_min) * scale + offset_x).astype(int)
+            y_coords = ((coords[:, 1] - y_min) * scale + offset_y).astype(int)
+            return x_coords, y_coords, x_min, x_max, y_min, y_max
+        
+        return np.array([]), np.array([]), 0, 0, 0, 0
+    except Exception as e:
+        print(f"[POINTCLOUD] Error in project_points_to_2d: {e}")
+        return np.array([]), np.array([]), 0, 0, 0, 0
+
+def generate_pointcloud_frame():
+    """Generate a point cloud visualization from depth data with multiple views and rotation."""
+    if state.vision is None or not state.vision.connected:
+        return None
+    
+    try:
+        # Get depth data
+        result = state.vision.read()
+        depth_map = result.get('depth_map')
+        disparity_map = result.get('disparity_map')
+        
+        if depth_map is None or disparity_map is None:
+            return None
+        
+        # Get Q matrix for 3D reprojection
+        q_matrix = getattr(state.vision, 'Q', None)
+        if q_matrix is None:
+            return None
+        
+        # Get left camera frame for colors
+        left_frame = state.vision.left_camera.read_frame()
+        if left_frame is None:
+            return None
+        
+        # Convert disparity to 3D points
+        points_3d = cv2.reprojectImageTo3D(disparity_map.astype(np.float32) * 16.0, q_matrix)
+        
+        # Filter out invalid points (zero depth, infinite, NaN)
+        valid_mask = (depth_map > 0) & np.isfinite(points_3d[:, :, 2])
+        valid_mask = valid_mask & (points_3d[:, :, 2] > 0)
+        
+        # Get valid points and colors
+        # Resize left_frame to match disparity_map size if needed
+        h, w = disparity_map.shape[:2]
+        if left_frame.shape[:2] != (h, w):
+            left_frame = cv2.resize(left_frame, (w, h))
+        
+        points = points_3d[valid_mask]
+        colors = left_frame[valid_mask]
+        
+        if len(points) == 0:
+            return None
+        
+        # Aggressive subsampling for performance (limit to ~20k points total)
+        max_points = 20000
+        subsample = max(1, len(points) // max_points)
+        points = points[::subsample]
+        colors = colors[::subsample]
+        
+        print(f"[POINTCLOUD] Processing {len(points)} points")
+        
+        # Get rotation parameters
+        with state.lock:
+            azimuth = state.pc_azimuth
+            elevation = state.pc_elevation
+            roll = state.pc_roll
+            zoom = state.pc_zoom
+        
+        # Rotate points
+        print(f"[POINTCLOUD] Rotating points...")
+        points_rotated = rotate_points_3d(points, azimuth, elevation, roll)
+        
+        # Apply zoom to rotated points (scale around origin)
+        if zoom != 1.0:
+            points_rotated = points_rotated * zoom
+        
+        # Create visualization canvas (2x2 grid of views)
+        canvas_size = 600
+        canvas = np.zeros((canvas_size * 2, canvas_size * 2, 3), dtype=np.uint8)
+        
+        def draw_points_fast(view, x_coords, y_coords, colors_array, canvas_size):
+            """Fast point drawing using numpy indexing."""
+            try:
+                if len(x_coords) == 0 or len(y_coords) == 0:
+                    return
+                
+                # Filter valid coordinates
+                valid = (x_coords >= 0) & (x_coords < canvas_size) & (y_coords >= 0) & (y_coords < canvas_size)
+                if not np.any(valid):
+                    return
+                
+                x_valid = x_coords[valid]
+                y_valid = y_coords[valid]
+                colors_valid = colors_array[valid]
+                
+                # Use numpy advanced indexing for fast drawing
+                # Clamp coordinates to ensure they're within bounds
+                x_valid = np.clip(x_valid, 0, canvas_size - 1)
+                y_valid = np.clip(y_valid, 0, canvas_size - 1)
+                
+                # Draw points directly using numpy indexing (much faster than cv2.circle)
+                # Handle BGR color format
+                if len(colors_valid.shape) == 1:
+                    # Single color
+                    view[y_valid, x_valid] = colors_valid
+                else:
+                    # Array of colors
+                    view[y_valid, x_valid] = colors_valid
+            except Exception as e:
+                print(f"[POINTCLOUD] Error in draw_points_fast: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        print(f"[POINTCLOUD] Projecting views...")
+        # View 1: Top view (X-Y plane, looking down Z)
+        view1 = canvas[:canvas_size, :canvas_size]
+        x_coords1, y_coords1, _, _, _, _ = project_points_to_2d(points, 'xy', canvas_size)
+        draw_points_fast(view1, x_coords1, y_coords1, colors, canvas_size)
+        cv2.putText(view1, "TOP (X-Y)", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # View 2: Front view (X-Z plane, looking along Y)
+        view2 = canvas[:canvas_size, canvas_size:]
+        x_coords2, y_coords2, _, _, _, _ = project_points_to_2d(points, 'xz', canvas_size)
+        draw_points_fast(view2, x_coords2, y_coords2, colors, canvas_size)
+        cv2.putText(view2, "FRONT (X-Z)", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # View 3: Side view (Y-Z plane, looking along X)
+        view3 = canvas[canvas_size:, :canvas_size]
+        x_coords3, y_coords3, _, _, _, _ = project_points_to_2d(points, 'yz', canvas_size)
+        draw_points_fast(view3, x_coords3, y_coords3, colors, canvas_size)
+        cv2.putText(view3, "SIDE (Y-Z)", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # View 4: Rotated/Isometric view (shows rotated point cloud)
+        view4 = canvas[canvas_size:, canvas_size:]
+        x_coords4, y_coords4, _, _, _, _ = project_points_to_2d(points_rotated, 'rotated', canvas_size)
+        draw_points_fast(view4, x_coords4, y_coords4, colors, canvas_size)
+        cv2.putText(view4, f"ROTATED ({azimuth:.0f}°, {elevation:.0f}°, {roll:.0f}°)", (10, 25), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2)
+        
+        print(f"[POINTCLOUD] Frame generated successfully")
+        
+        # Add stats
+        num_points = len(points)
+        z_min, z_max = points[:, 2].min(), points[:, 2].max()
+        cv2.putText(canvas, f"Points: {num_points}", (canvas_size + 10, canvas_size * 2 - 50), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(canvas, f"Depth: {z_min:.2f}m - {z_max:.2f}m", (canvas_size + 10, canvas_size * 2 - 25), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        return canvas
+        
+    except Exception as e:
+        print(f"Error generating point cloud frame: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 def generate_stereo_calibration_frame():
     """Generate side-by-side camera view for calibration with checkerboard detection."""
     if state.vision is None or not state.vision.connected:
@@ -218,6 +484,8 @@ def generate_debug_frame():
         return generate_camera_frame("left")
     elif state.view == "right":
         return generate_camera_frame("right")
+    elif state.view == "pointcloud":
+        return generate_pointcloud_frame()
     
     # Otherwise show depth map
     try:
@@ -312,6 +580,8 @@ def generate_calibrate_frame():
         return generate_camera_frame("left")
     elif state.view == "right":
         return generate_camera_frame("right")
+    elif state.view == "pointcloud":
+        return generate_pointcloud_frame()
     
     # Otherwise show depth map
     try:
@@ -401,11 +671,15 @@ def capture_frames_continuously():
     print("📹 Frame capture thread started")
     while state.capturing:
         try:
+            # Get mode without holding lock during frame generation
             with state.lock:
-                if state.mode == "debug":
-                    frame = generate_debug_frame()
-                else:  # calibrate mode
-                    frame = generate_calibrate_frame()
+                current_mode = state.mode
+            
+            # Generate frame outside lock to avoid blocking
+            if current_mode == "debug":
+                frame = generate_debug_frame()
+            else:  # calibrate mode
+                frame = generate_calibrate_frame()
             
             if frame is not None:
                 with state.lock:
@@ -510,9 +784,9 @@ def set_mode():
 
 @app.route('/toggle_view', methods=['POST'])
 def toggle_view():
-    """Cycle through camera views: depth -> disparity -> left -> right -> left overlay -> depth."""
+    """Cycle through camera views: depth -> disparity -> left -> right -> left overlay -> pointcloud -> depth."""
     with state.lock:
-        views = ["depth", "disparity", "left", "right", "left_overlay"]
+        views = ["depth", "disparity", "left", "right", "left_overlay", "pointcloud"]
         try:
             current_index = views.index(state.view)
         except ValueError:
@@ -520,6 +794,35 @@ def toggle_view():
         state.view = views[(current_index + 1) % len(views)]
     
     return jsonify({'status': 'success', 'view': state.view})
+
+@app.route('/update_pointcloud_rotation', methods=['POST'])
+def update_pointcloud_rotation():
+    """Update point cloud rotation parameters."""
+    data = request.get_json()
+    azimuth = float(data.get('azimuth', 0))
+    elevation = float(data.get('elevation', 0))
+    roll = float(data.get('roll', 0))
+    zoom = float(data.get('zoom', 1.0))
+    
+    with state.lock:
+        state.pc_azimuth = azimuth
+        state.pc_elevation = elevation
+        state.pc_roll = roll
+        state.pc_zoom = max(0.1, min(5.0, zoom))  # Clamp zoom between 0.1 and 5.0
+    
+    return jsonify({'status': 'success', 'azimuth': state.pc_azimuth, 'elevation': state.pc_elevation, 'roll': state.pc_roll, 'zoom': state.pc_zoom})
+
+@app.route('/get_pointcloud_rotation', methods=['GET'])
+def get_pointcloud_rotation():
+    """Get current point cloud rotation parameters."""
+    with state.lock:
+        return jsonify({
+            'status': 'success',
+            'azimuth': state.pc_azimuth,
+            'elevation': state.pc_elevation,
+            'roll': state.pc_roll,
+            'zoom': state.pc_zoom
+        })
 
 @app.route('/start_recording', methods=['POST'])
 def start_recording():

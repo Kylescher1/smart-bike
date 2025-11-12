@@ -1049,6 +1049,63 @@
         </button>
     </div>
     
+    <!-- Point Cloud Controls (shown when pointcloud view is active) -->
+    <div class="controls-container" id="pointcloudControls" style="display: none;">
+        <div class="controls-header">
+            <h2>☁️ Point Cloud Controls</h2>
+        </div>
+        
+        <div class="controls-content">
+            <div class="param-group">
+                <h3>Rotation</h3>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Azimuth (Y-axis)</span>
+                        <span class="param-value" id="pcAzimuth-value">0°</span>
+                    </div>
+                    <input type="range" class="param-slider" id="pcAzimuth" 
+                           min="-180" max="180" step="1" value="0"
+                           onchange="updatePointCloudRotation('azimuth', this.value)">
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Elevation (X-axis)</span>
+                        <span class="param-value" id="pcElevation-value">0°</span>
+                    </div>
+                    <input type="range" class="param-slider" id="pcElevation" 
+                           min="-90" max="90" step="1" value="0"
+                           onchange="updatePointCloudRotation('elevation', this.value)">
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Roll (Z-axis)</span>
+                        <span class="param-value" id="pcRoll-value">0°</span>
+                    </div>
+                    <input type="range" class="param-slider" id="pcRoll" 
+                           min="-180" max="180" step="1" value="0"
+                           onchange="updatePointCloudRotation('roll', this.value)">
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Zoom</span>
+                        <span class="param-value" id="pcZoom-value">1.0x</span>
+                    </div>
+                    <input type="range" class="param-slider" id="pcZoom" 
+                           min="0.1" max="5.0" step="0.1" value="1.0"
+                           onchange="updatePointCloudRotation('zoom', this.value)">
+                </div>
+                
+                <button class="save-btn" onclick="resetPointCloudRotation()" style="margin-top: 10px;">
+                    🔄 Reset Rotation
+                </button>
+            </div>
+        </div>
+    </div>
+    
         <div class="status-bar">
             <span class="status-indicator"></span>
             Connected to Smart Bike Camera
@@ -1134,24 +1191,104 @@
                         disparity: '📷 View: Disparity Map',
                         left: '📷 View: Left Camera',
                         right: '📷 View: Right Camera',
-                        left_overlay: '📷 View: Left + Depth Overlay'
+                        left_overlay: '📷 View: Left + Depth Overlay',
+                        pointcloud: '☁️ View: Point Cloud'
                     };
                     const notificationLabels = {
                         depth: 'depth',
                         disparity: 'disparity',
                         left: 'left camera',
                         right: 'right camera',
-                        left_overlay: 'left + depth overlay'
+                        left_overlay: 'left + depth overlay',
+                        pointcloud: 'point cloud'
                     };
                     
                     btn.textContent = viewLabels[currentView] || '📷 View: Depth Map';
                     showNotification(`Switched to ${notificationLabels[currentView] || currentView} view`);
+                    
+                    // Show/hide point cloud controls
+                    const pcControls = document.getElementById('pointcloudControls');
+                    if (currentView === 'pointcloud') {
+                        pcControls.style.display = 'block';
+                        loadPointCloudRotation();
+                    } else {
+                        pcControls.style.display = 'none';
+                    }
                 }
             })
             .catch(error => {
                 console.error('Error:', error);
                 showNotification('Failed to toggle view', true);
             });
+        }
+        
+        function updatePointCloudRotation(param, value) {
+            const numValue = parseFloat(value);
+            
+            // Update display
+            if (param === 'azimuth') {
+                document.getElementById('pcAzimuth-value').textContent = numValue + '°';
+            } else if (param === 'elevation') {
+                document.getElementById('pcElevation-value').textContent = numValue + '°';
+            } else if (param === 'roll') {
+                document.getElementById('pcRoll-value').textContent = numValue + '°';
+            } else if (param === 'zoom') {
+                document.getElementById('pcZoom-value').textContent = numValue.toFixed(1) + 'x';
+            }
+            
+            // Get current values
+            const azimuth = parseFloat(document.getElementById('pcAzimuth').value);
+            const elevation = parseFloat(document.getElementById('pcElevation').value);
+            const roll = parseFloat(document.getElementById('pcRoll').value);
+            const zoom = parseFloat(document.getElementById('pcZoom').value);
+            
+            // Send update
+            fetch('/update_pointcloud_rotation', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    azimuth: azimuth,
+                    elevation: elevation,
+                    roll: roll,
+                    zoom: zoom
+                })
+            })
+            .catch(error => {
+                console.error('Error updating point cloud rotation:', error);
+            });
+        }
+        
+        function loadPointCloudRotation() {
+            fetch('/get_pointcloud_rotation')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    document.getElementById('pcAzimuth').value = data.azimuth;
+                    document.getElementById('pcAzimuth-value').textContent = data.azimuth + '°';
+                    document.getElementById('pcElevation').value = data.elevation;
+                    document.getElementById('pcElevation-value').textContent = data.elevation + '°';
+                    document.getElementById('pcRoll').value = data.roll;
+                    document.getElementById('pcRoll-value').textContent = data.roll + '°';
+                    document.getElementById('pcZoom').value = data.zoom;
+                    document.getElementById('pcZoom-value').textContent = data.zoom.toFixed(1) + 'x';
+                }
+            })
+            .catch(error => {
+                console.error('Error loading point cloud rotation:', error);
+            });
+        }
+        
+        function resetPointCloudRotation() {
+            document.getElementById('pcAzimuth').value = 0;
+            document.getElementById('pcElevation').value = 0;
+            document.getElementById('pcRoll').value = 0;
+            document.getElementById('pcZoom').value = 1.0;
+            updatePointCloudRotation('azimuth', 0);
+            updatePointCloudRotation('elevation', 0);
+            updatePointCloudRotation('roll', 0);
+            updatePointCloudRotation('zoom', 1.0);
         }
         
         // Restart vision system
