@@ -30,6 +30,7 @@ from src.hal.VISION.VISION import VISION  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parent
+
 DEFAULT_MODEL = ROOT / "models" / "yolov3-tinyu.pt"
 DEFAULT_CONFIG = PROJECT_ROOT / "config.dill"
 
@@ -343,26 +344,39 @@ def main():
             num_disparities = max(16, 16 * camera_config.get("numDisparitiesK", 2))
             
             # Create StereoBM matcher (faster than SGBM)
+            # BM requires numDisparities to be divisible by 16
+            num_disparities_bm = (num_disparities // 16) * 16
+            if num_disparities_bm < 16:
+                num_disparities_bm = 16
+            
             bm_matcher = cv2.StereoBM_create(
-                numDisparities=num_disparities,
+                numDisparities=num_disparities_bm,
                 blockSize=max(5, block_size)  # BM requires blockSize >= 5
             )
+            # BM uses different parameter names than SGBM
             bm_matcher.setPreFilterType(1)  # 0 = PREFILTER_NORMALIZED_RESPONSE, 1 = PREFILTER_XSOBEL
-            bm_matcher.setPreFilterSize(camera_config.get("preFilterCap", 43))
+            prefilter_size = max(5, min(255, camera_config.get("preFilterCap", 43)))
+            if prefilter_size % 2 == 0:
+                prefilter_size += 1  # Must be odd
+            bm_matcher.setPreFilterSize(prefilter_size)
             bm_matcher.setPreFilterCap(31)
-            bm_matcher.setTextureThreshold(10)
-            bm_matcher.setUniquenessRatio(camera_config.get("uniquenessRatio", 1))
-            bm_matcher.setSpeckleWindowSize(camera_config.get("speckleWindowSize", 196))
-            bm_matcher.setSpeckleRange(camera_config.get("speckleRange", 34))
-            bm_matcher.setDisp12MaxDiff(camera_config.get("disp12MaxDiff", 18))
+            bm_matcher.setTextureThreshold(10)  # Lower = more texture required
+            bm_matcher.setUniquenessRatio(camera_config.get("uniquenessRatio", 15))  # BM default is 15
+            bm_matcher.setSpeckleWindowSize(camera_config.get("speckleWindowSize", 0))  # 0 = disabled
+            bm_matcher.setSpeckleRange(camera_config.get("speckleRange", 0))  # 0 = disabled
+            bm_matcher.setDisp12MaxDiff(-1)  # -1 = disabled for BM
             
             # Replace the stereo matcher
             vision.stereo = bm_matcher
             # Update depth processor with new matcher
             if vision.depth_processor:
                 vision.depth_processor.update_matcher(bm_matcher)
-            print(f"[INFO] BM matcher created: numDisparities={num_disparities}, blockSize={block_size}")
+            print(f"[INFO] BM matcher created: numDisparities={num_disparities_bm}, blockSize={block_size}")
+            print(f"[INFO] BM parameters: preFilterSize={prefilter_size}, textureThreshold=10, uniquenessRatio={camera_config.get('uniquenessRatio', 15)}")
             print("[INFO] WLS filtering disabled (not supported by BM)")
+            # Enable debug mode temporarily to help diagnose issues
+            if vision.depth_processor:
+                vision.depth_processor.debug = True
         
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.namedWindow(depth_window, cv2.WINDOW_NORMAL)
@@ -399,7 +413,22 @@ def main():
                 try:
                     left_rect, right_rect = vision.depth_processor.rectify(left_frame, right_frame)
                     disparity = vision.depth_processor.compute_disparity(left_rect, right_rect)
+                    
+                    # Debug: Check disparity values for BM
+                    if use_bm and vision.depth_processor.debug:
+                        valid_pixels = np.sum(disparity > 0)
+                        print(f"[DEBUG] BM disparity: valid pixels={valid_pixels}/{disparity.size}, "
+                              f"min={disparity.min():.2f}, max={disparity.max():.2f}, "
+                              f"mean={disparity[disparity>0].mean() if valid_pixels > 0 else 0:.2f}")
+                    
                     depth_map = vision.depth_processor.disparity_to_depth(disparity)
+                    
+                    # Debug: Check depth map
+                    if use_bm and vision.depth_processor.debug:
+                        valid_depth = np.sum(depth_map > 0)
+                        print(f"[DEBUG] BM depth: valid pixels={valid_depth}/{depth_map.size}, "
+                              f"min={depth_map[depth_map>0].min() if valid_depth > 0 else 0:.2f}mm, "
+                              f"max={depth_map[depth_map>0].max() if valid_depth > 0 else 0:.2f}mm")
                     
                     # Apply smoothing if enabled
                     if vision.depth_processor._smooth_kernel >= 3:
@@ -410,10 +439,20 @@ def main():
                         )
                 except Exception as e:
                     print(f"[WARN] Error processing depth: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
                 
                 if depth_map is None or depth_map.size == 0:
                     print("[WARN] No depth data available")
+                    continue
+                
+                # Check if depth map has valid values
+                valid_depth_count = np.sum(depth_map > 0)
+                if valid_depth_count == 0:
+                    print(f"[WARN] Depth map is empty (all zeros). Check stereo calibration and BM parameters.")
+                    if use_bm:
+                        print("[INFO] Try adjusting BM parameters or use SGBM instead (remove --use-bm flag)")
                     continue
             else:
                 # Use previous rectified frame (need to rectify for YOLO anyway)
