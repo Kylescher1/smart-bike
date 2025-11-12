@@ -88,6 +88,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Resize annotated frames for display to this width while preserving aspect ratio.",
     )
+    parser.add_argument(
+        "--radar-view",
+        action="store_true",
+        help="Show a supplementary 2D radar-style visualization of detections.",
+    )
+    parser.add_argument(
+        "--radar-size",
+        type=int,
+        default=400,
+        help="Image size (pixels) for the radar visualization window.",
+    )
     return parser.parse_args()
 
 
@@ -110,6 +121,99 @@ def _center_crop(frame, target_width: int, target_height: int):
     x0 = max((width - crop_width) // 2, 0)
     y0 = max((height - crop_height) // 2, 0)
     return frame[y0 : y0 + crop_height, x0 : x0 + crop_width]
+
+
+PERSON_CLASS_INDEX = 0  # COCO class index for "person"
+
+
+def _extract_detections(
+    result,
+    allowed_classes: tuple[int, ...] | None = None,
+) -> list[tuple[str, float, tuple[float, float, float, float]]]:
+    detections: list[tuple[str, float, tuple[float, float, float, float]]] = []
+    if result.boxes is None or len(result.boxes) == 0:
+        return detections
+
+    names = None
+    if hasattr(result, "names") and result.names is not None:
+        names = result.names
+    elif hasattr(result, "model") and hasattr(result.model, "names"):
+        names = result.model.names
+
+    boxes_xyxy = result.boxes.xyxy.cpu().numpy()
+    confs = result.boxes.conf.cpu().numpy()
+    classes = result.boxes.cls.cpu().numpy().astype(int)
+
+    for idx, bbox in enumerate(boxes_xyxy):
+        class_id = classes[idx]
+        if allowed_classes is not None and class_id not in allowed_classes:
+            continue
+        label = str(classes[idx])
+        if isinstance(names, dict):
+            label = names.get(classes[idx], label)
+        elif isinstance(names, (list, tuple)) and classes[idx] < len(names):
+            label = names[classes[idx]]
+        detections.append((label, float(confs[idx]), tuple(map(float, bbox))))
+    return detections
+
+
+def _draw_radar_view(
+    frame_shape: tuple[int, int, int],
+    detections: list[tuple[str, float, tuple[float, float, float, float]]],
+    radar_size: int,
+) -> "np.ndarray":
+    import numpy as np
+
+    radar_size = max(200, radar_size)
+    radar = np.zeros((radar_size, radar_size, 3), dtype=np.uint8)
+    radar[:] = (15, 15, 15)
+
+    width = frame_shape[1]
+    height = frame_shape[0]
+
+    cx = radar_size // 2
+    cy = radar_size - 40
+
+    cv2.circle(radar, (cx, cy), radar_size // 2 - 20, (40, 40, 40), 2, cv2.LINE_AA)
+    cv2.line(radar, (cx, cy), (cx, 20), (50, 50, 50), 1, cv2.LINE_AA)
+    cv2.line(radar, (20, cy), (radar_size - 20, cy), (50, 50, 50), 1, cv2.LINE_AA)
+
+    for label, conf, bbox in detections:
+        x1, y1, x2, y2 = bbox
+        center_x = (x1 + x2) / 2.0
+        bottom_y = y2
+        norm_x = (center_x / max(width, 1)) - 0.5  # -0.5 (left) to 0.5 (right)
+        norm_y = 1.0 - (bottom_y / max(height, 1))  # 0 near bottom (close), 1 near top (far)
+
+        radius = (radar_size // 2 - 30) * norm_y + 10
+        angle = norm_x * np.pi
+        point_x = int(cx + radius * np.sin(angle))
+        point_y = int(cy - radius * np.cos(angle))
+
+        color = (0, 255, 255)
+        cv2.circle(radar, (point_x, point_y), 6, color, -1, cv2.LINE_AA)
+        cv2.putText(
+            radar,
+            f"{label}:{conf:.2f}",
+            (point_x + 8, point_y - 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (200, 200, 200),
+            1,
+            cv2.LINE_AA,
+        )
+
+    cv2.putText(
+        radar,
+        "Radar View (screen relative)",
+        (20, 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (180, 180, 180),
+        2,
+        cv2.LINE_AA,
+    )
+    return radar
 
 
 def main() -> int:
@@ -157,6 +261,8 @@ def main() -> int:
     frame_idx = 0
     cap = None
 
+    radar_window = f"{window_name} - Radar"
+
     try:
         if frame_width is not None and frame_height is not None:
             cap = cv2.VideoCapture(source)
@@ -187,6 +293,7 @@ def main() -> int:
                 inference_time_ms = (
                     result.speed.get("inference", 0.0) if hasattr(result, "speed") else 0.0
                 )
+                detections = _extract_detections(result, allowed_classes=(PERSON_CLASS_INDEX,))
 
                 # Overlay FPS and model info
                 fps = 1.0 / delta
@@ -232,6 +339,9 @@ def main() -> int:
 
                 if not args.no_show:
                     cv2.imshow(window_name, display_frame)
+                    if args.radar_view:
+                        radar_image = _draw_radar_view(cropped_frame.shape, detections, args.radar_size)
+                        cv2.imshow(radar_window, radar_image)
                     key = cv2.waitKey(1) & 0xFF
                     if key in (27, ord("q")):
                         break
@@ -256,6 +366,7 @@ def main() -> int:
                 inference_time_ms = (
                     result.speed.get("inference", 0.0) if hasattr(result, "speed") else 0.0
                 )
+                detections = _extract_detections(result, allowed_classes=(PERSON_CLASS_INDEX,))
 
                 # Overlay FPS and model info
                 fps = 1.0 / delta
@@ -302,6 +413,11 @@ def main() -> int:
 
                 if not args.no_show:
                     cv2.imshow(window_name, display_frame)
+                    if args.radar_view:
+                        orig_img = getattr(result, "orig_img", None)
+                        frame_shape = orig_img.shape if orig_img is not None else display_frame.shape
+                        radar_image = _draw_radar_view(frame_shape, detections, args.radar_size)
+                        cv2.imshow(radar_window, radar_image)
                     key = cv2.waitKey(1) & 0xFF
                     if key in (27, ord("q")):
                         break
@@ -318,6 +434,8 @@ def main() -> int:
         if not args.no_show:
             try:
                 cv2.destroyWindow(window_name)
+                if args.radar_view:
+                    cv2.destroyWindow(radar_window)
             except cv2.error:
                 pass
         cv2.destroyAllWindows()
