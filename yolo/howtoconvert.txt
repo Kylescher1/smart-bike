@@ -2,6 +2,8 @@
 
 - `yolo11n.rknn`, `yolov8n.rknn`, and `yolov8s-seg.rknn` now live in `C:\smart-bike\yolo`.
 
+python yolo/live_demo.py --weights "C:\smart-bike\yolo\models\yolo12n.pt" --radar-view --radar-size 800 --source 0
+
 ### How to Convert Models Next Time
 
 1. **Open Ubuntu (WSL) and activate your env**
