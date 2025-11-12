@@ -14,11 +14,14 @@ def create_trackbars(window_name, disparity_params):
     cv2.createTrackbar("numDisparitiesK", window_name, disparity_params["numDisparitiesK"], 16, lambda x: None)
     cv2.createTrackbar("numDisparities", window_name, disparity_params["numDisparities"], 256, lambda x: None)
     cv2.createTrackbar("blockSize", window_name, max(5, disparity_params["blockSize"]), 51, lambda x: None)
+    cv2.createTrackbar("P1", window_name, disparity_params.get("P1", 968), 10000, lambda x: None)
+    cv2.createTrackbar("P2", window_name, disparity_params.get("P2", 3872), 50000, lambda x: None)
     cv2.createTrackbar("preFilterCap", window_name, disparity_params["preFilterCap"], 100, lambda x: None)
     cv2.createTrackbar("uniquenessRatio", window_name, disparity_params["uniquenessRatio"], 100, lambda x: None)
     cv2.createTrackbar("speckleWindowSize", window_name, disparity_params["speckleWindowSize"], 500, lambda x: None)
     cv2.createTrackbar("speckleRange", window_name, disparity_params["speckleRange"], 100, lambda x: None)
     cv2.createTrackbar("disp12MaxDiff", window_name, disparity_params["disp12MaxDiff"], 100, lambda x: None)
+    cv2.createTrackbar("sgbmMode", window_name, disparity_params.get("sgbmMode", 2), 2, lambda x: None)  # 0=SGBM, 1=HH, 2=SGBM_3WAY
     
     # Pre-processing & scaling
     cv2.createTrackbar("medianBlurK", window_name, disparity_params["medianBlurK"], 21, lambda x: None)
@@ -76,11 +79,14 @@ def get_trackbar_values(window_name):
     blockSize = cv2.getTrackbarPos("blockSize", window_name)
     params["blockSize"] = max(5, blockSize if blockSize % 2 == 1 else blockSize + 1)
     
+    params["P1"] = cv2.getTrackbarPos("P1", window_name)
+    params["P2"] = cv2.getTrackbarPos("P2", window_name)
     params["preFilterCap"] = cv2.getTrackbarPos("preFilterCap", window_name)
     params["uniquenessRatio"] = cv2.getTrackbarPos("uniquenessRatio", window_name)
     params["speckleWindowSize"] = cv2.getTrackbarPos("speckleWindowSize", window_name)
     params["speckleRange"] = cv2.getTrackbarPos("speckleRange", window_name)
     params["disp12MaxDiff"] = cv2.getTrackbarPos("disp12MaxDiff", window_name)
+    params["sgbmMode"] = cv2.getTrackbarPos("sgbmMode", window_name)
     
     # Pre-processing & scaling
     params["medianBlurK"] = cv2.getTrackbarPos("medianBlurK", window_name)
@@ -246,16 +252,31 @@ def run_disparity_calibration(vision, camera_config):
                 block_size = block_size if block_size % 2 == 1 else block_size + 1
                 num_disparities = max(16, 16 * current_params['numDisparitiesK'])
                 
+                # Get P1 and P2 with defaults
+                P1 = current_params.get('P1', 8 * 1 * block_size * block_size)
+                P2 = current_params.get('P2', 32 * 1 * block_size * block_size)
+                
+                # Map mode integer to OpenCV enum
+                sgbm_mode = current_params.get('sgbmMode', 2)
+                mode_map = {
+                    0: cv2.STEREO_SGBM_MODE_SGBM,
+                    1: cv2.STEREO_SGBM_MODE_HH,
+                    2: cv2.STEREO_SGBM_MODE_SGBM_3WAY,
+                }
+                mode = mode_map.get(sgbm_mode, cv2.STEREO_SGBM_MODE_SGBM_3WAY)
+                
                 vision.stereo = cv2.StereoSGBM_create(
                     minDisparity=current_params['minDisparity'],
                     numDisparities=num_disparities,
                     blockSize=max(3, block_size),
+                    P1=P1,
+                    P2=P2,
                     preFilterCap=current_params['preFilterCap'],
                     uniquenessRatio=current_params['uniquenessRatio'],
                     speckleWindowSize=current_params['speckleWindowSize'],
                     speckleRange=current_params['speckleRange'],
                     disp12MaxDiff=current_params['disp12MaxDiff'],
-                    mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
+                    mode=mode,
                 )
                 
                 # Refresh the depth processor with new stereo matcher

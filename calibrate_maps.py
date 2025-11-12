@@ -4,6 +4,7 @@ from typing import List, Tuple
 import dill
 import sys, os
 import importlib.util
+import time
 
 config_path = r"config.dill"
 
@@ -61,14 +62,15 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
     print("STEREO CALIBRATION - IMAGE CAPTURE")
     print("=" * 60)
     print("Instructions:")
-    print("  - Press 's' to capture a stereo pair")
+    print("  - Pictures will be captured automatically every 5 seconds")
     print("  - Press 'q' to finish capturing and proceed with calibration")
     print(f"  - You need at least {min_pairs} valid pairs with detected checkerboards")
     print("=" * 60 + "\n")
 
     captured_pairs: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
     pair_count = 0
-    frame_count = 0  # Track frames for visualization frequency
+    last_capture_time = time.time()
+    capture_interval = 5.0  # seconds
 
     try:
         while True:
@@ -82,47 +84,24 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
             preview_left = cv2.resize(left_frame, (800, 600))
             preview_right = cv2.resize(right_frame, (800, 600))
 
-            # Every 5 frames, try to detect and draw checkerboard pattern
-            if frame_count % 1 == 0:
-                gray_left_viz = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
-                gray_right_viz = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
-
-                retL_viz, cornersL_viz = detect_corners(gray_left_viz, CHECKERBOARD)
-                retR_viz, cornersR_viz = detect_corners(gray_right_viz, CHECKERBOARD)
-
-                # Draw checkerboard corners on the preview frames
-                if retL_viz:
-                    # Scale corners to preview resolution
-                    scale_x = 800 / left_frame.shape[1]
-                    scale_y = 600 / left_frame.shape[0]
-                    cornersL_scaled = cornersL_viz.copy()
-                    cornersL_scaled[:, :, 0] *= scale_x
-                    cornersL_scaled[:, :, 1] *= scale_y
-                    cv2.drawChessboardCorners(preview_left, CHECKERBOARD, cornersL_scaled, retL_viz)
-
-                if retR_viz:
-                    scale_x = 800 / right_frame.shape[1]
-                    scale_y = 600 / right_frame.shape[0]
-                    cornersR_scaled = cornersR_viz.copy()
-                    cornersR_scaled[:, :, 0] *= scale_x
-                    cornersR_scaled[:, :, 1] *= scale_y
-                    cv2.drawChessboardCorners(preview_right, CHECKERBOARD, cornersR_scaled, retR_viz)
-
-            frame_count += 1
-
-            status_text = f"Pairs captured: {len(captured_pairs)}/{min_pairs}"
+            # Display status without expensive corner detection
+            current_time = time.time()
+            time_until_next = max(0, capture_interval - (current_time - last_capture_time))
+            status_text = f"Pairs captured: {len(captured_pairs)}/{min_pairs} | Next capture in: {time_until_next:.1f}s"
             cv2.putText(preview_left, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(preview_right, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-            cv2.imshow("Left Camera - Press 's' to capture, 'q' to finish", preview_left)
-            cv2.imshow("Right Camera - Press 's' to capture, 'q' to finish", preview_right)
+            cv2.imshow("Left Camera - Auto-capture every 5s, 'q' to finish", preview_left)
+            cv2.imshow("Right Camera - Auto-capture every 5s, 'q' to finish", preview_right)
 
             key = cv2.waitKey(1) & 0xFF
 
             if key == ord("q"):
                 print(f"\n✅ Finished capturing. Total pairs captured: {len(captured_pairs)}")
                 break
-            elif key == ord("s"):
+
+            # Auto-capture every 5 seconds
+            if current_time - last_capture_time >= capture_interval:
                 gray_left = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
                 gray_right = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
 
@@ -137,7 +116,9 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
                     captured_pairs.append((gray_left.copy(), gray_right.copy(), cornersL, cornersR))
                     print(f"✅ Captured pair {len(captured_pairs)}: Checkerboard detected in both images")
                 else:
-                    print(f"⚠️ Pair {pair_count + 1}: Checkerboard not detected in both images. Skipping...")
+                    print(f"⚠️ Auto-capture: Checkerboard not detected in both images. Skipping...")
+                
+                last_capture_time = current_time
                 pair_count += 1
 
     except KeyboardInterrupt:

@@ -89,11 +89,14 @@ config = {
             "numDisparitiesK": 2,
             "numDisparities": 4,
             "blockSize": 11,
+            "P1": 968,  # Penalty for disparity change by 1 (typically 8 * channels * blockSize^2)
+            "P2": 3872,  # Penalty for disparity change by more than 1 (typically 32 * channels * blockSize^2)
             "preFilterCap": 43,
             "uniquenessRatio": 1,
             "speckleWindowSize": 196,
             "speckleRange": 34,
             "disp12MaxDiff": 18,
+            "sgbmMode": 2,  # SGBM mode: 0=SGBM, 1=HH, 2=SGBM_3WAY (default)
 
             # Pre-processing & scaling
             "medianBlurK": 0,

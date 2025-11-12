@@ -868,11 +868,14 @@ def get_parameters():
         'numDisparitiesK': state.vision.numDisparitiesK,
         'numDisparities': state.vision.numDisparities,
         'blockSize': state.vision.blockSize,
+        'P1': getattr(state.vision, 'P1', 968),
+        'P2': getattr(state.vision, 'P2', 3872),
         'preFilterCap': state.vision.preFilterCap,
         'uniquenessRatio': state.vision.uniquenessRatio,
         'speckleWindowSize': state.vision.speckleWindowSize,
         'speckleRange': state.vision.speckleRange,
         'disp12MaxDiff': state.vision.disp12MaxDiff,
+        'sgbmMode': getattr(state.vision, 'sgbmMode', 2),
         
         # Pre-processing & scaling
         'medianBlurK': state.vision.medianBlurK,
@@ -923,24 +926,39 @@ def update_parameter():
             
             # If core stereo parameters changed, recreate stereo matcher
             stereo_params = ['minDisparity', 'numDisparitiesK', 'numDisparities', 
-                           'blockSize', 'preFilterCap', 'uniquenessRatio', 
-                           'speckleWindowSize', 'speckleRange', 'disp12MaxDiff']
+                           'blockSize', 'P1', 'P2', 'preFilterCap', 'uniquenessRatio', 
+                           'speckleWindowSize', 'speckleRange', 'disp12MaxDiff', 'sgbmMode']
             
             if param_name in stereo_params:
                 block_size = state.vision.blockSize
                 block_size = block_size if block_size % 2 == 1 else block_size + 1
                 num_disparities = max(16, 16 * state.vision.numDisparitiesK)
                 
+                # Get P1 and P2 with defaults
+                P1 = getattr(state.vision, 'P1', 8 * 1 * block_size * block_size)
+                P2 = getattr(state.vision, 'P2', 32 * 1 * block_size * block_size)
+                
+                # Map mode integer to OpenCV enum
+                sgbm_mode = getattr(state.vision, 'sgbmMode', 2)
+                mode_map = {
+                    0: cv2.STEREO_SGBM_MODE_SGBM,
+                    1: cv2.STEREO_SGBM_MODE_HH,
+                    2: cv2.STEREO_SGBM_MODE_SGBM_3WAY,
+                }
+                mode = mode_map.get(sgbm_mode, cv2.STEREO_SGBM_MODE_SGBM_3WAY)
+                
                 state.vision.stereo = cv2.StereoSGBM_create(
                     minDisparity=state.vision.minDisparity,
                     numDisparities=num_disparities,
                     blockSize=max(3, block_size),
+                    P1=P1,
+                    P2=P2,
                     preFilterCap=state.vision.preFilterCap,
                     uniquenessRatio=state.vision.uniquenessRatio,
                     speckleWindowSize=state.vision.speckleWindowSize,
                     speckleRange=state.vision.speckleRange,
                     disp12MaxDiff=state.vision.disp12MaxDiff,
-                    mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
+                    mode=mode,
                 )
             
             # Refresh depth processor with updated parameters

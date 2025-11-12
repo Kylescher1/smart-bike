@@ -109,16 +109,31 @@ class VISION:
         block_size = block_size if block_size % 2 == 1 else block_size + 1
         num_disparities = max(16, 16 * self.numDisparitiesK)
         
+        # Get P1 and P2, with defaults if not set (for backward compatibility)
+        P1 = getattr(self, 'P1', 8 * 1 * block_size * block_size)  # Default: 8 * channels * blockSize^2
+        P2 = getattr(self, 'P2', 32 * 1 * block_size * block_size)  # Default: 32 * channels * blockSize^2
+        
+        # Map mode integer to OpenCV enum
+        sgbm_mode = getattr(self, 'sgbmMode', 2)  # Default to SGBM_3WAY
+        mode_map = {
+            0: cv2.STEREO_SGBM_MODE_SGBM,
+            1: cv2.STEREO_SGBM_MODE_HH,
+            2: cv2.STEREO_SGBM_MODE_SGBM_3WAY,
+        }
+        mode = mode_map.get(sgbm_mode, cv2.STEREO_SGBM_MODE_SGBM_3WAY)
+        
         self.stereo = cv2.StereoSGBM_create(
             minDisparity=self.minDisparity,
             numDisparities=num_disparities,
             blockSize=max(3, block_size),
+            P1=P1,
+            P2=P2,
             preFilterCap=self.preFilterCap,
             uniquenessRatio=self.uniquenessRatio,
             speckleWindowSize=self.speckleWindowSize,
             speckleRange=self.speckleRange,
             disp12MaxDiff=self.disp12MaxDiff,
-            mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
+            mode=mode,
         )
         
         self._refresh_depth_processor()

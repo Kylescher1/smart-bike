@@ -740,6 +740,16 @@
                 
                 <div class="param-item">
                     <div class="param-label">
+                        <span class="param-name">Min Disparity</span>
+                        <span class="param-value" id="minDisparity-value">0</span>
+                    </div>
+                    <input type="range" class="param-slider" id="minDisparity" 
+                           min="0" max="100" step="1" value="0"
+                           onchange="updateParameter('minDisparity', this.value)">
+                </div>
+                
+                <div class="param-item">
+                    <div class="param-label">
                         <span class="param-name">Block Size</span>
                         <span class="param-value" id="blockSize-value">11</span>
                     </div>
@@ -770,12 +780,45 @@
                 
                 <div class="param-item">
                     <div class="param-label">
+                        <span class="param-name">P1 (Smoothness Penalty 1)</span>
+                        <span class="param-value" id="P1-value">968</span>
+                    </div>
+                    <input type="range" class="param-slider" id="P1" 
+                           min="0" max="10000" step="10" value="968"
+                           onchange="updateParameter('P1', this.value)">
+                </div>
+
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">P2 (Smoothness Penalty 2)</span>
+                        <span class="param-value" id="P2-value">3872</span>
+                    </div>
+                    <input type="range" class="param-slider" id="P2" 
+                           min="0" max="50000" step="50" value="3872"
+                           onchange="updateParameter('P2', this.value)">
+                </div>
+
+                <div class="param-item">
+                    <div class="param-label">
                         <span class="param-name">Pre Filter Cap</span>
                         <span class="param-value" id="preFilterCap-value">43</span>
                     </div>
                     <input type="range" class="param-slider" id="preFilterCap" 
                            min="1" max="100" step="1" value="43"
                            onchange="updateParameter('preFilterCap', this.value)">
+                </div>
+
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">SGBM Mode</span>
+                        <span class="param-value" id="sgbmMode-value">SGBM_3WAY</span>
+                    </div>
+                    <select class="param-slider" id="sgbmMode" style="width: 100%; padding: 8px; background: #3a3a3a; color: #ffffff; border: 2px solid #667eea; border-radius: 8px; font-size: 14px; cursor: pointer;"
+                           onchange="updateParameter('sgbmMode', this.value)">
+                        <option value="0">SGBM (Standard)</option>
+                        <option value="1">HH (Hirschmuller-HH)</option>
+                        <option value="2" selected>SGBM_3WAY (3-Way)</option>
+                    </select>
                 </div>
 
                 <div class="param-item">
@@ -796,6 +839,16 @@
                     <input type="range" class="param-slider" id="speckleRange" 
                            min="0" max="64" step="1" value="0"
                            onchange="updateParameter('speckleRange', this.value)">
+                </div>
+
+                <div class="param-item">
+                    <div class="param-label">
+                        <span class="param-name">Disp12 Max Diff</span>
+                        <span class="param-value" id="disp12MaxDiff-value">18</span>
+                    </div>
+                    <input type="range" class="param-slider" id="disp12MaxDiff" 
+                           min="0" max="100" step="1" value="18"
+                           onchange="updateParameter('disp12MaxDiff', this.value)">
                 </div>
             </div>
             
@@ -1365,6 +1418,17 @@
                             if (display) display.textContent = value;
                         } else if (slider && slider.type === 'checkbox') {
                             slider.checked = value;
+                        } else if (slider && slider.tagName === 'SELECT') {
+                            // Handle select dropdowns (like sgbmMode)
+                            slider.value = value;
+                            if (display) {
+                                const modeLabels = {
+                                    0: 'SGBM',
+                                    1: 'HH',
+                                    2: 'SGBM_3WAY'
+                                };
+                                display.textContent = modeLabels[value] || value;
+                            }
                         }
                     }
                 }
@@ -1377,7 +1441,17 @@
             // Update display
             const display = document.getElementById(name + '-value');
             if (display) {
-                display.textContent = value;
+                // Special handling for sgbmMode dropdown
+                if (name === 'sgbmMode') {
+                    const modeLabels = {
+                        0: 'SGBM',
+                        1: 'HH',
+                        2: 'SGBM_3WAY'
+                    };
+                    display.textContent = modeLabels[value] || value;
+                } else {
+                    display.textContent = value;
+                }
             }
             
             // Send to server
