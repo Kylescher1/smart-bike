@@ -406,68 +406,72 @@ class SpinningLidar:
         return f"<{self.name} port={self.port}, connected={self.connected}>"
 
 
-def multi_sensor_live_plot(get_frame_funcs, update_delay=0.050):
+def collect_all_sensors(sensors):
     """
-    get_frame_funcs: list of callables that return a frame with shape (2, N)
-                     frame[0] = angles (radians)
-                     frame[1] = distances
+    Collects the latest frames from all sensors.
+    sensors: list of sensor objects with .get_latest_frame() -> 4xN array
+    Returns: list of frames, one per sensor
     """
+    frames = [s.get_latest_frame() for s in sensors]
+    return frames
 
+def plot_sensor_frames(frames, ax, scatters, process_funcs=None):
+    """
+    Updates the scatter plots for each sensor.
+
+    frames: list of 4xN arrays [x, y, z, q]
+    ax: matplotlib Axes
+    scatters: list of scatter artists (one per sensor)
+    process_funcs: optional list of functions, one per sensor, to transform frames
+    """
+    for i, (scatter, frame) in enumerate(zip(scatters, frames)):
+        if frame.size == 0:
+            continue
+
+        # Apply processing function if provided
+        if process_funcs and process_funcs[i] is not None:
+            frame = process_funcs[i](frame)
+
+        x = frame[0]
+        y = frame[1]
+
+        scatter.set_offsets(np.column_stack([x, y]))
+
+    plt.pause(0.05)  # adjust delay as needed
+
+
+def multi_sensor_live_plot(sensors, process_funcs=None, update_delay=0.05):
+    """
+    Main live plot loop for multiple sensors.
+
+    sensors: list of sensor objects with .get_latest_frame() -> 4xN array
+    process_funcs: optional list of callables per sensor: func(frame) -> frame
+    update_delay: time between updates in seconds
+    """
     plt.ion()
     fig, ax = plt.subplots(figsize=(7, 7), facecolor="black")
     ax.set_facecolor("black")
-
-    # --- Polar-style grid on Cartesian axes ---
-    max_r = 5
-    ax.set_xlim(-max_r, max_r)
-    ax.set_ylim(-max_r, max_r)
     ax.set_aspect("equal")
     ax.set_title("Live Multi-Sensor Viewer", color="white")
 
-    # Concentric circles (0→max_r)
-    for r in np.linspace(2, max_r, 5):
-        circle = plt.Circle((0, 0), r, color="gray", fill=False, lw=0.6, alpha=0.5)
-        ax.add_artist(circle)
+    max_r = 10
+    ax.set_xlim(-max_r, max_r)
+    ax.set_ylim(-max_r, max_r)
 
+    # Polar-style concentric circles
+    for r in np.linspace(2, max_r, 5):
+        ax.add_artist(plt.Circle((0, 0), r, color="gray", fill=False, lw=0.6, alpha=0.5))
     # Radial lines every 30°
     for deg in range(0, 360, 30):
         rad = np.deg2rad(deg)
-        ax.plot(
-            [0, max_r * np.cos(rad)],
-            [0, max_r * np.sin(rad)],
-            color="gray",
-            lw=0.4,
-            alpha=0.5,
-        )
+        ax.plot([0, max_r * np.cos(rad)], [0, max_r * np.sin(rad)], color="gray", lw=0.4, alpha=0.5)
 
-    # Make axis lines invisible
-    # ax.spines["left"].set_visible(False)
-    # ax.spines["bottom"].set_visible(False)
-    # ax.spines["right"].set_visible(False)
-    # ax.spines["top"].set_visible(False)
-    ax.tick_params(colors="white")
+    # scatters = [ax.scatter([], [], s=10, color='cyan') for _ in sensors]
+    scatters = [ax.scatter([], [], s=10) for _ in sensors]
 
-    # Scatter handles for each sensor
-    scatters = [ax.scatter([], [], s=10) for _ in get_frame_funcs]
-
-    # --- Main loop ---
     while True:
-        for scatter, get_frame in zip(scatters, get_frame_funcs):
-            frame = get_frame()
-
-            if frame is None or frame.size == 0:
-                continue
-
-            if frame.shape[0] != 4:
-                print("Invalid frame shape", frame.shape)
-                continue
-
-            x = frame[0]
-            y = frame[1]
-            q = frame[2]
-
-            scatter.set_offsets(np.column_stack([x, y]))
-
+        frames = collect_all_sensors(sensors)
+        plot_sensor_frames(frames, ax, scatters, process_funcs)
         plt.pause(update_delay)
 
 
@@ -490,9 +494,21 @@ if __name__ == "__main__":
     Lidar.start()
     Lidar2.start()
     try:
-        multi_sensor_live_plot(
-            get_frame_funcs=[Lidar.get_latest_frame, Lidar2.get_latest_frame],
-        )
+        sensors = [Lidar, Lidar2]
+
+
+        # Optional: define a processing function per sensor
+        def filter_quality(frame):
+            # remove points with quality < 10
+            mask = frame[3] >= 10
+            return frame[:, mask]
+        def pass_go(frame):
+            print(frame)
+            return frame
+
+        process_funcs = [filter_quality, pass_go]  # first sensor filtered, second untouched
+
+        multi_sensor_live_plot(sensors, process_funcs=process_funcs, update_delay=0.05)
         # Lidar.live_plot()
         # Lidar2.live_plot()
         # print("Sample data:", Lidar.read())
