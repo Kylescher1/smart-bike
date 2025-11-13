@@ -34,8 +34,7 @@ from src.hal.cam.Camera import Camera, CAMERA_CONFIG
 
 # Try to import Ultralytics ByteTracker, fallback to custom implementation
 try:
-    from ultralytics.trackers import ByteTracker as UltralyticsByteTracker
-    from ultralytics.trackers.track import Track as UltralyticsTrack
+    from ultralytics.trackers import BYTETracker as UltralyticsByteTracker
     ULTRALYTICS_AVAILABLE = True
 except ImportError:
     ULTRALYTICS_AVAILABLE = False
@@ -266,7 +265,13 @@ class Track:
 
 
 class ByteTrackerWrapper:
-    """Wrapper for ByteTracker that adapts RKNN detections to Ultralytics format."""
+    """
+    Wrapper for ByteTracker that uses Ultralytics ByteTracker when available,
+    otherwise falls back to custom implementation.
+    
+    Note: Ultralytics ByteTracker is tightly coupled with YOLO Results objects,
+    so we use the custom implementation which works directly with detection dicts.
+    """
     def __init__(self, track_thresh=0.5, high_thresh=0.6, match_thresh=0.8, 
                  frame_rate=30, track_buffer=30):
         """
@@ -277,36 +282,16 @@ class ByteTrackerWrapper:
             frame_rate: Video frame rate
             track_buffer: Number of frames to keep lost tracks
         """
-        if ULTRALYTICS_AVAILABLE:
-            # Use Ultralytics ByteTracker
-            from ultralytics.utils import ops
-            self.tracker = UltralyticsByteTracker(
-                args={
-                    'track_thresh': track_thresh,
-                    'track_high_thresh': high_thresh,
-                    'track_low_thresh': track_thresh,
-                    'new_track_thresh': high_thresh,
-                    'track_buffer': track_buffer,
-                    'match_thresh': match_thresh,
-                    'proximity_thresh': 0.5,
-                    'appearance_thresh': 0.25,
-                    'with_reid': False
-                },
-                frame_rate=frame_rate
-            )
-            self.use_ultralytics = True
-        else:
-            # Fallback to custom implementation
-            self.tracker = ByteTracker(
-                track_thresh=track_thresh,
-                high_thresh=high_thresh,
-                match_thresh=match_thresh,
-                frame_rate=frame_rate,
-                track_buffer=track_buffer
-            )
-            self.use_ultralytics = False
-        
-        self.track_history = defaultdict(lambda: [])
+        # Use custom implementation (Ultralytics tracker requires Results objects)
+        # The custom implementation follows the same ByteTrack algorithm
+        self.tracker = ByteTracker(
+            track_thresh=track_thresh,
+            high_thresh=high_thresh,
+            match_thresh=match_thresh,
+            frame_rate=frame_rate,
+            track_buffer=track_buffer
+        )
+        self.use_ultralytics = False
     
     def update(self, detections):
         """
@@ -318,98 +303,16 @@ class ByteTrackerWrapper:
         Returns:
             List of detections with added 'track_id' key
         """
-        if self.use_ultralytics:
-            return self._update_ultralytics(detections)
-        else:
-            return self._update_custom(detections)
-    
-    def _update_ultralytics(self, detections):
-        """Update using Ultralytics ByteTracker."""
-        if len(detections) == 0:
-            # Create empty results
-            boxes = np.zeros((0, 6), dtype=np.float32)  # [x1, y1, x2, y2, conf, cls]
-        else:
-            # Convert detections to format expected by Ultralytics: [x1, y1, x2, y2, conf, cls]
-            boxes = []
-            for det in detections:
-                x1, y1, x2, y2 = det['bbox']
-                boxes.append([x1, y1, x2, y2, det['score'], det['class_id']])
-            boxes = np.array(boxes, dtype=np.float32)
-        
-        # Update tracker
-        tracks = self.tracker.update(boxes, img=None)
-        
-        # Convert tracks back to detection format
-        output_detections = []
-        for track in tracks:
-            if track.is_confirmed():
-                x1, y1, x2, y2 = track.tlbr  # top-left bottom-right
-                track_id = int(track.track_id)
-                
-                # Find matching detection (by bbox overlap)
-                best_match = None
-                best_iou = 0
-                for det in detections:
-                    det_box = np.array(det['bbox'], dtype=np.float32)
-                    track_box = np.array([x1, y1, x2, y2], dtype=np.float32)
-                    iou = self._calculate_iou(det_box, track_box)
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_match = det
-                
-                if best_match is not None:
-                    output_detections.append({
-                        'bbox': [float(x1), float(y1), float(x2), float(y2)],
-                        'score': best_match['score'],
-                        'class_id': best_match['class_id'],
-                        'class_name': best_match['class_name'],
-                        'track_id': track_id
-                    })
-                    
-                    # Update track history
-                    x_center = (x1 + x2) / 2.0
-                    y_center = (y1 + y2) / 2.0
-                    self.track_history[track_id].append((float(x_center), float(y_center)))
-                    if len(self.track_history[track_id]) > 30:
-                        self.track_history[track_id].pop(0)
-        
-        return output_detections
-    
-    def _update_custom(self, detections):
-        """Update using custom ByteTracker."""
         return self.tracker.update(detections)
-    
-    def _calculate_iou(self, box1, box2):
-        """Calculate IoU between two boxes."""
-        x1 = max(box1[0], box2[0])
-        y1 = max(box1[1], box2[1])
-        x2 = min(box1[2], box2[2])
-        y2 = min(box1[3], box2[3])
-        
-        if x2 <= x1 or y2 <= y1:
-            return 0.0
-        
-        inter = (x2 - x1) * (y2 - y1)
-        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-        union = area1 + area2 - inter
-        
-        return inter / union if union > 0 else 0.0
     
     def get_track_history(self, track_id):
         """Get track history for a given track ID."""
-        if self.use_ultralytics:
-            return self.track_history.get(track_id, [])
-        else:
-            return self.tracker.get_track_history(track_id)
+        return self.tracker.get_track_history(track_id)
     
     @property
     def tracked_tracks(self):
         """Get tracked tracks (for compatibility)."""
-        if self.use_ultralytics:
-            return [t for t in self.tracker.tracked_tracks if t.is_confirmed()]
-        else:
-            return self.tracker.tracked_tracks
+        return self.tracker.tracked_tracks
 
 
 class ByteTracker:
@@ -1052,10 +955,7 @@ def main():
             frame_rate=30,
             track_buffer=30
         )
-        if ULTRALYTICS_AVAILABLE:
-            print("[INFO] Using Ultralytics ByteTracker", file=sys.stderr)
-        else:
-            print("[INFO] Using custom ByteTracker (Ultralytics not available)", file=sys.stderr)
+        print("[INFO] ByteTrack tracking enabled", file=sys.stderr)
     
     frame_count = 0
     prev_time = time.time()
