@@ -45,9 +45,10 @@ config = {
          },
     "arduino_breakout":
         {
-            "port": "COM7",
+            "port": "COM13",
             "baudrate": 115200,
             "BUFFER_SIZE": 200,
+            "Bias":np.array([0,0,0,0,0,0,0]), # time, ax,ay,az, gx,gy,gz
             "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
             "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
             "who_to_run": "src.hal.MPU6250.MPU6250",
@@ -61,9 +62,6 @@ config = {
             "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
             "who_to_run": "src.hal.RangeFinder.RangeFinder",
          },
-}
-
-config = {
     "camera":
         {
             "left":
@@ -140,7 +138,7 @@ config = {
             # Color segmentation
             "colorFocusMM": 10612,
             "colorSpanMM": 17800,
-            "segMode": 0, #1-3 
+            "segMode": 0, #1-3
             "kmK": 4,
             "kmSpatialX100": 50,
             "rgTau": 50,
@@ -151,6 +149,9 @@ config = {
             "Q": None,  # Set by calibration
         },
 }
+config = {
+    'camera':config['camera']
+          }
 
 #Check you have all reqired fields
 required_keys = {"who_to_run","port", "position", "z_direction"}
