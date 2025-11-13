@@ -48,6 +48,7 @@ config = {
             "port": "COM7",
             "baudrate": 115200,
             "BUFFER_SIZE": 200,
+            "Bias":np.array([0,0,0,0,0,0,0]), # time, ax,ay,az, gx,gy,gz
             "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
             "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
             "who_to_run": "src.hal.MPU6250.MPU6250",
