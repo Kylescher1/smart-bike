@@ -529,10 +529,14 @@ def main():
             is_video = True
     
     window_name = "RKNN Inference"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    if not args.no_display:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     
     frame_count = 0
     prev_time = time.time()
+    
+    # Pre-allocate buffers for better performance
+    img_input_buffer = None
     
     try:
         while True:
@@ -547,16 +551,24 @@ def main():
                     # print("[WARN] Received empty frame. Retrying...")
                     time.sleep(0.1)
                     continue
+                
+                # Skip frames if requested (for faster processing)
+                if args.skip_frames > 0 and frame_count % (args.skip_frames + 1) != 0:
+                    frame_count += 1
+                    continue
             else:
                 frame = img.copy()
             
-            # Preprocess
+            # Preprocess (optimized: avoid unnecessary copies)
             img_resized, ratio, (dw, dh) = letterbox(frame, new_shape=(args.imgsz, args.imgsz))
             img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
             
             # RKNN expects 4D input: (batch, height, width, channels) for NHWC format
-            # Add batch dimension: (height, width, channels) -> (1, height, width, channels)
-            img_input = np.expand_dims(img_rgb.astype(np.uint8), axis=0)
+            # Pre-allocate buffer if not exists, or reuse if same size
+            if img_input_buffer is None or img_input_buffer.shape != (1, args.imgsz, args.imgsz, 3):
+                img_input_buffer = np.zeros((1, args.imgsz, args.imgsz, 3), dtype=np.uint8)
+            img_input_buffer[0] = img_rgb.astype(np.uint8)
+            img_input = img_input_buffer
             
             # Run inference
             inference_start = time.time()
@@ -591,45 +603,56 @@ def main():
                 # Continue to display frame even if processing failed
                 detections = []
             
-            # Scale boxes back to original image size
-            h_orig, w_orig = frame.shape[:2]
-            scale = min(args.imgsz / w_orig, args.imgsz / h_orig)
-            new_w = int(w_orig * scale)
-            new_h = int(h_orig * scale)
-            pad_x = (args.imgsz - new_w) / 2
-            pad_y = (args.imgsz - new_h) / 2
+            # Scale boxes back to original image size (vectorized for speed)
+            if detections:
+                h_orig, w_orig = frame.shape[:2]
+                scale = min(args.imgsz / w_orig, args.imgsz / h_orig)
+                new_w = int(w_orig * scale)
+                new_h = int(h_orig * scale)
+                pad_x = (args.imgsz - new_w) / 2
+                pad_y = (args.imgsz - new_h) / 2
+                
+                # Vectorized box scaling (much faster than loop)
+                boxes = np.array([det['bbox'] for det in detections], dtype=np.float32)
+                boxes[:, [0, 2]] = (boxes[:, [0, 2]] - pad_x) / scale
+                boxes[:, [1, 3]] = (boxes[:, [1, 3]] - pad_y) / scale
+                boxes = boxes.astype(np.int32)
+                
+                for i, det in enumerate(detections):
+                    det['bbox'] = boxes[i].tolist()
             
-            for det in detections:
-                x1, y1, x2, y2 = det['bbox']
-                # Remove padding and scale back
-                x1 = int((x1 - pad_x) / scale)
-                y1 = int((y1 - pad_y) / scale)
-                x2 = int((x2 - pad_x) / scale)
-                y2 = int((y2 - pad_y) / scale)
-                det['bbox'] = [x1, y1, x2, y2]
-            
-            # Draw detections
-            annotated = draw_detections(frame.copy(), detections)
-            
-            # Calculate FPS
-            now = time.time()
-            fps = 1.0 / max(now - prev_time, 1e-6)
-            prev_time = now
-            
-            # Add info text
-            info_text = f"FPS: {fps:.1f} | Inference: {inference_time:.1f}ms | Detections: {len(detections)}"
-            cv2.putText(annotated, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
-            # Display
-            cv2.imshow(window_name, annotated)
+            # Draw detections and display (skip if no-display mode)
+            if not args.no_display:
+                annotated = draw_detections(frame.copy(), detections)
+                
+                # Calculate FPS
+                now = time.time()
+                fps = 1.0 / max(now - prev_time, 1e-6)
+                prev_time = now
+                
+                # Add info text
+                info_text = f"FPS: {fps:.1f} | Inference: {inference_time:.1f}ms | Detections: {len(detections)}"
+                cv2.putText(annotated, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                # Display
+                cv2.imshow(window_name, annotated)
+            else:
+                # Still calculate FPS for monitoring
+                now = time.time()
+                fps = 1.0 / max(now - prev_time, 1e-6)
+                prev_time = now
             
             frame_count += 1
             
-            # Exit on 'q' or Esc
-            key = cv2.waitKey(1) & 0xFF
-            if key in (27, ord('q')):
-                # print("[INFO] Exiting...")
-                break
+            # Exit on 'q' or Esc (only if display is enabled)
+            if not args.no_display:
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord('q')):
+                    # print("[INFO] Exiting...")
+                    break
+            else:
+                # In no-display mode, check for keyboard interrupt
+                time.sleep(0.001)  # Small sleep to allow interrupt
             
             # For single image, wait for key press
             if not is_video:
@@ -649,7 +672,8 @@ def main():
     finally:
         if cap is not None:
             cap.release()
-        cv2.destroyAllWindows()
+        if not args.no_display:
+            cv2.destroyAllWindows()
         rknn.release()
         # print("[INFO] Released RKNN resources")
     
