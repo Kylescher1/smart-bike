@@ -52,12 +52,15 @@ def main(config):
         with open("config.dill", "rb") as f:
             config_loaded = dill.load(f)
         for name, sensor in sensors.items():
-            config_loaded.update(sensor.calibrate())#gets each sensor to return a dict of new settings
+            new_settings = sensor.calibrate()
+            print(f"{name} has new settings {new_settings}")
+            config_loaded[name].update(new_settings)#gets each sensor to return a dict of new settings
         time.sleep(1)
-        with open("config.dill", "wb") as f:  # place data in
-            dill.dump(config_loaded, f)
 
-
+        #remove me
+        with open("config.dill", "rb") as f:
+            config_loaded = dill.load(f)
+        print(f" New dill is {config_loaded}")
         print("Damian Should make this websited")
     except KeyboardInterrupt: #Closed file
         print("\nStopping sensors...")
