@@ -13,6 +13,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from collections import defaultdict
 
 # Add system dist-packages to path for rknnlite (system package)
 import site
@@ -28,6 +29,8 @@ from rknnlite.api import RKNNLite
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
+
+from src.hal.cam.Camera import Camera, CAMERA_CONFIG
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_MODEL = ROOT / "models" / "yolo11n.rknn"
@@ -462,43 +465,41 @@ def main():
     
     # Determine input source
     source = args.source if args.source is not None else "0"
+    camera = None
+    cap = None  # Keep for video files
+    
     if source.isdigit():
-        # Camera
+        # Camera - use Camera class
         source = int(source)
-        cap = cv2.VideoCapture(source)
-        if not cap.isOpened():
-            print(f"[ERROR] Failed to open camera {source}", file=sys.stderr)
+        
+        # Optimized camera config: use lower resolution for faster capture
+        # Since we resize to 640x640 anyway, lower capture resolution reduces capture time
+        camera_config = CAMERA_CONFIG.copy()
+        camera_config.update({
+            "width": 1280,   # Start with 720p for good balance
+            "height": 720,
+            "fps": 30,       # Lower FPS target for stability
+            "fourcc": "MJPG"  # MJPEG is usually faster
+        })
+        
+        try:
+            camera = Camera(index=source, config=camera_config)
+            camera.open()
+            
+            # Test if we can actually read a frame
+            test_frame = camera.read_frame()
+            if test_frame is None:
+                print(f"[ERROR] Camera {source} opened but cannot read frames. Check camera connection.", file=sys.stderr)
+                camera.close()
+                rknn.release()
+                return 1
+            
+            # print(f"[INFO] Using camera {source} (resolution: {camera.width}x{camera.height})")
+        except RuntimeError as e:
+            print(f"[ERROR] {e}", file=sys.stderr)
             rknn.release()
             return 1
         
-        # Set camera properties for better performance
-        # Set camera to proper resolution (try highest first, fallback if needed)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1200)
-        cap.set(cv2.CAP_PROP_FPS, 60)
-        
-        # Verify actual resolution (camera might not support requested resolution)
-        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        if actual_width != 1920 or actual_height != 1200:
-            # Try alternative common resolutions
-            for w, h in [(1600, 1200), (1280, 1024), (1280, 720), (1024, 768)]:
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-                actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                if actual_width == w and actual_height == h:
-                    break
-        
-        # Test if we can actually read a frame
-        ret, test_frame = cap.read()
-        if not ret or test_frame is None:
-            print(f"[ERROR] Camera {source} opened but cannot read frames. Check camera connection.", file=sys.stderr)
-            cap.release()
-            rknn.release()
-            return 1
-        
-        # print(f"[INFO] Using camera {source} (resolution: {actual_width}x{actual_height})")
         is_video = True
     else:
         # Image or video file
@@ -538,19 +539,39 @@ def main():
     # Pre-allocate buffers for better performance
     img_input_buffer = None
     
+    # Timing diagnostics
+    total_time = 0
+    capture_time = 0
+    preprocess_time = 0
+    inference_time_total = 0
+    postprocess_time = 0
+    display_time = 0
+    
     try:
         while True:
+            loop_start = time.time()
+            
             # Get frame
+            capture_start = time.time()
             if is_video:
-                ret, frame = cap.read()
-                if not ret:
-                    # print("[WARN] Failed to read frame from camera. Retrying...")
-                    time.sleep(0.1)
-                    continue
-                if frame is None:
-                    # print("[WARN] Received empty frame. Retrying...")
-                    time.sleep(0.1)
-                    continue
+                if camera is not None:
+                    # Use Camera class
+                    frame = camera.read_frame()
+                    if frame is None:
+                        # print("[WARN] Failed to read frame from camera. Retrying...")
+                        time.sleep(0.1)
+                        continue
+                else:
+                    # Fallback for video files
+                    ret, frame = cap.read()
+                    if not ret:
+                        # print("[WARN] Failed to read frame from camera. Retrying...")
+                        time.sleep(0.1)
+                        continue
+                    if frame is None:
+                        # print("[WARN] Received empty frame. Retrying...")
+                        time.sleep(0.1)
+                        continue
                 
                 # Skip frames if requested (for faster processing)
                 if args.skip_frames > 0 and frame_count % (args.skip_frames + 1) != 0:
@@ -558,8 +579,10 @@ def main():
                     continue
             else:
                 frame = img.copy()
+            capture_time += (time.time() - capture_start) * 1000
             
             # Preprocess (optimized: avoid unnecessary copies)
+            preprocess_start = time.time()
             img_resized, ratio, (dw, dh) = letterbox(frame, new_shape=(args.imgsz, args.imgsz))
             img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
             
@@ -569,6 +592,7 @@ def main():
                 img_input_buffer = np.zeros((1, args.imgsz, args.imgsz, 3), dtype=np.uint8)
             img_input_buffer[0] = img_rgb.astype(np.uint8)
             img_input = img_input_buffer
+            preprocess_time += (time.time() - preprocess_start) * 1000
             
             # Run inference
             inference_start = time.time()
@@ -577,13 +601,15 @@ def main():
             except Exception as e:
                 print(f"[ERROR] Inference failed: {e}", file=sys.stderr)
                 continue
-            inference_time = (time.time() - inference_start) * 1000  # ms
+            inference_time_ms = (time.time() - inference_start) * 1000  # ms
+            inference_time_total += inference_time_ms
             
             # Process output
             if outputs is None:
                 # print("[WARN] Inference returned None, skipping frame")
                 continue
             
+            postprocess_start = time.time()
             detections = []
             try:
                 detections = process_output(outputs, conf_threshold=args.conf, img_shape=(args.imgsz, args.imgsz))
@@ -620,8 +646,10 @@ def main():
                 
                 for i, det in enumerate(detections):
                     det['bbox'] = boxes[i].tolist()
+            postprocess_time += (time.time() - postprocess_start) * 1000
             
             # Draw detections and display (skip if no-display mode)
+            display_start = time.time()
             if not args.no_display:
                 annotated = draw_detections(frame.copy(), detections)
                 
@@ -630,29 +658,44 @@ def main():
                 fps = 1.0 / max(now - prev_time, 1e-6)
                 prev_time = now
                 
-                # Add info text
-                info_text = f"FPS: {fps:.1f} | Inference: {inference_time:.1f}ms | Detections: {len(detections)}"
+                # Add info text with detailed timing
+                info_text = f"FPS: {fps:.1f} | Inf: {inference_time_ms:.1f}ms | Det: {len(detections)}"
                 cv2.putText(annotated, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 
                 # Display
                 cv2.imshow(window_name, annotated)
-            else:
-                # Still calculate FPS for monitoring
-                now = time.time()
-                fps = 1.0 / max(now - prev_time, 1e-6)
-                prev_time = now
-            
-            frame_count += 1
-            
-            # Exit on 'q' or Esc (only if display is enabled)
-            if not args.no_display:
+                display_time += (time.time() - display_start) * 1000
+                
+                # Exit on 'q' or Esc (only if display is enabled)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (27, ord('q')):
                     # print("[INFO] Exiting...")
                     break
             else:
+                # Still calculate FPS for monitoring
+                now = time.time()
+                fps = 1.0 / max(now - prev_time, 1e-6)
+                prev_time = now
+                display_time += (time.time() - display_start) * 1000
                 # In no-display mode, check for keyboard interrupt
                 time.sleep(0.001)  # Small sleep to allow interrupt
+            
+            loop_time = (time.time() - loop_start) * 1000
+            total_time += loop_time
+            frame_count += 1
+            
+            # Print timing breakdown every 60 frames
+            if frame_count % 60 == 0:
+                avg_capture = capture_time / frame_count
+                avg_preprocess = preprocess_time / frame_count
+                avg_inference = inference_time_total / frame_count
+                avg_postprocess = postprocess_time / frame_count
+                avg_display = display_time / frame_count
+                avg_total = total_time / frame_count
+                print(f"[TIMING] Frame {frame_count}: Capture={avg_capture:.1f}ms | "
+                      f"Preprocess={avg_preprocess:.1f}ms | Inference={avg_inference:.1f}ms | "
+                      f"Postprocess={avg_postprocess:.1f}ms | Display={avg_display:.1f}ms | "
+                      f"Total={avg_total:.1f}ms ({1000/avg_total:.1f} FPS)", file=sys.stderr)
             
             # For single image, wait for key press
             if not is_video:
@@ -670,6 +713,25 @@ def main():
         traceback.print_exc()
         return 1
     finally:
+        # Print final timing summary
+        if frame_count > 0:
+            avg_capture = capture_time / frame_count
+            avg_preprocess = preprocess_time / frame_count
+            avg_inference = inference_time_total / frame_count
+            avg_postprocess = postprocess_time / frame_count
+            avg_display = display_time / frame_count
+            avg_total = total_time / frame_count
+            print(f"\n[TIMING SUMMARY] Processed {frame_count} frames:", file=sys.stderr)
+            print(f"  Capture:     {avg_capture:.2f}ms ({100*avg_capture/avg_total:.1f}%)", file=sys.stderr)
+            print(f"  Preprocess:  {avg_preprocess:.2f}ms ({100*avg_preprocess/avg_total:.1f}%)", file=sys.stderr)
+            print(f"  Inference:   {avg_inference:.2f}ms ({100*avg_inference/avg_total:.1f}%)", file=sys.stderr)
+            print(f"  Postprocess: {avg_postprocess:.2f}ms ({100*avg_postprocess/avg_total:.1f}%)", file=sys.stderr)
+            print(f"  Display:     {avg_display:.2f}ms ({100*avg_display/avg_total:.1f}%)", file=sys.stderr)
+            print(f"  Total:       {avg_total:.2f}ms ({1000/avg_total:.2f} FPS)", file=sys.stderr)
+        
+        # Clean up camera resources
+        if camera is not None:
+            camera.close()
         if cap is not None:
             cap.release()
         if not args.no_display:

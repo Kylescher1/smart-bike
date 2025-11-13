@@ -39,6 +39,10 @@ class Camera:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+        
+        # CRITICAL: Set buffer size to 1 to always get latest frame (reduces lag significantly)
+        # This prevents frame buffering which causes delays
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     def close(self):
         if self.cap and self.cap.isOpened():
@@ -47,7 +51,13 @@ class Camera:
     def read_frame(self):
         if not self.cap or not self.cap.isOpened():
             raise RuntimeError(f"[Camera {self.index}] Not open. Call open() first.")
-        ret, frame = self.cap.read()
+        # Optimize capture: grab frames until we get the latest one
+        # This prevents using stale buffered frames
+        self.cap.grab()  # Discard any old frame
+        ret, frame = self.cap.retrieve()
+        if not ret:
+            # Fallback to regular read
+            ret, frame = self.cap.read()
         return frame if ret else None
 
 
