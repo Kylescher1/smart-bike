@@ -5,15 +5,45 @@ This script loads and runs RKNN models using rknnlite for inference on the NPU.
 It supports YOLO models and can process camera feeds or image files.
 
 Usage:
-    python yolo/rknn_inference.py --model yolo/models/yolo11n.rknn --source 0
+    python yolo_web_stream.py --model yolo/models/yolo11n.rknn --source 1
+
     python yolo/rknn_inference.py --model yolo/models/yolov8n.rknn --source /path/to/image.jpg
 """
 
 import argparse
 import sys
 import time
+import logging
 from pathlib import Path
 from collections import defaultdict
+
+# Initialize logging before any imports that use it (especially torch)
+# This prevents the "Unknown level: 'WARNING'" error
+# Ensure logging module is fully loaded and initialized
+import logging.handlers
+# Force re-import of logging._checkLevel to ensure it's properly initialized
+# The issue is that torch's matcher_utils tries to setLevel('WARNING') which
+# requires logging._checkLevel to recognize 'WARNING' as a valid level string
+logging.basicConfig(level=logging.WARNING, format='%(levelname)s:%(name)s:%(message)s')
+# Ensure _checkLevel function works with string levels
+if hasattr(logging, '_checkLevel'):
+    # Monkey-patch _checkLevel to handle string levels if it doesn't already
+    original_checkLevel = logging._checkLevel
+    def patched_checkLevel(level):
+        if isinstance(level, str):
+            # Map string to numeric level
+            level_mapping = {
+                'DEBUG': logging.DEBUG,
+                'INFO': logging.INFO,
+                'WARNING': logging.WARNING,
+                'WARN': logging.WARNING,
+                'ERROR': logging.ERROR,
+                'CRITICAL': logging.CRITICAL,
+            }
+            if level.upper() in level_mapping:
+                return level_mapping[level.upper()]
+        return original_checkLevel(level)
+    logging._checkLevel = patched_checkLevel
 
 # Add system dist-packages to path for rknnlite (system package)
 import site
@@ -799,7 +829,22 @@ def process_output(output, conf_threshold=0.25, iou_threshold=0.45, img_shape=(6
 def draw_detections(img, detections, tracker=None):
     """Draw bounding boxes, labels, and tracking trails on image."""
     for det in detections:
-        x1, y1, x2, y2 = det['bbox']
+        bbox = det['bbox']
+        # Ensure bbox is a list/array with 4 elements and convert to ints
+        if isinstance(bbox, np.ndarray):
+            bbox = bbox.flatten()
+        if len(bbox) != 4:
+            print(f"[WARN] Invalid bbox format: {bbox}, skipping detection", file=sys.stderr)
+            continue
+        
+        # Convert to Python ints (OpenCV requires native ints, not numpy ints)
+        x1, y1, x2, y2 = [int(float(c)) for c in bbox[:4]]
+        
+        # Validate coordinates
+        if x1 >= x2 or y1 >= y2:
+            print(f"[WARN] Invalid bbox coordinates: ({x1}, {y1}, {x2}, {y2}), skipping", file=sys.stderr)
+            continue
+        
         score = det['score']
         class_name = det['class_name']
         track_id = det.get('track_id', None)
@@ -1066,15 +1111,23 @@ def main():
                 boxes = np.array([det['bbox'] for det in detections], dtype=np.float32)
                 boxes[:, [0, 2]] = (boxes[:, [0, 2]] - pad_x) / scale
                 boxes[:, [1, 3]] = (boxes[:, [1, 3]] - pad_y) / scale
-                boxes = boxes.astype(np.int32)
+                # Convert to Python ints (not numpy ints) for OpenCV compatibility
+                boxes = boxes.astype(np.float32)  # Keep as float first
                 
                 for i, det in enumerate(detections):
-                    det['bbox'] = boxes[i].tolist()
+                    # Convert to list of Python ints
+                    det['bbox'] = [int(float(boxes[i, 0])), int(float(boxes[i, 1])), 
+                                   int(float(boxes[i, 2])), int(float(boxes[i, 3]))]
             
             # Update tracker if enabled
             if tracker is not None:
+                num_detections_before = len(detections)
                 tracked_detections = tracker.update(detections)
+                num_detections_after = len(tracked_detections)
                 detections = tracked_detections
+                # Debug: log if tracking filtered out many detections
+                if num_detections_before > 0 and num_detections_after == 0 and frame_count % 30 == 0:
+                    print(f"[DEBUG] Tracker filtered out all {num_detections_before} detections (frame {frame_count})", file=sys.stderr)
             
             postprocess_time += (time.time() - postprocess_start) * 1000
             
