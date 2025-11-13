@@ -61,9 +61,6 @@ config = {
             "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
             "who_to_run": "src.hal.RangeFinder.RangeFinder",
          },
-}
-
-config = {
     "camera":
         {
             "left":
@@ -137,7 +134,7 @@ config = {
             # Color segmentation
             "colorFocusMM": 10612,
             "colorSpanMM": 17800,
-            "segMode": 0, #1-3 
+            "segMode": 0, #1-3
             "kmK": 4,
             "kmSpatialX100": 50,
             "rgTau": 50,
@@ -148,6 +145,7 @@ config = {
             "Q": None,  # Set by calibration
         },
 }
+config = {'arduino_breakout':config['arduino_breakout']}
 
 #Check you have all reqired fields
 required_keys = {"who_to_run","port", "position", "z_direction"}
