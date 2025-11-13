@@ -1,25 +1,31 @@
 """
-Lightweight YOLO segmentation live preview with depth overlay.
+RKNN YOLO detection with depth overlay.
 
-Simple script to run YOLOv8n-seg segmentation model with stereo depth overlay.
+Runs RKNN YOLO models on NPU with stereo depth overlay.
 Uses VISION class to get depth maps and overlays depth on detected objects.
 Press 'q' or Esc to exit.
 
 Usage:
-    python yolo/seg_live.py                    # Use config.dill for stereo cameras
-    python yolo/seg_live.py --config custom.dill
+    python yolo/seg_live.py --model yolo/models/yolo11n.rknn
+    python yolo/seg_live.py --model yolo/models/yolo11n.rknn --config custom.dill
 """
 
 import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, List, Dict
+
+# Add system dist-packages to path for rknnlite (system package)
+import site
+system_packages = '/usr/lib/python3/dist-packages'
+if system_packages not in sys.path:
+    sys.path.insert(0, system_packages)
 
 import cv2
 import dill
 import numpy as np
-from ultralytics import YOLO
+from rknnlite.api import RKNNLite
 
 # Add project root to path for imports
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -28,20 +34,29 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.hal.VISION.VISION import VISION  # noqa: E402
 
+# Import RKNN processing functions
+from yolo.rknn_inference import (  # noqa: E402
+    letterbox,
+    nms,
+    dfl,
+    box_process_yolov8,
+    post_process_yolov8,
+    process_output,
+    COCO_CLASSES,
+)
 
 ROOT = Path(__file__).resolve().parent
-
-DEFAULT_MODEL = ROOT / "models" / "yolov3-tinyu.pt"
+DEFAULT_MODEL = ROOT / "models" / "yolo11n.rknn"
 DEFAULT_CONFIG = PROJECT_ROOT / "config.dill"
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="YOLO segmentation with depth overlay")
+    parser = argparse.ArgumentParser(description="RKNN YOLO detection with depth overlay")
     parser.add_argument(
         "--model",
         type=Path,
         default=DEFAULT_MODEL,
-        help=f"Path to segmentation model. Default: {DEFAULT_MODEL}",
+        help=f"Path to RKNN model file. Default: {DEFAULT_MODEL}",
     )
     parser.add_argument(
         "--config",
@@ -53,30 +68,31 @@ def parse_args():
         "--conf",
         type=float,
         default=0.25,
-        help="Confidence threshold (0.0-1.0)",
+        help="Confidence threshold (0.0-1.0). Default: 0.25",
     )
     parser.add_argument(
         "--imgsz",
         type=int,
         default=640,
-        help="Inference image size (pixels). Smaller = faster (e.g., 320, 416, 640)",
+        help="Inference image size (pixels). Smaller = faster (e.g., 320, 416, 640). Default: 640",
     )
     parser.add_argument(
-        "--device",
+        "--target",
         type=str,
-        default="cpu",
-        help="Device for YOLO inference. Default: 'cpu' (CPU-only mode)",
+        default=None,
+        help="Target platform (RK3562/RK3566/RK3568/RK3588). Use 'None' for on-device NPU. Default: None",
+    )
+    parser.add_argument(
+        "--core",
+        type=int,
+        default=0,
+        help="NPU core mask (0=auto, 1=core0, 2=core1, 4=core2, 3=core0+1, 7=all). Default: 0 (auto)",
     )
     parser.add_argument(
         "--skip-depth",
         type=int,
         default=0,
         help="Skip depth processing every N frames (0=process all, 1=skip every other, etc.). Higher = faster.",
-    )
-    parser.add_argument(
-        "--half",
-        action="store_true",
-        help="[GPU only] Use FP16 half precision. Ignored in CPU mode.",
     )
     parser.add_argument(
         "--fast-depth",
@@ -98,6 +114,12 @@ def parse_args():
         "--use-bm",
         action="store_true",
         help="Use BM (Block Matching) instead of SGBM - much faster but less accurate",
+    )
+    parser.add_argument(
+        "--skip-frames",
+        type=int,
+        default=0,
+        help="Skip N frames between RKNN inferences (0=process all frames). Default: 0",
     )
     return parser.parse_args()
 
@@ -128,11 +150,10 @@ def compute_depth_stats(depth_map: np.ndarray, mask: np.ndarray) -> Tuple[float,
 def overlay_depth_on_detections(
     frame: np.ndarray,
     depth_map: np.ndarray,
-    result,
-    label_lookup: dict,
+    detections: List[Dict],
     mask_opacity: float = 0.3,
 ) -> np.ndarray:
-    """Overlay depth information on YOLO detections."""
+    """Overlay depth information on RKNN detections."""
     annotated = frame.copy()
     frame_h, frame_w = frame.shape[:2]
     depth_h, depth_w = depth_map.shape[:2]
@@ -141,18 +162,10 @@ def overlay_depth_on_detections(
     if (depth_h, depth_w) != (frame_h, frame_w):
         depth_map = cv2.resize(depth_map, (frame_w, frame_h), interpolation=cv2.INTER_LINEAR)
     
-    if result.boxes is None or len(result.boxes) == 0:
+    if not detections:
         return annotated
     
     h, w = frame.shape[:2]
-    boxes_xyxy = result.boxes.xyxy.cpu().numpy()
-    confidences = result.boxes.conf.cpu().numpy()
-    classes = result.boxes.cls.cpu().numpy().astype(int)
-    
-    # Get segmentation masks if available
-    mask_data = None
-    if result.masks is not None and len(result.masks.data) > 0:
-        mask_data = result.masks.data.cpu().numpy()
     
     colors = [
         (0, 255, 0),    # Green
@@ -162,28 +175,19 @@ def overlay_depth_on_detections(
         (0, 255, 255),  # Yellow
     ]
     
-    for idx, box in enumerate(boxes_xyxy):
-        x1 = max(int(np.floor(box[0])), 0)
-        y1 = max(int(np.floor(box[1])), 0)
-        x2 = min(int(np.ceil(box[2])), w)
-        y2 = min(int(np.ceil(box[3])), h)
+    for idx, det in enumerate(detections):
+        x1, y1, x2, y2 = det['bbox']
+        x1 = max(0, int(x1))
+        y1 = max(0, int(y1))
+        x2 = min(w, int(x2))
+        y2 = min(h, int(y2))
         
         if x2 <= x1 or y2 <= y1:
             continue
         
-        # Create mask from segmentation or bounding box
-        if mask_data is not None and idx < mask_data.shape[0]:
-            mask = mask_data[idx]
-            if mask.shape != (h, w):
-                mask = cv2.resize(
-                    mask.astype(np.float32),
-                    (w, h),
-                    interpolation=cv2.INTER_NEAREST,
-                )
-            mask = mask > 0.5
-        else:
-            mask = np.zeros((h, w), dtype=bool)
-            mask[y1:y2, x1:x2] = True
+        # Create mask from bounding box (RKNN detection doesn't have segmentation masks)
+        mask = np.zeros((h, w), dtype=bool)
+        mask[y1:y2, x1:x2] = True
         
         # Compute depth statistics
         mean_depth, valid_count = compute_depth_stats(depth_map, mask)
@@ -200,8 +204,8 @@ def overlay_depth_on_detections(
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
         
         # Add label with depth info
-        label = label_lookup.get(classes[idx], str(classes[idx]))
-        conf = float(confidences[idx])
+        label = det.get('class_name', f"class_{det['class_id']}")
+        conf = det['score']
         
         if np.isfinite(mean_depth):
             # Convert from mm to inches (1 inch = 25.4 mm)
@@ -229,81 +233,63 @@ def overlay_depth_on_detections(
 def main():
     args = parse_args()
     
-    # Load model
+    # Load RKNN model
     model_path = args.model.expanduser().resolve()
     if not model_path.exists():
-        print(f"[ERROR] Model not found: {model_path}", file=sys.stderr)
+        print(f"[ERROR] Model file not found: {model_path}", file=sys.stderr)
         return 1
     
-    print(f"[INFO] Loading model: {model_path}")
-    model = YOLO(str(model_path))
+    # Initialize RKNN
+    rknn = RKNNLite(verbose=False)
     
-    # Set device for inference (CPU only)
-    if args.device:
-        device = args.device
+    # Load model
+    ret = rknn.load_rknn(str(model_path))
+    if ret != 0:
+        print(f"[ERROR] Failed to load RKNN model: {ret}", file=sys.stderr)
+        rknn.release()
+        return 1
+    
+    # Initialize runtime
+    if args.target is None or (isinstance(args.target, str) and (args.target.lower() == 'none' or args.target == '')):
+        target = None
     else:
-        device = "cpu"  # Force CPU mode
+        target = args.target
     
-    print(f"[INFO] Using device: {device} (CPU-only mode)")
-    if args.half:
-        print("[WARN] FP16 half precision requires GPU - ignoring --half flag")
-        args.half = False
-    
-    # Optimize OpenCV for CPU (use all available threads)
-    try:
-        import os
-        # Set OpenCV to use all available CPU threads
-        num_threads = os.cpu_count() or 4
-        cv2.setNumThreads(num_threads)
-        print(f"[INFO] OpenCV using {num_threads} threads for CPU processing")
-    except Exception:
-        pass
-    
-    # Get label lookup
-    if hasattr(model.model, "names"):
-        label_lookup = model.model.names
-    else:
-        label_lookup = model.names
-    if not isinstance(label_lookup, dict):
-        label_lookup = {idx: name for idx, name in enumerate(label_lookup)}
+    ret = rknn.init_runtime(target=target, core_mask=args.core)
+    if ret != 0:
+        print(f"[ERROR] Failed to initialize runtime: {ret}", file=sys.stderr)
+        rknn.release()
+        return 1
     
     # Load config and initialize VISION
     try:
         camera_config = load_config(args.config)
-        print(f"[INFO] Loaded config from: {args.config}")
     except Exception as e:
         print(f"[ERROR] Failed to load config: {e}", file=sys.stderr)
+        rknn.release()
         return 1
     
     # Apply fast depth optimizations if requested
     if args.fast_depth:
-        print("[INFO] Fast depth mode: disabling expensive filters")
-        # Temporarily override expensive filters
         original_wls = camera_config.get("useWLS", False)
         original_morph = camera_config.get("useMorph", False)
         original_smooth = camera_config.get("smoothingKernel", 0)
         camera_config["useWLS"] = False
         camera_config["useMorph"] = False
         camera_config["smoothingKernel"] = 0
-        print(f"[INFO] Disabled: WLS={original_wls}, Morph={original_morph}, Smooth={original_smooth}")
     
     # Override downsampling if specified
     if args.depth_downsample is not None:
         camera_config["downSample"] = max(0, min(90, args.depth_downsample))
-        print(f"[INFO] Depth downsampling set to {camera_config['downSample']}%")
     
     # Use faster stereo mode if requested
     if args.fast_stereo:
-        original_mode = camera_config.get("sgbmMode", 2)
-        camera_config["sgbmMode"] = 2  # SGBM_3WAY mode (optimized, faster than regular SGBM)
-        print(f"[INFO] Using optimized stereo mode: SGBM_3WAY (was mode {original_mode})")
+        camera_config["sgbmMode"] = 2  # SGBM_3WAY mode
     
-    vision = VISION(name="YOLODepth", **camera_config)
-    
-    # Replace SGBM with BM if requested (after start, we'll replace the matcher)
+    vision = VISION(name="RKNNDepth", **camera_config)
     use_bm = args.use_bm
     
-    window_name = "YOLO Segmentation + Depth"
+    window_name = "RKNN Detection + Depth"
     depth_window = "Depth Map"
     
     # Trackbar for mask opacity (0-100, default 30 for 0.3 opacity)
@@ -312,28 +298,11 @@ def main():
     def on_opacity_change(val):
         mask_opacity_value[0] = val
     
-    print("[INFO] Starting vision system...")
-    print("[INFO] Press 'q' or Esc to exit")
-    print("[INFO] Use the 'Mask Opacity' slider to adjust overlay brightness")
-    if args.skip_depth > 0:
-        print(f"[INFO] Depth processing: every {args.skip_depth + 1} frames (faster mode)")
-    if args.imgsz <= 416:
-        print(f"[INFO] Using smaller inference size ({args.imgsz}) optimized for CPU")
-    if args.fast_depth:
-        print("[INFO] Fast depth mode enabled - expensive filters disabled")
-    if args.fast_stereo:
-        print("[INFO] Fast stereo mode enabled - using optimized SGBM_3WAY")
-    if args.use_bm:
-        print("[INFO] BM (Block Matching) mode enabled - much faster than SGBM")
-    print("[INFO] CPU-only mode - using optimized settings for CPU performance")
-    
     try:
         vision.start()
         
-        # Replace SGBM with BM if requested (BM is faster but less accurate)
+        # Replace SGBM with BM if requested
         if use_bm:
-            print("[INFO] Replacing SGBM with BM (Block Matching) for faster processing")
-            # Disable WLS when using BM (BM doesn't support WLS)
             if vision.depth_processor:
                 vision.depth_processor.useWLS = False
                 vision.depth_processor.wls_filter = None
@@ -342,41 +311,29 @@ def main():
             block_size = camera_config.get("blockSize", 11)
             block_size = block_size if block_size % 2 == 1 else block_size + 1
             num_disparities = max(16, 16 * camera_config.get("numDisparitiesK", 2))
-            
-            # Create StereoBM matcher (faster than SGBM)
-            # BM requires numDisparities to be divisible by 16
             num_disparities_bm = (num_disparities // 16) * 16
             if num_disparities_bm < 16:
                 num_disparities_bm = 16
             
             bm_matcher = cv2.StereoBM_create(
                 numDisparities=num_disparities_bm,
-                blockSize=max(5, block_size)  # BM requires blockSize >= 5
+                blockSize=max(5, block_size)
             )
-            # BM uses different parameter names than SGBM
-            bm_matcher.setPreFilterType(1)  # 0 = PREFILTER_NORMALIZED_RESPONSE, 1 = PREFILTER_XSOBEL
+            bm_matcher.setPreFilterType(1)
             prefilter_size = max(5, min(255, camera_config.get("preFilterCap", 43)))
             if prefilter_size % 2 == 0:
-                prefilter_size += 1  # Must be odd
+                prefilter_size += 1
             bm_matcher.setPreFilterSize(prefilter_size)
             bm_matcher.setPreFilterCap(31)
-            bm_matcher.setTextureThreshold(10)  # Lower = more texture required
-            bm_matcher.setUniquenessRatio(camera_config.get("uniquenessRatio", 15))  # BM default is 15
-            bm_matcher.setSpeckleWindowSize(camera_config.get("speckleWindowSize", 0))  # 0 = disabled
-            bm_matcher.setSpeckleRange(camera_config.get("speckleRange", 0))  # 0 = disabled
-            bm_matcher.setDisp12MaxDiff(-1)  # -1 = disabled for BM
+            bm_matcher.setTextureThreshold(10)
+            bm_matcher.setUniquenessRatio(camera_config.get("uniquenessRatio", 15))
+            bm_matcher.setSpeckleWindowSize(camera_config.get("speckleWindowSize", 0))
+            bm_matcher.setSpeckleRange(camera_config.get("speckleRange", 0))
+            bm_matcher.setDisp12MaxDiff(-1)
             
-            # Replace the stereo matcher
             vision.stereo = bm_matcher
-            # Update depth processor with new matcher
             if vision.depth_processor:
                 vision.depth_processor.update_matcher(bm_matcher)
-            print(f"[INFO] BM matcher created: numDisparities={num_disparities_bm}, blockSize={block_size}")
-            print(f"[INFO] BM parameters: preFilterSize={prefilter_size}, textureThreshold=10, uniquenessRatio={camera_config.get('uniquenessRatio', 15)}")
-            print("[INFO] WLS filtering disabled (not supported by BM)")
-            # Enable debug mode temporarily to help diagnose issues
-            if vision.depth_processor:
-                vision.depth_processor.debug = True
         
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.namedWindow(depth_window, cv2.WINDOW_NORMAL)
@@ -388,6 +345,9 @@ def main():
         frame_counter = 0
         depth_map = None  # Keep previous depth map when skipping
         
+        # Pre-allocate buffers for better performance
+        img_input_buffer = None
+        
         while True:
             frame_counter += 1
             
@@ -396,39 +356,22 @@ def main():
             right_frame = vision.right_camera.read_frame() if vision.right_camera else None
             
             if left_frame is None or right_frame is None:
-                print("[WARN] Failed to grab stereo frames. Retrying...")
                 time.sleep(0.1)
                 continue
             
             # Process depth using the depth processor directly
             if vision.depth_processor is None:
-                print("[ERROR] Depth processor not initialized")
+                print("[ERROR] Depth processor not initialized", file=sys.stderr)
                 break
             
             # Skip depth processing if requested (use previous depth map)
             should_process_depth = (args.skip_depth == 0) or (frame_counter % (args.skip_depth + 1) == 1)
             
             if should_process_depth:
-                # Process frames through depth pipeline
                 try:
                     left_rect, right_rect = vision.depth_processor.rectify(left_frame, right_frame)
                     disparity = vision.depth_processor.compute_disparity(left_rect, right_rect)
-                    
-                    # Debug: Check disparity values for BM
-                    if use_bm and vision.depth_processor.debug:
-                        valid_pixels = np.sum(disparity > 0)
-                        print(f"[DEBUG] BM disparity: valid pixels={valid_pixels}/{disparity.size}, "
-                              f"min={disparity.min():.2f}, max={disparity.max():.2f}, "
-                              f"mean={disparity[disparity>0].mean() if valid_pixels > 0 else 0:.2f}")
-                    
                     depth_map = vision.depth_processor.disparity_to_depth(disparity)
-                    
-                    # Debug: Check depth map
-                    if use_bm and vision.depth_processor.debug:
-                        valid_depth = np.sum(depth_map > 0)
-                        print(f"[DEBUG] BM depth: valid pixels={valid_depth}/{depth_map.size}, "
-                              f"min={depth_map[depth_map>0].min() if valid_depth > 0 else 0:.2f}mm, "
-                              f"max={depth_map[depth_map>0].max() if valid_depth > 0 else 0:.2f}mm")
                     
                     # Apply smoothing if enabled
                     if vision.depth_processor._smooth_kernel >= 3:
@@ -438,61 +381,101 @@ def main():
                             0
                         )
                 except Exception as e:
-                    print(f"[WARN] Error processing depth: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    print(f"[WARN] Error processing depth: {e}", file=sys.stderr)
                     continue
                 
                 if depth_map is None or depth_map.size == 0:
-                    print("[WARN] No depth data available")
                     continue
                 
                 # Check if depth map has valid values
                 valid_depth_count = np.sum(depth_map > 0)
                 if valid_depth_count == 0:
-                    print(f"[WARN] Depth map is empty (all zeros). Check stereo calibration and BM parameters.")
-                    if use_bm:
-                        print("[INFO] Try adjusting BM parameters or use SGBM instead (remove --use-bm flag)")
                     continue
             else:
-                # Use previous rectified frame (need to rectify for YOLO anyway)
+                # Use previous rectified frame (need to rectify for RKNN anyway)
                 try:
                     left_rect, right_rect = vision.depth_processor.rectify(left_frame, right_frame)
                 except Exception as e:
-                    print(f"[WARN] Error rectifying frames: {e}")
                     continue
             
-            # Use rectified left frame for YOLO (matches depth map dimensions)
-            # Run YOLO inference on rectified left frame
-            predict_kwargs = {
-                "source": left_rect,
-                "imgsz": args.imgsz,
-                "conf": args.conf,
-                "verbose": False,
-                "device": device,
-            }
-            if args.half:
-                predict_kwargs["half"] = True
+            # Skip RKNN inference if requested
+            if args.skip_frames > 0 and frame_counter % (args.skip_frames + 1) != 0:
+                # Still display previous frame if available
+                if depth_map is not None and depth_map.size > 0:
+                    depth_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
+                    depth_display = depth_normalized.astype(np.uint8)
+                    depth_colored = cv2.applyColorMap(depth_display, cv2.COLORMAP_JET)
+                    cv2.imshow(depth_window, depth_colored)
+                cv2.waitKey(1)
+                continue
             
-            yolo_results = model.predict(**predict_kwargs)
-            result = yolo_results[0]
+            # Preprocess frame for RKNN
+            img_resized, ratio, (dw, dh) = letterbox(left_rect, new_shape=(args.imgsz, args.imgsz))
+            img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+            
+            # Pre-allocate buffer if not exists, or reuse if same size
+            if img_input_buffer is None or img_input_buffer.shape != (1, args.imgsz, args.imgsz, 3):
+                img_input_buffer = np.zeros((1, args.imgsz, args.imgsz, 3), dtype=np.uint8)
+            img_input_buffer[0] = img_rgb.astype(np.uint8)
+            img_input = img_input_buffer
+            
+            # Run RKNN inference
+            try:
+                outputs = rknn.inference([img_input])
+            except Exception as e:
+                print(f"[ERROR] Inference failed: {e}", file=sys.stderr)
+                continue
+            
+            if outputs is None:
+                continue
+            
+            # Process output
+            detections = []
+            try:
+                detections = process_output(outputs, conf_threshold=args.conf, img_shape=(args.imgsz, args.imgsz))
+            except Exception as e:
+                print(f"[ERROR] Failed to process output: {e}", file=sys.stderr)
+                detections = []
+            
+            # Scale boxes back to original image size (vectorized for speed)
+            if detections:
+                h_orig, w_orig = left_rect.shape[:2]
+                scale = min(args.imgsz / w_orig, args.imgsz / h_orig)
+                new_w = int(w_orig * scale)
+                new_h = int(h_orig * scale)
+                pad_x = (args.imgsz - new_w) / 2
+                pad_y = (args.imgsz - new_h) / 2
+                
+                # Vectorized box scaling
+                boxes = np.array([det['bbox'] for det in detections], dtype=np.float32)
+                boxes[:, [0, 2]] = (boxes[:, [0, 2]] - pad_x) / scale
+                boxes[:, [1, 3]] = (boxes[:, [1, 3]] - pad_y) / scale
+                boxes = boxes.astype(np.int32)
+                
+                for i, det in enumerate(detections):
+                    det['bbox'] = boxes[i].tolist()
             
             # Get current opacity value from trackbar (0-100 -> 0.0-1.0)
             current_opacity = mask_opacity_value[0] / 100.0
             
             # Overlay depth on detections (both are rectified, so dimensions match)
-            # Only overlay if we have a valid depth map
             if depth_map is not None and depth_map.size > 0:
                 annotated_frame = overlay_depth_on_detections(
                     left_rect,
                     depth_map,
-                    result,
-                    label_lookup,
+                    detections,
                     mask_opacity=current_opacity,
                 )
             else:
-                # Fallback: use YOLO's built-in plotting if no depth
-                annotated_frame = result.plot()
+                # Fallback: draw detections without depth
+                annotated_frame = left_rect.copy()
+                for det in detections:
+                    x1, y1, x2, y2 = det['bbox']
+                    label = det.get('class_name', f"class_{det['class_id']}")
+                    conf = det['score']
+                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(annotated_frame, f"{label} {conf:.2f}", (x1, y1 - 10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
             # Calculate FPS
             now = time.time()
@@ -500,7 +483,7 @@ def main():
             prev_time = now
             
             # Add FPS text and performance info
-            fps_text = f"FPS: {fps:.1f}"
+            fps_text = f"FPS: {fps:.1f} | Detections: {len(detections)}"
             if args.skip_depth > 0:
                 fps_text += f" | Depth: {100 // (args.skip_depth + 1)}%"
             cv2.putText(
@@ -514,27 +497,24 @@ def main():
                 cv2.LINE_AA,
             )
             
-            # Normalize depth map for visualization (use previous if skipping)
+            # Normalize depth map for visualization
             if depth_map is not None and depth_map.size > 0:
                 depth_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
                 depth_display = depth_normalized.astype(np.uint8)
                 depth_colored = cv2.applyColorMap(depth_display, cv2.COLORMAP_JET)
                 
-                # Show frames
                 cv2.imshow(window_name, annotated_frame)
                 cv2.imshow(depth_window, depth_colored)
             else:
-                # Show only annotated frame if no depth map
                 cv2.imshow(window_name, annotated_frame)
             
             # Check for exit
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord('q')):
-                print("[INFO] Exiting...")
                 break
                 
     except KeyboardInterrupt:
-        print("\n[INFO] Interrupted by user")
+        pass
     except Exception as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         import traceback
@@ -544,10 +524,10 @@ def main():
         if vision.connected:
             vision.stop()
         cv2.destroyAllWindows()
+        rknn.release()
     
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
