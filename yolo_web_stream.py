@@ -69,7 +69,7 @@ def initialize_rknn(model_path):
     if ret != 0:
         raise RuntimeError(f"Failed to load RKNN model: {ret}")
     
-    ret = rknn.init_runtime(target=None, core_mask=None)
+    ret = rknn.init_runtime(target=None, core_mask=0)  # 0 = auto select core
     if ret != 0:
         rknn.release()
         raise RuntimeError(f"Failed to initialize runtime: {ret}")
