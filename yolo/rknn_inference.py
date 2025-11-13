@@ -86,6 +86,17 @@ def parse_args():
         default=0,
         help="NPU core mask (0=auto, 1=core0, 2=core1, 4=core2, 3=core0+1, 7=all). Default: 0 (auto)",
     )
+    parser.add_argument(
+        "--skip-frames",
+        type=int,
+        default=0,
+        help="Skip N frames between inferences (0=process all frames). Default: 0",
+    )
+    parser.add_argument(
+        "--no-display",
+        action="store_true",
+        help="Disable display window for maximum speed",
+    )
     return parser.parse_args()
 
 
@@ -202,7 +213,7 @@ def post_process_yolov8(input_data, conf_threshold=0.25, iou_threshold=0.45, img
             filtered_outputs.append(input_data[i * 3])      # boxes
             filtered_outputs.append(input_data[i * 3 + 1])  # classes
         input_data = filtered_outputs
-        print(f"[INFO] Filtered 9 outputs to 6 (removed objectness outputs)")
+        # print(f"[INFO] Filtered 9 outputs to 6 (removed objectness outputs)")
     elif len(input_data) != 6:
         raise ValueError(f"Unexpected number of outputs: {len(input_data)}. Expected 6 or 9.")
     
@@ -336,7 +347,7 @@ def process_output(output, conf_threshold=0.25, iou_threshold=0.45, img_shape=(6
         scores = scores[keep]
         classes = class_ids[keep]
     else:
-        print(f"[WARN] Unexpected number of outputs: {len(output)}. Trying to process as single output...")
+        # print(f"[WARN] Unexpected number of outputs: {len(output)}. Trying to process as single output...")
         # Try to process first output
         output_data = output[0]
         if len(output_data.shape) == 3:
@@ -419,10 +430,10 @@ def main():
         print(f"[ERROR] Model file not found: {model_path}", file=sys.stderr)
         return 1
     
-    print(f"[INFO] Loading RKNN model: {model_path}")
+    # print(f"[INFO] Loading RKNN model: {model_path}")
     
     # Initialize RKNN
-    rknn = RKNNLite(verbose=True)
+    rknn = RKNNLite(verbose=False)
     
     # Load model
     ret = rknn.load_rknn(str(model_path))
@@ -436,10 +447,10 @@ def main():
     # target is only needed when connecting via ADB to a remote device
     if args.target is None or (isinstance(args.target, str) and (args.target.lower() == 'none' or args.target == '')):
         target = None
-        print("[INFO] Initializing runtime for on-device NPU...")
+        # print("[INFO] Initializing runtime for on-device NPU...")
     else:
         target = args.target
-        print(f"[INFO] Initializing runtime for {target}...")
+        # print(f"[INFO] Initializing runtime for {target}...")
     
     ret = rknn.init_runtime(target=target, core_mask=args.core)
     if ret != 0:
@@ -447,7 +458,7 @@ def main():
         rknn.release()
         return 1
     
-    print("[INFO] Model loaded and runtime initialized successfully!")
+    # print("[INFO] Model loaded and runtime initialized successfully!")
     
     # Determine input source
     source = args.source if args.source is not None else "0"
@@ -487,7 +498,7 @@ def main():
             rknn.release()
             return 1
         
-        print(f"[INFO] Using camera {source} (resolution: {actual_width}x{actual_height})")
+        # print(f"[INFO] Using camera {source} (resolution: {actual_width}x{actual_height})")
         is_video = True
     else:
         # Image or video file
@@ -505,7 +516,7 @@ def main():
                 print(f"[ERROR] Failed to load image: {source}", file=sys.stderr)
                 rknn.release()
                 return 1
-            print(f"[INFO] Processing image: {source}")
+            # print(f"[INFO] Processing image: {source}")
             is_video = False
         else:
             # Video file
@@ -514,7 +525,7 @@ def main():
                 print(f"[ERROR] Failed to open video: {source}", file=sys.stderr)
                 rknn.release()
                 return 1
-            print(f"[INFO] Processing video: {source}")
+            # print(f"[INFO] Processing video: {source}")
             is_video = True
     
     window_name = "RKNN Inference"
@@ -529,11 +540,11 @@ def main():
             if is_video:
                 ret, frame = cap.read()
                 if not ret:
-                    print("[WARN] Failed to read frame from camera. Retrying...")
+                    # print("[WARN] Failed to read frame from camera. Retrying...")
                     time.sleep(0.1)
                     continue
                 if frame is None:
-                    print("[WARN] Received empty frame. Retrying...")
+                    # print("[WARN] Received empty frame. Retrying...")
                     time.sleep(0.1)
                     continue
             else:
@@ -558,21 +569,21 @@ def main():
             
             # Process output
             if outputs is None:
-                print("[WARN] Inference returned None, skipping frame")
+                # print("[WARN] Inference returned None, skipping frame")
                 continue
             
             detections = []
             try:
                 detections = process_output(outputs, conf_threshold=args.conf, img_shape=(args.imgsz, args.imgsz))
                 # Debug: print detection stats occasionally
-                if frame_count % 30 == 0 and len(detections) == 0:
-                    # Check raw output stats
-                    if isinstance(outputs, list) and len(outputs) > 0:
-                        print(f"[DEBUG] Output shapes: {[o.shape for o in outputs]}")
-                        if len(outputs) >= 3:
-                            # Check objectness score range
-                            obj_scores = outputs[2]  # First objectness output
-                            print(f"[DEBUG] Objectness range: [{obj_scores.min():.3f}, {obj_scores.max():.3f}]")
+                # if frame_count % 30 == 0 and len(detections) == 0:
+                #     # Check raw output stats
+                #     if isinstance(outputs, list) and len(outputs) > 0:
+                #         print(f"[DEBUG] Output shapes: {[o.shape for o in outputs]}")
+                #         if len(outputs) >= 3:
+                #             # Check objectness score range
+                #             obj_scores = outputs[2]  # First objectness output
+                #             print(f"[DEBUG] Objectness range: [{obj_scores.min():.3f}, {obj_scores.max():.3f}]")
             except Exception as e:
                 print(f"[ERROR] Failed to process output: {e}", file=sys.stderr)
                 import traceback
@@ -617,18 +628,19 @@ def main():
             # Exit on 'q' or Esc
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord('q')):
-                print("[INFO] Exiting...")
+                # print("[INFO] Exiting...")
                 break
             
             # For single image, wait for key press
             if not is_video:
-                print(f"[INFO] Processed image. Found {len(detections)} detections")
-                print("[INFO] Press any key to exit...")
+                # print(f"[INFO] Processed image. Found {len(detections)} detections")
+                # print("[INFO] Press any key to exit...")
                 cv2.waitKey(0)
                 break
     
     except KeyboardInterrupt:
-        print("\n[INFO] Interrupted by user")
+        # print("\n[INFO] Interrupted by user")
+        pass
     except Exception as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         import traceback
@@ -639,7 +651,7 @@ def main():
             cap.release()
         cv2.destroyAllWindows()
         rknn.release()
-        print("[INFO] Released RKNN resources")
+        # print("[INFO] Released RKNN resources")
     
     return 0
 
