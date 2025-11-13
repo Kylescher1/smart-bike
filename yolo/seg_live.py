@@ -13,8 +13,10 @@ Usage:
 import argparse
 import sys
 import time
+import threading
+import queue
 from pathlib import Path
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 
 # Add system dist-packages to path for rknnlite (system package)
 import site
@@ -230,6 +232,71 @@ def overlay_depth_on_detections(
     return annotated
 
 
+def depth_worker_thread(
+    depth_processor,
+    frame_queue: queue.Queue,
+    depth_queue: queue.Queue,
+    timings: dict,
+    should_stop: threading.Event,
+    fast_depth: bool = False
+):
+    """Worker thread for asynchronous depth processing."""
+    while not should_stop.is_set():
+        try:
+            # Get frames from queue (with timeout to check stop event)
+            try:
+                left_frame, right_frame = frame_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            
+            if left_frame is None or right_frame is None:
+                continue
+            
+            try:
+                # Rectify
+                rectify_start = time.time()
+                left_rect, right_rect = depth_processor.rectify(left_frame, right_frame)
+                timings['rectify'].append((time.time() - rectify_start) * 1000)
+                
+                # Compute disparity
+                disparity_start = time.time()
+                disparity = depth_processor.compute_disparity(left_rect, right_rect)
+                timings['disparity'].append((time.time() - disparity_start) * 1000)
+                
+                # Convert to depth
+                depth_start = time.time()
+                depth_map = depth_processor.disparity_to_depth(disparity)
+                timings['depth_convert'].append((time.time() - depth_start) * 1000)
+                
+                # Apply smoothing if enabled
+                if not fast_depth and depth_processor._smooth_kernel >= 3:
+                    depth_map = cv2.GaussianBlur(
+                        depth_map,
+                        (depth_processor._smooth_kernel, depth_processor._smooth_kernel),
+                        0
+                    )
+                
+                # Put result in queue (non-blocking - drop old if queue full)
+                try:
+                    depth_queue.put_nowait((left_rect, depth_map))
+                except queue.Full:
+                    # Remove old entry and add new one
+                    try:
+                        depth_queue.get_nowait()
+                        depth_queue.put_nowait((left_rect, depth_map))
+                    except queue.Empty:
+                        pass
+                        
+            except Exception as e:
+                print(f"[WARN] Error in depth worker: {e}", file=sys.stderr)
+                continue
+                
+        except Exception as e:
+            print(f"[ERROR] Depth worker thread error: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+
+
 def main():
     args = parse_args()
     
@@ -298,6 +365,10 @@ def main():
     def on_opacity_change(val):
         mask_opacity_value[0] = val
     
+    # Initialize thread variables (needed for finally block)
+    should_stop = None
+    depth_thread = None
+    
     try:
         vision.start()
         
@@ -344,57 +415,92 @@ def main():
         prev_time = time.time()
         frame_counter = 0
         depth_map = None  # Keep previous depth map when skipping
+        left_rect = None  # Keep previous rectified frame
         
         # Pre-allocate buffers for better performance
         img_input_buffer = None
         
+        # Timing accumulators for averaging
+        timings = {
+            'capture': [],
+            'rectify': [],
+            'disparity': [],
+            'depth_convert': [],
+            'preprocess': [],
+            'inference': [],
+            'postprocess': [],
+            'overlay': [],
+            'display': [],
+            'total': []
+        }
+        
+        # Setup async depth processing
+        if vision.depth_processor is None:
+            print("[ERROR] Depth processor not initialized", file=sys.stderr)
+            rknn.release()
+            return 1
+        
+        # Queues for async depth processing
+        frame_queue = queue.Queue(maxsize=2)  # Keep only latest frames
+        depth_queue = queue.Queue(maxsize=1)  # Keep only latest depth map
+        should_stop = threading.Event()
+        
+        # Start depth worker thread
+        depth_thread = threading.Thread(
+            target=depth_worker_thread,
+            args=(vision.depth_processor, frame_queue, depth_queue, timings, should_stop, args.fast_depth),
+            daemon=True
+        )
+        depth_thread.start()
+        print("[INFO] Started async depth processing thread")
+        
         while True:
             frame_counter += 1
+            frame_start = time.time()
             
             # Capture frames from both cameras simultaneously
+            capture_start = time.time()
             left_frame = vision.left_camera.read_frame() if vision.left_camera else None
             right_frame = vision.right_camera.read_frame() if vision.right_camera else None
+            timings['capture'].append((time.time() - capture_start) * 1000)
             
             if left_frame is None or right_frame is None:
                 time.sleep(0.1)
                 continue
             
-            # Process depth using the depth processor directly
-            if vision.depth_processor is None:
-                print("[ERROR] Depth processor not initialized", file=sys.stderr)
-                break
-            
-            # Skip depth processing if requested (use previous depth map)
+            # Skip depth processing if requested
             should_process_depth = (args.skip_depth == 0) or (frame_counter % (args.skip_depth + 1) == 1)
             
             if should_process_depth:
+                # Send frames to depth worker thread (non-blocking)
                 try:
-                    left_rect, right_rect = vision.depth_processor.rectify(left_frame, right_frame)
-                    disparity = vision.depth_processor.compute_disparity(left_rect, right_rect)
-                    depth_map = vision.depth_processor.disparity_to_depth(disparity)
-                    
-                    # Apply smoothing if enabled
-                    if vision.depth_processor._smooth_kernel >= 3:
-                        depth_map = cv2.GaussianBlur(
-                            depth_map,
-                            (vision.depth_processor._smooth_kernel, vision.depth_processor._smooth_kernel),
-                            0
-                        )
-                except Exception as e:
-                    print(f"[WARN] Error processing depth: {e}", file=sys.stderr)
-                    continue
-                
-                if depth_map is None or depth_map.size == 0:
-                    continue
-                
+                    frame_queue.put_nowait((left_frame, right_frame))
+                except queue.Full:
+                    # Queue full, remove old and add new
+                    try:
+                        frame_queue.get_nowait()
+                        frame_queue.put_nowait((left_frame, right_frame))
+                    except queue.Empty:
+                        pass
+            
+            # Try to get latest depth map from worker thread (non-blocking)
+            try:
+                left_rect, depth_map = depth_queue.get_nowait()
                 # Check if depth map has valid values
-                valid_depth_count = np.sum(depth_map > 0)
-                if valid_depth_count == 0:
-                    continue
-            else:
-                # Use previous rectified frame (need to rectify for RKNN anyway)
+                if depth_map is not None and depth_map.size > 0:
+                    valid_depth_count = np.sum(depth_map > 0)
+                    if valid_depth_count == 0:
+                        depth_map = None
+            except queue.Empty:
+                # No new depth map yet, use previous one
+                pass
+            
+            # If we don't have a rectified frame yet, we need to rectify for RKNN
+            if left_rect is None:
                 try:
+                    rectify_start = time.time()
                     left_rect, right_rect = vision.depth_processor.rectify(left_frame, right_frame)
+                    timings['rectify'].append((time.time() - rectify_start) * 1000)
                 except Exception as e:
                     continue
             
@@ -410,6 +516,7 @@ def main():
                 continue
             
             # Preprocess frame for RKNN
+            preprocess_start = time.time()
             img_resized, ratio, (dw, dh) = letterbox(left_rect, new_shape=(args.imgsz, args.imgsz))
             img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
             
@@ -418,24 +525,29 @@ def main():
                 img_input_buffer = np.zeros((1, args.imgsz, args.imgsz, 3), dtype=np.uint8)
             img_input_buffer[0] = img_rgb.astype(np.uint8)
             img_input = img_input_buffer
+            timings['preprocess'].append((time.time() - preprocess_start) * 1000)
             
             # Run RKNN inference
+            inference_start = time.time()
             try:
                 outputs = rknn.inference([img_input])
             except Exception as e:
                 print(f"[ERROR] Inference failed: {e}", file=sys.stderr)
                 continue
+            timings['inference'].append((time.time() - inference_start) * 1000)
             
             if outputs is None:
                 continue
             
             # Process output
+            postprocess_start = time.time()
             detections = []
             try:
                 detections = process_output(outputs, conf_threshold=args.conf, img_shape=(args.imgsz, args.imgsz))
             except Exception as e:
                 print(f"[ERROR] Failed to process output: {e}", file=sys.stderr)
                 detections = []
+            timings['postprocess'].append((time.time() - postprocess_start) * 1000)
             
             # Scale boxes back to original image size (vectorized for speed)
             if detections:
@@ -459,6 +571,7 @@ def main():
             current_opacity = mask_opacity_value[0] / 100.0
             
             # Overlay depth on detections (both are rectified, so dimensions match)
+            overlay_start = time.time()
             if depth_map is not None and depth_map.size > 0:
                 annotated_frame = overlay_depth_on_detections(
                     left_rect,
@@ -476,6 +589,7 @@ def main():
                     cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(annotated_frame, f"{label} {conf:.2f}", (x1, y1 - 10),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            timings['overlay'].append((time.time() - overlay_start) * 1000)
             
             # Calculate FPS
             now = time.time()
@@ -498,6 +612,7 @@ def main():
             )
             
             # Normalize depth map for visualization
+            display_start = time.time()
             if depth_map is not None and depth_map.size > 0:
                 depth_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
                 depth_display = depth_normalized.astype(np.uint8)
@@ -507,6 +622,36 @@ def main():
                 cv2.imshow(depth_window, depth_colored)
             else:
                 cv2.imshow(window_name, annotated_frame)
+            timings['display'].append((time.time() - display_start) * 1000)
+            
+            # Total frame time
+            timings['total'].append((time.time() - frame_start) * 1000)
+            
+            # Print timing stats every 30 frames
+            if frame_counter % 30 == 0:
+                print(f"\n[PERF] Frame {frame_counter} timing breakdown (ms):")
+                if timings['capture']:
+                    print(f"  Capture:     {np.mean(timings['capture'][-30:]):.2f} ms")
+                if timings['rectify']:
+                    print(f"  Rectify:      {np.mean(timings['rectify'][-30:]):.2f} ms")
+                if timings['disparity']:
+                    print(f"  Disparity:    {np.mean(timings['disparity'][-30:]):.2f} ms")
+                if timings['depth_convert']:
+                    print(f"  Depth conv:   {np.mean(timings['depth_convert'][-30:]):.2f} ms")
+                if timings['preprocess']:
+                    print(f"  Preprocess:   {np.mean(timings['preprocess'][-30:]):.2f} ms")
+                if timings['inference']:
+                    print(f"  RKNN infer:   {np.mean(timings['inference'][-30:]):.2f} ms")
+                if timings['postprocess']:
+                    print(f"  Postprocess:  {np.mean(timings['postprocess'][-30:]):.2f} ms")
+                if timings['overlay']:
+                    print(f"  Overlay:      {np.mean(timings['overlay'][-30:]):.2f} ms")
+                if timings['display']:
+                    print(f"  Display:      {np.mean(timings['display'][-30:]):.2f} ms")
+                if timings['total']:
+                    print(f"  Total:        {np.mean(timings['total'][-30:]):.2f} ms")
+                    print(f"  FPS:          {1000.0 / np.mean(timings['total'][-30:]):.2f}")
+                print()
             
             # Check for exit
             key = cv2.waitKey(1) & 0xFF
@@ -521,6 +666,11 @@ def main():
         traceback.print_exc()
         return 1
     finally:
+        # Stop depth worker thread
+        if should_stop is not None:
+            should_stop.set()
+        if depth_thread is not None:
+            depth_thread.join(timeout=2.0)
         if vision.connected:
             vision.stop()
         cv2.destroyAllWindows()
