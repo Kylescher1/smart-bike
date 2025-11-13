@@ -8,7 +8,10 @@ import asyncio
 from collections import deque
 from datetime import datetime
 import matplotlib.cm as cm  # Import colormap module
-
+import dill
+import quaternion
+import numpy as np
+import time
 import serial  # optional, for real lidar connection
 
 class SpinningLidar:
@@ -33,6 +36,11 @@ class SpinningLidar:
         self.last_scan = None
         self.Lidar = None
         self.scan_buffer = deque(maxlen=self.BUFFER_SIZE)
+
+        self.fig = None
+        self.ax = None
+        self.scatter = None
+        self.anim = None
 
     # -------------------------------------------------------------------------
     # Connection management
@@ -83,7 +91,53 @@ class SpinningLidar:
         settings = {"Last_cal":datetime.now()}
         return settings
     def debug(self):
-        print(f"Damian needs to make debug actually do something for {self.name}")
+        """Show or update a static polar plot for this lidar."""
+        if not hasattr(self, "fig") or self.fig is None or not plt.fignum_exists(self.fig.number):
+            self._init_debug_plot()
+        self._update_debug_plot()
+
+    def _init_debug_plot(self):
+        """Create a polar plot window unique to this lidar."""
+        self.fig, self.ax = plt.subplots(subplot_kw={'projection': 'polar'})
+        self.fig.canvas.manager.set_window_title(self.name)
+        self.scatter = self.ax.scatter([], [], s=15, c=[], cmap=cm.viridis, alpha=0.8)
+        self.ax.set_title(f"{self.name} Live LIDAR")
+        self.ax.set_rmax(4000)
+        self.ax.grid(True)
+
+        # non-blocking show so multiple windows can appear
+        plt.show(block=False)
+        plt.pause(0.001)
+
+    def _update_debug_plot(self):
+        """Refresh the existing plot with the newest scan data."""
+        if not self.scan_buffer:
+            return
+
+        # copy current data safely
+        data = list(self.scan_buffer)
+
+        # filter out invalid measurements (None, NaN, or negative)
+        valid_data = [d for d in data if d.get('d_mm') not in (None, 0) and np.isfinite(d.get('d_mm', 0))]
+        if not valid_data:
+            return  # nothing to plot yet
+
+        angles = np.deg2rad([d['a_deg'] for d in valid_data])
+        distances = np.array([d['d_mm'] for d in valid_data])
+        quality = np.array([d['q'] for d in valid_data])
+
+        # update scatter data (polar expects angle, radius)
+        self.scatter.set_offsets(np.column_stack((angles, distances)))
+        self.scatter.set_array(quality)
+
+        # update radial limit safely
+        rmax = max(1000, np.nanmax(distances) * 1.1)
+        self.ax.set_rmax(rmax)
+
+        # redraw
+        self.fig.canvas.draw_idle()
+        plt.pause(0.001)  # keeps GUI alive
+
     # -------------------------------------------------------------------------
     # Data acquisition
     # -------------------------------------------------------------------------
@@ -169,3 +223,19 @@ class SpinningLidar:
 
     def __repr__(self):
         return f"<{self.name} port={self.port}, connected={self.connected}>"
+
+if __name__ == "__main__":
+    kwargs = {"port": "COM6",
+            "baudrate" : 460800,
+            "BUFFER_SIZE" : 600,
+            "position": np.quaternion(1, 0, 0, 0),#w,x,y,z
+            "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
+            "who_to_run": "src.hal.SpinningLidar.SpinningLidar"}
+    Lidar = SpinningLidar(name= "Test Lidar",**kwargs)
+    Lidar.start()
+    try:
+        time.sleep(5)
+        Lidar.print_status()
+        print("Sample data:", Lidar.read())
+    finally:
+        Lidar.stop()

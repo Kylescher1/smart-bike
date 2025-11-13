@@ -45,7 +45,7 @@ config = {
          },
     "arduino_breakout":
         {
-            "port": "COM7",
+            "port": "COM13",
             "baudrate": 115200,
             "BUFFER_SIZE": 200,
             "Bias":np.array([0,0,0,0,0,0,0]), # time, ax,ay,az, gx,gy,gz
@@ -149,7 +149,10 @@ config = {
             "Q": None,  # Set by calibration
         },
 }
-config = {'arduino_breakout':config['arduino_breakout']}
+config = {
+    'ground_lidar':config['ground_lidar'],
+    'horizontal_lidar':config['horizontal_lidar'],
+          }
 
 #Check you have all reqired fields
 required_keys = {"who_to_run","port", "position", "z_direction"}

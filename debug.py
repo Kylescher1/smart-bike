@@ -2,6 +2,7 @@ import dill
 import importlib
 import sys
 from pathlib import Path
+import dashboard
 import time
 # from termcolor import colored, cprint #earn this buddy
 
@@ -36,7 +37,6 @@ def instantiate_sensors(config):
     return sensors
 
 def main():
-
     #Load condfig
     print("Loading Config...")
     try:
@@ -59,12 +59,15 @@ def main():
     print("===" * 20)
     print("Sensor Check Would go here")
     print("===" * 20)
+    dash = dashboard.SensorDashboard(list(sensors.values()))
     try:
         while True:
+            sensor_data = {}
             for name, sensor in sensors.items():
-                data = sensor.debug()
-                print(f"{name} → {data}")
-            time.sleep(1)
+                # sensor.debug()
+                sensor_data.update({name: sensor.read()})
+            # time.sleep(1)
+            dash.update()
     except KeyboardInterrupt: #Closed file
         print("\nStopping sensors...")
         for sensor in sensors.values():
