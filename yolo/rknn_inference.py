@@ -32,6 +32,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.hal.cam.Camera import Camera, CAMERA_CONFIG
 
+# Try to import Ultralytics ByteTracker, fallback to custom implementation
+try:
+    from ultralytics.trackers import ByteTracker as UltralyticsByteTracker
+    from ultralytics.trackers.track import Track as UltralyticsTrack
+    ULTRALYTICS_AVAILABLE = True
+except ImportError:
+    ULTRALYTICS_AVAILABLE = False
+
 ROOT = Path(__file__).resolve().parent
 DEFAULT_MODEL = ROOT / "models" / "yolo11n.rknn"
 
@@ -100,6 +108,29 @@ def parse_args():
         action="store_true",
         help="Disable display window for maximum speed",
     )
+    parser.add_argument(
+        "--track",
+        action="store_true",
+        help="Enable ByteTrack multi-object tracking",
+    )
+    parser.add_argument(
+        "--track-thresh",
+        type=float,
+        default=0.5,
+        help="Tracking confidence threshold. Default: 0.5",
+    )
+    parser.add_argument(
+        "--track-high-thresh",
+        type=float,
+        default=0.6,
+        help="High confidence threshold for tracking. Default: 0.6",
+    )
+    parser.add_argument(
+        "--track-match-thresh",
+        type=float,
+        default=0.8,
+        help="IoU threshold for track matching. Default: 0.8",
+    )
     return parser.parse_args()
 
 
@@ -162,6 +193,463 @@ def nms(boxes, scores, iou_threshold=0.45):
         inds = np.where(iou <= iou_threshold)[0]
         order = order[inds + 1]
     return np.array(keep)
+
+
+def iou_batch(boxes1, boxes2):
+    """Calculate IoU between two sets of boxes.
+    
+    Args:
+        boxes1: (N, 4) array of boxes in [x1, y1, x2, y2] format
+        boxes2: (M, 4) array of boxes in [x1, y1, x2, y2] format
+    
+    Returns:
+        (N, M) array of IoU values
+    """
+    # Calculate intersection
+    xx1 = np.maximum(boxes1[:, None, 0], boxes2[None, :, 0])
+    yy1 = np.maximum(boxes1[:, None, 1], boxes2[None, :, 1])
+    xx2 = np.minimum(boxes1[:, None, 2], boxes2[None, :, 2])
+    yy2 = np.minimum(boxes1[:, None, 3], boxes2[None, :, 3])
+    
+    w = np.maximum(0.0, xx2 - xx1)
+    h = np.maximum(0.0, yy2 - yy1)
+    inter = w * h
+    
+    # Calculate union
+    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+    union = area1[:, None] + area2[None, :] - inter
+    
+    # Avoid division by zero
+    union = np.maximum(union, 1e-6)
+    iou = inter / union
+    
+    return iou
+
+
+class Track:
+    """Represents a single tracked object."""
+    def __init__(self, track_id, bbox, score, class_id, class_name):
+        self.track_id = track_id
+        self.bbox = np.array(bbox, dtype=np.float32)  # [x1, y1, x2, y2]
+        self.score = score
+        self.class_id = class_id
+        self.class_name = class_name
+        self.state = 'tracked'  # 'tracked', 'lost', 'removed'
+        self.time_since_update = 0
+        self.history = []  # List of (x_center, y_center) tuples
+        
+    def update(self, bbox, score):
+        """Update track with new detection."""
+        self.bbox = np.array(bbox, dtype=np.float32)
+        self.score = score
+        self.state = 'tracked'
+        self.time_since_update = 0
+        
+        # Update history with center point
+        x_center = (bbox[0] + bbox[2]) / 2.0
+        y_center = (bbox[1] + bbox[3]) / 2.0
+        self.history.append((float(x_center), float(y_center)))
+        
+        # Keep only last 30 points
+        if len(self.history) > 30:
+            self.history.pop(0)
+    
+    def mark_lost(self):
+        """Mark track as lost."""
+        self.state = 'lost'
+        self.time_since_update += 1
+    
+    def mark_removed(self):
+        """Mark track as removed."""
+        self.state = 'removed'
+
+
+class ByteTrackerWrapper:
+    """Wrapper for ByteTracker that adapts RKNN detections to Ultralytics format."""
+    def __init__(self, track_thresh=0.5, high_thresh=0.6, match_thresh=0.8, 
+                 frame_rate=30, track_buffer=30):
+        """
+        Args:
+            track_thresh: Detection confidence threshold for tracking
+            high_thresh: High confidence threshold (for first matching stage)
+            match_thresh: IoU threshold for matching
+            frame_rate: Video frame rate
+            track_buffer: Number of frames to keep lost tracks
+        """
+        if ULTRALYTICS_AVAILABLE:
+            # Use Ultralytics ByteTracker
+            from ultralytics.utils import ops
+            self.tracker = UltralyticsByteTracker(
+                args={
+                    'track_thresh': track_thresh,
+                    'track_high_thresh': high_thresh,
+                    'track_low_thresh': track_thresh,
+                    'new_track_thresh': high_thresh,
+                    'track_buffer': track_buffer,
+                    'match_thresh': match_thresh,
+                    'proximity_thresh': 0.5,
+                    'appearance_thresh': 0.25,
+                    'with_reid': False
+                },
+                frame_rate=frame_rate
+            )
+            self.use_ultralytics = True
+        else:
+            # Fallback to custom implementation
+            self.tracker = ByteTracker(
+                track_thresh=track_thresh,
+                high_thresh=high_thresh,
+                match_thresh=match_thresh,
+                frame_rate=frame_rate,
+                track_buffer=track_buffer
+            )
+            self.use_ultralytics = False
+        
+        self.track_history = defaultdict(lambda: [])
+    
+    def update(self, detections):
+        """
+        Update tracker with new detections.
+        
+        Args:
+            detections: List of detection dicts with keys: 'bbox', 'score', 'class_id', 'class_name'
+        
+        Returns:
+            List of detections with added 'track_id' key
+        """
+        if self.use_ultralytics:
+            return self._update_ultralytics(detections)
+        else:
+            return self._update_custom(detections)
+    
+    def _update_ultralytics(self, detections):
+        """Update using Ultralytics ByteTracker."""
+        if len(detections) == 0:
+            # Create empty results
+            boxes = np.zeros((0, 6), dtype=np.float32)  # [x1, y1, x2, y2, conf, cls]
+        else:
+            # Convert detections to format expected by Ultralytics: [x1, y1, x2, y2, conf, cls]
+            boxes = []
+            for det in detections:
+                x1, y1, x2, y2 = det['bbox']
+                boxes.append([x1, y1, x2, y2, det['score'], det['class_id']])
+            boxes = np.array(boxes, dtype=np.float32)
+        
+        # Update tracker
+        tracks = self.tracker.update(boxes, img=None)
+        
+        # Convert tracks back to detection format
+        output_detections = []
+        for track in tracks:
+            if track.is_confirmed():
+                x1, y1, x2, y2 = track.tlbr  # top-left bottom-right
+                track_id = int(track.track_id)
+                
+                # Find matching detection (by bbox overlap)
+                best_match = None
+                best_iou = 0
+                for det in detections:
+                    det_box = np.array(det['bbox'], dtype=np.float32)
+                    track_box = np.array([x1, y1, x2, y2], dtype=np.float32)
+                    iou = self._calculate_iou(det_box, track_box)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_match = det
+                
+                if best_match is not None:
+                    output_detections.append({
+                        'bbox': [float(x1), float(y1), float(x2), float(y2)],
+                        'score': best_match['score'],
+                        'class_id': best_match['class_id'],
+                        'class_name': best_match['class_name'],
+                        'track_id': track_id
+                    })
+                    
+                    # Update track history
+                    x_center = (x1 + x2) / 2.0
+                    y_center = (y1 + y2) / 2.0
+                    self.track_history[track_id].append((float(x_center), float(y_center)))
+                    if len(self.track_history[track_id]) > 30:
+                        self.track_history[track_id].pop(0)
+        
+        return output_detections
+    
+    def _update_custom(self, detections):
+        """Update using custom ByteTracker."""
+        return self.tracker.update(detections)
+    
+    def _calculate_iou(self, box1, box2):
+        """Calculate IoU between two boxes."""
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        
+        inter = (x2 - x1) * (y2 - y1)
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union = area1 + area2 - inter
+        
+        return inter / union if union > 0 else 0.0
+    
+    def get_track_history(self, track_id):
+        """Get track history for a given track ID."""
+        if self.use_ultralytics:
+            return self.track_history.get(track_id, [])
+        else:
+            return self.tracker.get_track_history(track_id)
+    
+    @property
+    def tracked_tracks(self):
+        """Get tracked tracks (for compatibility)."""
+        if self.use_ultralytics:
+            return [t for t in self.tracker.tracked_tracks if t.is_confirmed()]
+        else:
+            return self.tracker.tracked_tracks
+
+
+class ByteTracker:
+    """Custom ByteTrack multi-object tracker (fallback when Ultralytics not available)."""
+    def __init__(self, track_thresh=0.5, high_thresh=0.6, match_thresh=0.8, 
+                 frame_rate=30, track_buffer=30):
+        """
+        Args:
+            track_thresh: Detection confidence threshold for tracking
+            high_thresh: High confidence threshold (for first matching stage)
+            match_thresh: IoU threshold for matching
+            frame_rate: Video frame rate
+            track_buffer: Number of frames to keep lost tracks
+        """
+        self.track_thresh = track_thresh
+        self.high_thresh = high_thresh
+        self.match_thresh = match_thresh
+        self.frame_rate = frame_rate
+        self.track_buffer = track_buffer
+        
+        self.track_id_count = 0
+        self.tracked_tracks = []  # List of Track objects
+        self.lost_tracks = []     # List of Track objects
+        self.removed_tracks = []  # List of Track objects
+        
+        self.frame_count = 0
+    
+    def update(self, detections):
+        """
+        Update tracker with new detections.
+        
+        Args:
+            detections: List of detection dicts with keys: 'bbox', 'score', 'class_id', 'class_name'
+        
+        Returns:
+            List of detections with added 'track_id' key
+        """
+        self.frame_count += 1
+        
+        # Convert detections to numpy arrays
+        if len(detections) == 0:
+            # No detections - mark all tracks as lost
+            for track in self.tracked_tracks:
+                track.mark_lost()
+            self.lost_tracks.extend(self.tracked_tracks)
+            self.tracked_tracks = []
+            return []
+        
+        # Separate detections by confidence
+        det_high = []
+        det_low = []
+        for det in detections:
+            if det['score'] >= self.high_thresh:
+                det_high.append(det)
+            elif det['score'] >= self.track_thresh:
+                det_low.append(det)
+        
+        # Get boxes for matching
+        det_high_boxes = np.array([det['bbox'] for det in det_high], dtype=np.float32)
+        det_low_boxes = np.array([det['bbox'] for det in det_low], dtype=np.float32)
+        tracked_boxes = np.array([track.bbox for track in self.tracked_tracks], dtype=np.float32)
+        lost_boxes = np.array([track.bbox for track in self.lost_tracks], dtype=np.float32)
+        
+        # Stage 1: Match high-confidence detections with tracked tracks
+        matched_pairs_high = []
+        unmatched_dets_high = []
+        unmatched_track_objects = []
+        
+        if len(det_high_boxes) > 0 and len(tracked_boxes) > 0:
+            iou_matrix = iou_batch(det_high_boxes, tracked_boxes)
+            matched_indices = self._linear_assignment(-iou_matrix)  # Negative for maximization
+            
+            matched_track_indices_set = set()
+            for det_idx, track_idx in matched_indices:
+                if iou_matrix[det_idx, track_idx] >= self.match_thresh:
+                    matched_pairs_high.append((det_idx, track_idx))
+                    matched_track_indices_set.add(track_idx)
+            
+            # Find unmatched detections and tracks
+            all_det_indices = set(range(len(det_high)))
+            matched_det_indices = set([d for d, _ in matched_pairs_high])
+            unmatched_dets_high = list(all_det_indices - matched_det_indices)
+            
+            all_track_indices = set(range(len(self.tracked_tracks)))
+            unmatched_track_indices = all_track_indices - matched_track_indices_set
+            unmatched_track_objects = [self.tracked_tracks[i] for i in unmatched_track_indices]
+        else:
+            unmatched_dets_high = list(range(len(det_high)))
+            unmatched_track_objects = list(self.tracked_tracks)
+        
+        # Update matched tracks
+        for det_idx, track_idx in matched_pairs_high:
+            det = det_high[det_idx]
+            track = self.tracked_tracks[track_idx]
+            track.update(det['bbox'], det['score'])
+        
+        # Stage 2: Match remaining high-confidence detections with lost tracks
+        matched_pairs_lost = []
+        unmatched_dets_high_remaining = []
+        reactivated_tracks = []  # Initialize here
+        
+        if len(unmatched_dets_high) > 0 and len(lost_boxes) > 0:
+            unmatched_det_boxes = det_high_boxes[unmatched_dets_high]
+            iou_matrix = iou_batch(unmatched_det_boxes, lost_boxes)
+            matched_indices = self._linear_assignment(-iou_matrix)
+            
+            for i, (det_idx_local, lost_idx) in enumerate(matched_indices):
+                det_idx_global = unmatched_dets_high[det_idx_local]
+                if iou_matrix[det_idx_local, lost_idx] >= self.match_thresh:
+                    matched_pairs_lost.append((det_idx_global, lost_idx))
+                else:
+                    unmatched_dets_high_remaining.append(det_idx_global)
+        else:
+            unmatched_dets_high_remaining = unmatched_dets_high
+        
+        # Reactivate lost tracks (process in reverse order to avoid index issues)
+        matched_pairs_lost_sorted = sorted(matched_pairs_lost, key=lambda x: x[1], reverse=True)
+        for det_idx, lost_idx in matched_pairs_lost_sorted:
+            det = det_high[det_idx]
+            track = self.lost_tracks[lost_idx]
+            track.update(det['bbox'], det['score'])
+            reactivated_tracks.append(track)
+            self.tracked_tracks.append(track)
+            self.lost_tracks.pop(lost_idx)
+        
+        # Stage 3: Match low-confidence detections with remaining unmatched tracks
+        matched_pairs_low = []
+        unmatched_dets_low = []
+        
+        if len(det_low_boxes) > 0 and len(unmatched_track_objects) > 0:
+            unmatched_track_boxes = np.array([track.bbox for track in unmatched_track_objects], dtype=np.float32)
+            iou_matrix = iou_batch(det_low_boxes, unmatched_track_boxes)
+            matched_indices = self._linear_assignment(-iou_matrix)
+            
+            matched_track_objects_set = set()
+            for det_idx, track_idx_local in matched_indices:
+                if iou_matrix[det_idx, track_idx_local] >= self.match_thresh:
+                    matched_track = unmatched_track_objects[track_idx_local]
+                    matched_pairs_low.append((det_idx, matched_track))
+                    matched_track_objects_set.add(matched_track)
+            
+            unmatched_dets_low = [i for i in range(len(det_low)) 
+                                 if i not in [d for d, _ in matched_pairs_low]]
+        else:
+            unmatched_dets_low = list(range(len(det_low)))
+        
+        # Update matched tracks with low-confidence detections
+        for det_idx, track in matched_pairs_low:
+            det = det_low[det_idx]
+            track.update(det['bbox'], det['score'])
+        
+        # Create new tracks for unmatched high-confidence detections
+        for det_idx in unmatched_dets_high_remaining:
+            det = det_high[det_idx]
+            new_track = Track(
+                track_id=self.track_id_count,
+                bbox=det['bbox'],
+                score=det['score'],
+                class_id=det['class_id'],
+                class_name=det['class_name']
+            )
+            self.track_id_count += 1
+            self.tracked_tracks.append(new_track)
+        
+        # Mark unmatched tracks as lost
+        matched_track_objects = set()
+        for _, track_idx in matched_pairs_high:
+            matched_track_objects.add(self.tracked_tracks[track_idx])
+        for _, track in matched_pairs_low:
+            matched_track_objects.add(track)
+        # Include reactivated tracks from Stage 2
+        for track in reactivated_tracks:
+            matched_track_objects.add(track)
+        
+        tracks_to_remove = []
+        for track in self.tracked_tracks:
+            if track not in matched_track_objects:
+                track.mark_lost()
+                self.lost_tracks.append(track)
+                tracks_to_remove.append(track)
+        
+        # Remove lost tracks from tracked list
+        self.tracked_tracks = [t for t in self.tracked_tracks if t not in tracks_to_remove]
+        
+        # Update lost tracks and remove old ones
+        for track in self.lost_tracks:
+            track.time_since_update += 1
+            if track.time_since_update > self.track_buffer:
+                track.mark_removed()
+                self.removed_tracks.append(track)
+        
+        self.lost_tracks = [t for t in self.lost_tracks if t.state != 'removed']
+        
+        # Prepare output detections with track IDs
+        output_detections = []
+        
+        # Add tracked detections
+        for track in self.tracked_tracks:
+            if track.state == 'tracked':
+                output_detections.append({
+                    'bbox': track.bbox.tolist(),
+                    'score': track.score,
+                    'class_id': track.class_id,
+                    'class_name': track.class_name,
+                    'track_id': track.track_id
+                })
+        
+        return output_detections
+    
+    def _linear_assignment(self, cost_matrix):
+        """
+        Simple linear assignment using greedy matching.
+        For better performance, could use Hungarian algorithm (scipy.optimize.linear_sum_assignment).
+        """
+        if cost_matrix.size == 0:
+            return []
+        
+        # Greedy matching: sort by cost and match greedily
+        matches = []
+        used_rows = set()
+        used_cols = set()
+        
+        # Flatten and sort
+        flat_indices = np.argsort(cost_matrix.flatten())
+        rows, cols = np.unravel_index(flat_indices, cost_matrix.shape)
+        
+        for row, col in zip(rows, cols):
+            if row not in used_rows and col not in used_cols:
+                matches.append((row, col))
+                used_rows.add(row)
+                used_cols.add(col)
+        
+        return matches
+    
+    def get_track_history(self, track_id):
+        """Get track history for a given track ID."""
+        for track in self.tracked_tracks + self.lost_tracks:
+            if track.track_id == track_id:
+                return track.history
+        return []
 
 
 def dfl(position):
@@ -405,21 +893,42 @@ def process_output(output, conf_threshold=0.25, iou_threshold=0.45, img_shape=(6
     return detections
 
 
-def draw_detections(img, detections):
-    """Draw bounding boxes and labels on image."""
+def draw_detections(img, detections, tracker=None):
+    """Draw bounding boxes, labels, and tracking trails on image."""
     for det in detections:
         x1, y1, x2, y2 = det['bbox']
         score = det['score']
         class_name = det['class_name']
+        track_id = det.get('track_id', None)
+        
+        # Generate color based on track_id for consistency
+        if track_id is not None:
+            # Use hash of track_id to generate consistent color
+            color_hash = hash(track_id) % 360
+            color = tuple(int(c) for c in cv2.cvtColor(np.uint8([[[color_hash, 255, 255]]]), cv2.COLOR_HSV2BGR)[0][0])
+        else:
+            color = (0, 255, 0)
         
         # Draw bounding box
-        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
         
-        # Draw label
-        label = f"{class_name} {score:.2f}"
+        # Draw label with track ID if available
+        if track_id is not None:
+            label = f"{class_name} #{track_id} {score:.2f}"
+        else:
+            label = f"{class_name} {score:.2f}"
+        
         (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        cv2.rectangle(img, (x1, y1 - text_height - baseline - 5), (x1 + text_width, y1), (0, 255, 0), -1)
+        cv2.rectangle(img, (x1, y1 - text_height - baseline - 5), (x1 + text_width, y1), color, -1)
         cv2.putText(img, label, (x1, y1 - baseline - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        
+        # Draw tracking trail if tracker is provided and track_id exists
+        if tracker is not None and track_id is not None:
+            track_history = tracker.get_track_history(track_id)
+            if len(track_history) > 1:
+                # Convert history to numpy array for drawing
+                points = np.array(track_history, dtype=np.int32).reshape((-1, 1, 2))
+                cv2.polylines(img, [points], isClosed=False, color=color, thickness=2)
     
     return img
 
@@ -532,6 +1041,21 @@ def main():
     window_name = "RKNN Inference"
     if not args.no_display:
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    
+    # Initialize ByteTracker if tracking is enabled
+    tracker = None
+    if args.track:
+        tracker = ByteTrackerWrapper(
+            track_thresh=args.track_thresh,
+            high_thresh=args.track_high_thresh,
+            match_thresh=args.track_match_thresh,
+            frame_rate=30,
+            track_buffer=30
+        )
+        if ULTRALYTICS_AVAILABLE:
+            print("[INFO] Using Ultralytics ByteTracker", file=sys.stderr)
+        else:
+            print("[INFO] Using custom ByteTracker (Ultralytics not available)", file=sys.stderr)
     
     frame_count = 0
     prev_time = time.time()
@@ -646,12 +1170,18 @@ def main():
                 
                 for i, det in enumerate(detections):
                     det['bbox'] = boxes[i].tolist()
+            
+            # Update tracker if enabled
+            if tracker is not None:
+                tracked_detections = tracker.update(detections)
+                detections = tracked_detections
+            
             postprocess_time += (time.time() - postprocess_start) * 1000
             
             # Draw detections and display (skip if no-display mode)
             display_start = time.time()
             if not args.no_display:
-                annotated = draw_detections(frame.copy(), detections)
+                annotated = draw_detections(frame.copy(), detections, tracker=tracker)
                 
                 # Calculate FPS
                 now = time.time()
@@ -659,7 +1189,8 @@ def main():
                 prev_time = now
                 
                 # Add info text with detailed timing
-                info_text = f"FPS: {fps:.1f} | Inf: {inference_time_ms:.1f}ms | Det: {len(detections)}"
+                track_info = f" | Tracks: {len(tracker.tracked_tracks)}" if tracker else ""
+                info_text = f"FPS: {fps:.1f} | Inf: {inference_time_ms:.1f}ms | Det: {len(detections)}{track_info}"
                 cv2.putText(annotated, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 
                 # Display
