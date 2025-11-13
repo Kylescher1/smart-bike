@@ -59,15 +59,16 @@ def main():
     print("===" * 20)
     print("Sensor Check Would go here")
     print("===" * 20)
-    dash = dashboard.SensorDashboard(list(sensors.values()))
+    # dash = dashboard.SensorDashboard(list(sensors.values()))
+
     try:
         while True:
             sensor_data = {}
             for name, sensor in sensors.items():
-                # sensor.debug()
+                sensor.debug()
                 sensor_data.update({name: sensor.read()})
             # time.sleep(1)
-            dash.update()
+            # dash.update()
     except KeyboardInterrupt: #Closed file
         print("\nStopping sensors...")
         for sensor in sensors.values():

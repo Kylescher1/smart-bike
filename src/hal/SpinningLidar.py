@@ -13,6 +13,9 @@ import quaternion
 import numpy as np
 import time
 import serial  # optional, for real lidar connection
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtGui, QtCore
+import numpy as np
 
 class SpinningLidar:
     def __init__(self,name = "Unidentifed Sensor [bozo messed up config file]", **kwargs):
@@ -91,10 +94,74 @@ class SpinningLidar:
         settings = {"Last_cal":datetime.now()}
         return settings
     def debug(self):
-        """Show or update a static polar plot for this lidar."""
-        if not hasattr(self, "fig") or self.fig is None or not plt.fignum_exists(self.fig.number):
-            self._init_debug_plot()
-        self._update_debug_plot()
+        self.live_plot()
+        # """Show or update a static polar plot for this lidar."""
+        # if not hasattr(self, "fig") or self.fig is None or not plt.fignum_exists(self.fig.number):
+        #     self._init_debug_plot()
+        # self._update_debug_plot()
+
+    def start_debug_plot(self):
+        """
+        Opens a PyQtGraph window and live-plots LIDAR points from self.debug_buffer.
+        Assumes each entry: {"a_deg": float, "d_mm": float, "q": int}
+        """
+
+        # ---- Qt App ----
+        self._app = QtGui.QApplication.instance() or QtGui.QApplication([])
+
+        # ---- Window ----
+        self._win = pg.GraphicsLayoutWidget(title=f"LIDAR Debug – {self.port}")
+        self._win.resize(700, 700)
+        self._win.show()
+
+        # ---- Plot ----
+        self._plot = self._win.addPlot()
+        self._plot.setAspectLocked(True)
+        self._plot.showGrid(x=True, y=True, alpha=0.3)
+        self._plot.setLabel("bottom", "X (mm)")
+        self._plot.setLabel("left", "Y (mm)")
+        self._plot.setRange(xRange=[-8000, 8000], yRange=[-8000, 8000])
+        self._plot.setBackground("black")
+
+        # ---- Scatter ----
+        self._scatter = pg.ScatterPlotItem(size=3)
+        self._plot.addItem(self._scatter)
+
+        # ---- Update loop ----
+        def update():
+            buf = list(self.debug_buffer)
+            if not buf:
+                return
+
+            angles = np.deg2rad([p["a_deg"] for p in buf])
+            dists = np.array([p["d_mm"] for p in buf])
+            qual = np.array([p["q"] for p in buf], dtype=float)
+
+            # Cartesian
+            xs = dists * np.cos(angles)
+            ys = dists * np.sin(angles)
+
+            # Normalize 0–63 -> 0–255
+            qual_norm = np.clip((qual / 63) * 255, 0, 255).astype(np.uint8)
+
+            # RGB from quality (blue → red)
+            colors = np.zeros((len(xs), 4), dtype=np.uint8)
+            colors[:, 0] = qual_norm  # R
+            colors[:, 2] = 255 - qual_norm  # B
+            colors[:, 1] = 40  # G
+            colors[:, 3] = 255  # A
+
+            # Update scatter
+            spots = [{"pos": (xs[i], ys[i]), "brush": pg.mkBrush(colors[i])}
+                     for i in range(len(xs))]
+            self._scatter.setData(spots)
+
+        # ---- Timer ----
+        self._timer = QtCore.QTimer()
+        self._timer.timeout.connect(update)
+        self._timer.start(30)  # ~33 FPS
+
+        print("PyQtGraph LIDAR debug plot started.")
 
     def _init_debug_plot(self):
         """Create a polar plot window unique to this lidar."""
@@ -196,6 +263,51 @@ class SpinningLidar:
             angles_rad = np.deg2rad(angles_deg)
             return scan_data_copy
 
+    def get_latest_frame(self):
+        """
+        Returns a 4×N numpy array:
+            frame[0] = x  (meters)
+            frame[1] = y  (meters)
+            frame[2] = z  (always 0)
+            frame[3] = q  (quality)
+
+        Skips samples where distance is None.
+        """
+
+        if not self.scan_buffer:
+            return np.zeros((4, 0))
+
+        xs = []
+        ys = []
+        zs = []
+        qs = []
+
+        for pkt in self.scan_buffer:
+            dist_mm = pkt.get("d_mm", None)
+            if dist_mm is None:
+                continue
+
+            angle_deg = pkt.get("a_deg", 0.0)
+            q_val = pkt.get("q", 0)
+
+            angle = np.deg2rad(angle_deg)
+            dist_m = dist_mm / 1000.0
+
+            # Polar → Cartesian
+            x = dist_m * np.cos(angle)
+            y = dist_m * np.sin(angle)
+            z = 0 #definition of 2d lidar
+
+            xs.append(x)
+            ys.append(y)
+            zs.append(z)
+            qs.append(q_val)
+
+        if len(xs) == 0:
+            return np.zeros((4, 0))
+
+        return np.vstack([xs, ys, zs, qs])
+
     # -------------------------------------------------------------------------
     # Helpers and simulations
     # -------------------------------------------------------------------------
@@ -209,6 +321,75 @@ class SpinningLidar:
         """Stub for parsing binary data from the real LIDAR."""
         # Implement when you know your device’s data protocol
         return np.zeros((0, 2))
+
+    def live_plot(self, interval_ms=100):
+        """
+        Launch a live polar plot window for THIS LIDAR instance.
+        Matches the behavior of your working standalone script.
+        """
+
+        # Create figure + axis
+        fig = plt.figure(figsize=(8, 8))
+        ax = plt.subplot(111, polar=True)
+
+        # ---- Aesthetics (BLACK THEME) ----
+        ax.set_facecolor("black")
+        fig.set_facecolor("black")
+        ax.title.set_color("white")
+        ax.grid(True, color="gray", linestyle="--", linewidth=0.5)
+        ax.tick_params(axis='x', colors='white')
+        ax.tick_params(axis='y', colors='white')
+        ax.spines['polar'].set_edgecolor('white')
+        ax.set_theta_zero_location('N')
+        ax.set_theta_direction('clockwise')
+        ax.set_title(f"{self.name} — LIDAR Scan (Quality Map)", pad=20)
+
+        # ---- Set default radius ----
+        ax.set_rlim(0, 8000)
+
+        # ---- Colormap ----
+        color_map = cm.get_cmap("jet")
+
+        # ---- Initial empty scatter plot ----
+        scatter_artist = ax.scatter(
+            [], [], c=[], cmap=color_map,
+            vmin=0, vmax=63, s=5
+        )
+
+        # ---- Colorbar ----
+        cbar = fig.colorbar(scatter_artist, ax=ax, orientation="vertical", pad=0.1)
+        cbar.set_label("Measurement Quality (0 = low, 63 = high)", color="white")
+        cbar.ax.yaxis.set_tick_params(color="white")
+        plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
+
+        # ---- Update function EXACTLY like your working script ----
+        def update_plot(frame):
+            scan_data = list(self.scan_buffer)
+            if not scan_data:
+                return scatter_artist,
+
+            angles = [d["a_deg"] for d in scan_data]
+            distances = [d["d_mm"] for d in scan_data]
+            quality = [d["q"] for d in scan_data]
+
+            # Convert to radians
+            angles_rad = np.deg2rad(angles)
+
+            scatter_artist.set_offsets(np.c_[angles_rad, distances])
+            scatter_artist.set_array(quality)
+
+            return scatter_artist,
+
+        # ---- Animation ----
+        ani = animation.FuncAnimation(
+            fig,
+            update_plot,
+            interval=interval_ms,
+            blit=False,
+            cache_frame_data=False
+        )
+
+        plt.show(block=False)
 
     # -------------------------------------------------------------------------
     # Utility
@@ -224,6 +405,73 @@ class SpinningLidar:
     def __repr__(self):
         return f"<{self.name} port={self.port}, connected={self.connected}>"
 
+
+def multi_sensor_live_plot(get_frame_funcs, update_delay=0.050):
+    """
+    get_frame_funcs: list of callables that return a frame with shape (2, N)
+                     frame[0] = angles (radians)
+                     frame[1] = distances
+    """
+
+    plt.ion()
+    fig, ax = plt.subplots(figsize=(7, 7), facecolor="black")
+    ax.set_facecolor("black")
+
+    # --- Polar-style grid on Cartesian axes ---
+    max_r = 5
+    ax.set_xlim(-max_r, max_r)
+    ax.set_ylim(-max_r, max_r)
+    ax.set_aspect("equal")
+    ax.set_title("Live Multi-Sensor Viewer", color="white")
+
+    # Concentric circles (0→max_r)
+    for r in np.linspace(2, max_r, 5):
+        circle = plt.Circle((0, 0), r, color="gray", fill=False, lw=0.6, alpha=0.5)
+        ax.add_artist(circle)
+
+    # Radial lines every 30°
+    for deg in range(0, 360, 30):
+        rad = np.deg2rad(deg)
+        ax.plot(
+            [0, max_r * np.cos(rad)],
+            [0, max_r * np.sin(rad)],
+            color="gray",
+            lw=0.4,
+            alpha=0.5,
+        )
+
+    # Make axis lines invisible
+    # ax.spines["left"].set_visible(False)
+    # ax.spines["bottom"].set_visible(False)
+    # ax.spines["right"].set_visible(False)
+    # ax.spines["top"].set_visible(False)
+    ax.tick_params(colors="white")
+
+    # Scatter handles for each sensor
+    scatters = [ax.scatter([], [], s=10) for _ in get_frame_funcs]
+
+    # --- Main loop ---
+    while True:
+        for scatter, get_frame in zip(scatters, get_frame_funcs):
+            frame = get_frame()
+
+            if frame is None or frame.size == 0:
+                continue
+
+            if frame.shape[0] != 4:
+                print("Invalid frame shape", frame.shape)
+                continue
+
+            x = frame[0]
+            y = frame[1]
+            q = frame[2]
+
+            scatter.set_offsets(np.column_stack([x, y]))
+
+        plt.pause(update_delay)
+
+
+
 if __name__ == "__main__":
     kwargs = {"port": "COM6",
             "baudrate" : 460800,
@@ -232,10 +480,23 @@ if __name__ == "__main__":
             "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
             "who_to_run": "src.hal.SpinningLidar.SpinningLidar"}
     Lidar = SpinningLidar(name= "Test Lidar",**kwargs)
+    kwargs2 = {"port": "COM13",
+              "baudrate": 460800,
+              "BUFFER_SIZE": 600,
+              "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
+              "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
+              "who_to_run": "src.hal.SpinningLidar.SpinningLidar"}
+    Lidar2 = SpinningLidar(name="Test Lidar2", **kwargs2)
     Lidar.start()
+    Lidar2.start()
     try:
-        time.sleep(5)
-        Lidar.print_status()
-        print("Sample data:", Lidar.read())
+        multi_sensor_live_plot(
+            get_frame_funcs=[Lidar.get_latest_frame, Lidar2.get_latest_frame],
+        )
+        # Lidar.live_plot()
+        # Lidar2.live_plot()
+        # print("Sample data:", Lidar.read())
+        # print("Sample data2:", Lidar2.read())
     finally:
         Lidar.stop()
+        Lidar2.stop()
