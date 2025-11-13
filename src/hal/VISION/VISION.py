@@ -221,6 +221,53 @@ class VISION:
                 }
             }
     
+    def get_latest_frame(self):
+        """
+        Returns a 4×N numpy array:
+            frame[0] = x  (meters)
+            frame[1] = y  (meters)
+            frame[2] = z  (depth in meters)
+            frame[3] = q  (quality, 1 for valid points)
+
+        Returns empty array if not connected or no valid points.
+        """
+        if not self.connected:
+            return np.zeros((4, 0))
+        
+        if self.Q is None:
+            return np.zeros((4, 0))
+        
+        # Get depth data
+        result = self.read()
+        disparity_map = result.get('disparity_map')
+        depth_map = result.get('depth_map')
+        
+        if disparity_map is None or disparity_map.size == 0:
+            return np.zeros((4, 0))
+        
+        # Convert disparity to 3D points
+        points_3d = cv2.reprojectImageTo3D(disparity_map.astype(np.float32) * 16.0, self.Q)
+        
+        # Filter out invalid points
+        valid_mask = (depth_map > 0) & np.isfinite(points_3d[:, :, 2])
+        valid_mask = valid_mask & (points_3d[:, :, 2] > 0)
+        
+        # Extract valid points
+        points = points_3d[valid_mask]
+        
+        if len(points) == 0:
+            return np.zeros((4, 0))
+        
+        # Extract x, y, z coordinates
+        xs = points[:, 0]
+        ys = points[:, 1]
+        zs = points[:, 2]  # depth
+        
+        # Quality: 1 for all valid points (can be enhanced with confidence metrics)
+        qs = np.ones(len(points), dtype=np.float32)
+        
+        return np.vstack([xs, ys, zs, qs])
+    
     def get_pointcloud(self, max_points=None, filters=None):
         """
         Generate 3D point cloud from current frame.
