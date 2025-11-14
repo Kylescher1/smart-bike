@@ -81,21 +81,67 @@ echo ""
 "${CMD_ARGS[@]}" &
 WEB_PID=$!
 
-# Wait a moment for server to start
-sleep 3
+# Wait for server to be ready and listening on the port
+echo "⏳ Waiting for server to be ready..."
+MAX_WAIT=30
+WAITED=0
+PORT_READY=0
+while [ $WAITED -lt $MAX_WAIT ]; do
+    # Check if process is still running
+    if ! kill -0 $WEB_PID 2>/dev/null; then
+        echo ""
+        echo "❌ Web server process died unexpectedly"
+        exit 1
+    fi
+    
+    # Check if port is listening (try IPv4 first, then IPv6)
+    if (timeout 1 bash -c "</dev/tcp/127.0.0.1/$PORT" 2>/dev/null) || (nc -z 127.0.0.1 $PORT 2>/dev/null); then
+        PORT_READY=1
+        # Try to make an HTTP request to verify server is responding
+        if command -v curl >/dev/null 2>&1; then
+            if curl -s -o /dev/null -w "%{http_code}" --max-time 2 "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then
+                echo ""
+                echo "✅ Web server is ready and responding on port $PORT"
+                break
+            fi
+        elif command -v wget >/dev/null 2>&1; then
+            if wget -q -O /dev/null --timeout=2 "http://127.0.0.1:$PORT/" 2>/dev/null; then
+                echo ""
+                echo "✅ Web server is ready and responding on port $PORT"
+                break
+            fi
+        else
+            # If no curl/wget, just check port is listening and wait a bit more
+            if [ $PORT_READY -eq 1 ]; then
+                sleep 2
+                echo ""
+                echo "✅ Web server is listening on port $PORT"
+                break
+            fi
+        fi
+    fi
+    
+    sleep 1
+    WAITED=$((WAITED + 1))
+    echo -n "."
+done
 
-# Check if server started successfully
-if ! kill -0 $WEB_PID 2>/dev/null; then
-    echo "❌ Failed to start web server"
+if [ $WAITED -ge $MAX_WAIT ]; then
+    echo ""
+    echo "❌ Timeout waiting for server to start on port $PORT"
+    echo "   Check server logs for errors"
+    kill $WEB_PID 2>/dev/null
     exit 1
 fi
 
-echo "✅ Web server started (PID: $WEB_PID)"
+echo ""
+echo "✅ Web server started successfully (PID: $WEB_PID)"
 echo ""
 echo "🌐 Starting ngrok tunnel..."
 echo ""
 
-# Start ngrok
+# Start ngrok (it will connect to localhost:PORT)
+# The readiness check above ensures the server is listening before ngrok starts
 "$SCRIPT_DIR/ngrok" http $PORT
 
 # Cleanup on exit

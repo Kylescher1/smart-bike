@@ -63,9 +63,19 @@ Forwarding   https://abc123.ngrok.io -> http://localhost:8080
 - Use: `./ngrok` (from the project directory)
 - Or add to PATH: `export PATH=$PATH:/home/radxa/smart-bike`
 
-**Connection refused?**
-- Make sure web server is running first
-- Check the port matches (default: 8080)
+**Connection refused (ERR_NGROK_8012)?**
+- The script now automatically waits for the server to be ready before starting ngrok
+- If you still see this error, it might be an IPv6 issue. Try:
+  1. Make sure web server is running: `curl http://127.0.0.1:8080` should work
+  2. Check the port matches (default: 8080)
+  3. If IPv6 is causing issues, configure ngrok to use IPv4 by editing `~/.config/ngrok/ngrok.yml`:
+     ```yaml
+     tunnels:
+       web:
+         proto: http
+         addr: 127.0.0.1:8080
+     ```
+     Then use: `./ngrok start web`
 
 **Want a permanent URL?**
 - Upgrade to ngrok paid plan

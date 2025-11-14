@@ -45,7 +45,12 @@ cd smart_bike
 2. Create a virtual environment
 ```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate  # On Windows: kyle1@KyleLaptop MINGW64 /c/smart-bike (vision-yolo-upgrade)
+$ source venv/bin/activate
+bash: venv/bin/activate: No such file or directory
+
+kyle1@KyleLaptop MINGW64 /c/smart-bike (vision-yolo-upgrade)
+$
 ```
 
 3. Install dependencies
