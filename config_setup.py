@@ -17,8 +17,8 @@ Example sensor
             "port":"COM13",#or /dev/whatever if in debian
             "baudrate" : 460800, 
             "BUFFER_SIZE" : 600,
-            "position": np.quaternion(1, 0, 0, 0),#w,x,y,z <- REQUIRED
-            "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z <- REQUIRED
+            "orientation": np.quaternion(1, 0, 0, 0),#w,x,y,z <- REQUIRED
+            "sensor_location":np.array([0, 0, 0]),#x,y,z <- REQUIRED
             "who_to_run": "src.hal.SpinningLidar.SpinningLidar",#  <- REQUIRED
          },
 """
@@ -30,8 +30,9 @@ config = {
             "port": "COM13",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
-            "position": np.quaternion(1, 0, 0, 0),#w,x,y,z
-            "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
+            # "orientation": np.quaternion(0.7071, 0, 0, -0.7071),#w,x,y,z
+            "orientation": np.quaternion(0, 1, 0, 0),#w,x,y,z
+            "sensor_location":np.array([0.3048, 0, 0]),#x,y,z
             "who_to_run": "src.hal.SpinningLidar.SpinningLidar",
          },
     "ground_lidar":
@@ -39,8 +40,8 @@ config = {
             "port": "COM6",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
-            "position": np.quaternion(1, 0, 0, 0),#w,x,y,z
-            "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
+            "orientation": np.quaternion(0, 1, 0, 0),#w,x,y,z
+            "sensor_location":np.array([0, 0, 0]),#x,y,z
             "who_to_run": "src.hal.SpinningLidar.SpinningLidar",
          },
     "arduino_breakout":
@@ -49,8 +50,8 @@ config = {
             "baudrate": 115200,
             "BUFFER_SIZE": 200,
             "Bias":np.array([0,0,0,0,0,0,0]), # time, ax,ay,az, gx,gy,gz
-            "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
-            "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
+            "orientation": np.quaternion(1, 0, 0, 0),  # w,x,y,z
+            "sensor_location":np.array([0, 0, 0]),#x,y,z
             "who_to_run": "src.hal.MPU6250.MPU6250",
         },
     "RangeFinder":
@@ -58,8 +59,8 @@ config = {
             "port": "COM5",
             "baudrate" : 115200,
             "BUFFER_SIZE" : 200,
-            "position": np.quaternion(1, 0, 0, 0),#w,x,y,z
-            "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
+            "orientation": np.quaternion(1, 0, 0, 0),#w,x,y,z
+            "sensor_location":np.array([0, 0, 0]),#x,y,z
             "who_to_run": "src.hal.RangeFinder.RangeFinder",
          },
     "camera":
@@ -68,7 +69,7 @@ config = {
                 {
                     "port": 2,
                     "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
-                    "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
+                    "orientation":np.array([0, 0, 0]),#x,y,z
                     "map_x": None,  # Placeholder - will be set by calibration (leftMapX)
                     "map_y": None,  # Placeholder - will be set by calibration (leftMapY)
                 },
@@ -76,7 +77,7 @@ config = {
                 {
                     "port": 1,
                     "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
-                    "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
+                    "orientation":np.array([0, 0, 0]),#x,y,z
                     "map_x": None,  # Placeholder - will be set by calibration (rightMapX)
                     "map_y": None,  # Placeholder - will be set by calibration (rightMapY)
                 },
@@ -155,19 +156,19 @@ config = {
           }
 
 #Check you have all reqired fields
-required_keys = {"who_to_run","port", "position", "z_direction"}
+required_keys = {"who_to_run","port", "sensor_location", "orientation"}
 
 for name,cfg in config.items():
     # Handle nested structure for camera
     if name == "camera" and isinstance(cfg, dict) and "left" in cfg and "right" in cfg:
         # Check camera.left
         left_cfg = cfg["left"]
-        left_missing = {"port", "position", "z_direction"} - ({"port", "position", "z_direction"} & left_cfg.keys())
+        left_missing = {"port", "sensor_location", "orientation"} - ({"port", "sensor_location", "orientation"} & left_cfg.keys())
         if left_missing:
             raise KeyError(f"{name}.left is missing required config items: {left_missing} ")
         # Check camera.right
         right_cfg = cfg["right"]
-        right_missing = {"port", "position", "z_direction"} - ({"port", "position", "z_direction"} & right_cfg.keys())
+        right_missing = {"port", "sensor_location", "orientation"} - ({"port", "sensor_location", "orientation"} & right_cfg.keys())
         if right_missing:
             raise KeyError(f"{name}.right is missing required config items: {right_missing} ")
         # Check who_to_run field at camera level
