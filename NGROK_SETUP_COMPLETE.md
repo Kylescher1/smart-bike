@@ -77,6 +77,20 @@ Forwarding   https://abc123.ngrok.io -> http://localhost:8080
      ```
      Then use: `./ngrok start web`
 
+**"brain call internal services from you gateway. recconnecting, session closed"?**
+- This error indicates ngrok cannot connect to its cloud service
+- **Common causes:**
+  1. **No internet connection** - Check: `ping api.ngrok.com`
+  2. **Firewall blocking** - ngrok needs outbound HTTPS (port 443) to `*.ngrok.com`
+  3. **Corporate network/VPN** - May block ngrok connections
+  4. **ngrok authentication issue** - Run: `./ngrok config check`
+- **Solutions:**
+  1. Verify internet: `curl https://api.ngrok.com`
+  2. Check ngrok auth: `./ngrok config check`
+  3. If on corporate network, ask IT to whitelist `*.ngrok.com`
+  4. Try using ngrok's web interface: `./ngrok http 8080 --log=stdout` for more details
+  5. As a workaround, use a different tunneling service (Cloudflare Tunnel, localtunnel, etc.)
+
 **Want a permanent URL?**
 - Upgrade to ngrok paid plan
 - Or use Cloudflare Tunnel (free, permanent)

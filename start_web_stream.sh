@@ -137,11 +137,46 @@ fi
 echo ""
 echo "✅ Web server started successfully (PID: $WEB_PID)"
 echo ""
+
+# Verify ngrok is available and configured
+echo "🔍 Checking ngrok configuration..."
+if [ ! -f "$SCRIPT_DIR/ngrok" ]; then
+    echo "❌ ngrok executable not found at $SCRIPT_DIR/ngrok"
+    echo "   Please ensure ngrok is installed in the project directory"
+    kill $WEB_PID 2>/dev/null
+    exit 1
+fi
+
+# Check if ngrok is authenticated (basic check)
+if ! "$SCRIPT_DIR/ngrok" config check >/dev/null 2>&1; then
+    echo "⚠️  Warning: ngrok configuration check failed"
+    echo "   This might cause connection issues"
+    echo "   Run: $SCRIPT_DIR/ngrok config add-authtoken <your-token>"
+    echo ""
+fi
+
+# Test basic connectivity (ping ngrok API)
+echo "🌐 Testing ngrok connectivity..."
+if command -v curl >/dev/null 2>&1; then
+    if ! curl -s --max-time 5 https://api.ngrok.com >/dev/null 2>&1; then
+        echo "⚠️  Warning: Cannot reach ngrok API (api.ngrok.com)"
+        echo "   Check your internet connection and firewall settings"
+        echo "   ngrok may still work, but connection issues are possible"
+        echo ""
+    fi
+fi
+
 echo "🌐 Starting ngrok tunnel..."
+echo ""
+echo "💡 If you see connection errors, try:"
+echo "   - Check internet connection"
+echo "   - Verify ngrok auth: $SCRIPT_DIR/ngrok config check"
+echo "   - Check firewall allows outbound HTTPS"
 echo ""
 
 # Start ngrok (it will connect to localhost:PORT)
 # The readiness check above ensures the server is listening before ngrok starts
+# ngrok runs in foreground and will display its own errors
 "$SCRIPT_DIR/ngrok" http $PORT
 
 # Cleanup on exit
