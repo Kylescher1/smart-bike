@@ -14,6 +14,7 @@ import argparse
 import sys
 import time
 import logging
+import threading
 from pathlib import Path
 from collections import defaultdict
 
@@ -61,6 +62,73 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from src.hal.cam.Camera import Camera, CAMERA_CONFIG
+
+
+class FastCamera:
+    """
+    Optimized camera wrapper with threaded async frame capture for minimal latency.
+    Continuously grabs frames in background thread so latest frame is always ready.
+    This eliminates blocking on frame capture, reducing overall latency.
+    """
+    def __init__(self, index: int, config: dict):
+        self.camera = Camera(index=index, config=config)
+        self.latest_frame = None
+        self.frame_lock = threading.Lock()
+        self.running = False
+        self.capture_thread = None
+        
+    def open(self):
+        self.camera.open()
+        self.running = True
+        self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.capture_thread.start()
+        # Wait for first frame
+        timeout = time.time() + 2.0
+        while self.latest_frame is None and time.time() < timeout:
+            time.sleep(0.01)
+        if self.latest_frame is None:
+            self.close()
+            raise RuntimeError("Failed to capture initial frame")
+    
+    def _capture_loop(self):
+        """Background thread that continuously grabs the latest frame."""
+        while self.running:
+            try:
+                # Multiple grabs to ensure we get the absolute latest frame
+                # This flushes any buffered frames and minimizes latency
+                for _ in range(2):  # Reduced from 3 to 2 for better balance
+                    self.camera.cap.grab()
+                
+                ret, frame = self.camera.cap.retrieve()
+                if ret and frame is not None:
+                    with self.frame_lock:
+                        # Copy to avoid race conditions with main thread
+                        self.latest_frame = frame.copy()
+            except Exception:
+                # If capture fails, continue trying (camera might be temporarily unavailable)
+                time.sleep(0.001)
+    
+    def read_frame(self):
+        """Get the latest captured frame (non-blocking, returns immediately)."""
+        with self.frame_lock:
+            # Return a copy to ensure thread safety
+            return self.latest_frame.copy() if self.latest_frame is not None else None
+    
+    def close(self):
+        self.running = False
+        if self.capture_thread and self.capture_thread.is_alive():
+            self.capture_thread.join(timeout=1.0)
+        self.camera.close()
+    
+    @property
+    def width(self):
+        """Expose camera width for compatibility."""
+        return self.camera.width
+    
+    @property
+    def height(self):
+        """Expose camera height for compatibility."""
+        return self.camera.height
 
 # Try to import Ultralytics ByteTracker, fallback to custom implementation
 try:
@@ -159,6 +227,18 @@ def parse_args():
         type=float,
         default=0.8,
         help="IoU threshold for track matching. Default: 0.8",
+    )
+    parser.add_argument(
+        "--fast-capture",
+        action="store_true",
+        default=True,
+        help="Use threaded async frame capture for faster frame retrieval (default: True)",
+    )
+    parser.add_argument(
+        "--no-fast-capture",
+        dest="fast_capture",
+        action="store_false",
+        help="Disable threaded async capture (use regular Camera class)",
     )
     return parser.parse_args()
 
@@ -930,17 +1010,21 @@ def main():
         source = int(source)
         
         # Optimized camera config: use lower resolution for faster capture
-        # Since we resize to 640x640 anyway, lower capture resolution reduces capture time
+        # Since we resize to 640x640 anyway, lower capture resolution reduces capture time significantly
         camera_config = CAMERA_CONFIG.copy()
         camera_config.update({
-            "width": 1280,   # Start with 720p for good balance
-            "height": 720,
+            "width": 800,    # Lower resolution for faster capture (was 1280)
+            "height": 600,   # Lower resolution for faster capture (was 720)
             "fps": 30,       # Lower FPS target for stability
-            "fourcc": "MJPG"  # MJPEG is usually faster
+            "fourcc": "MJPG"  # MJPEG is usually faster than raw formats
         })
         
         try:
-            camera = Camera(index=source, config=camera_config)
+            # Use FastCamera for threaded async capture (faster than regular Camera)
+            if args.fast_capture:
+                camera = FastCamera(index=source, config=camera_config)
+            else:
+                camera = Camera(index=source, config=camera_config)
             camera.open()
             
             # Test if we can actually read a frame

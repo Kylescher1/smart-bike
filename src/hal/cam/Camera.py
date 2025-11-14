@@ -51,9 +51,10 @@ class Camera:
     def read_frame(self):
         if not self.cap or not self.cap.isOpened():
             raise RuntimeError(f"[Camera {self.index}] Not open. Call open() first.")
-        # Optimize capture: grab frames until we get the latest one
-        # This prevents using stale buffered frames
-        self.cap.grab()  # Discard any old frame
+        # Optimize capture: multiple grabs to flush buffer and get latest frame
+        # This prevents using stale buffered frames and reduces latency
+        for _ in range(2):  # Grab twice to ensure we flush any buffered frames
+            self.cap.grab()
         ret, frame = self.cap.retrieve()
         if not ret:
             # Fallback to regular read
