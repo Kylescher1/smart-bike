@@ -80,7 +80,34 @@ config = {
                     "map_x": None,  # Placeholder - will be set by calibration (rightMapX)
                     "map_y": None,  # Placeholder - will be set by calibration (rightMapY)
                 },
-            "who_to_run": "src.hal.VISION.VISION.VISION",
+            "who_to_run": "src.hal.VISION.VISION_UPGRADE.VISION",
+
+            # YOLO Object Detection Configuration
+            "yolo":
+                {
+                    "model_path": "yolo/models/yolo11n.rknn",  # Path to RKNN model file
+                    "conf_threshold": 0.25,  # Confidence threshold for detections
+                    "imgsz": 640,  # Input image size for YOLO
+                    "track_enabled": True,  # Enable object tracking
+                    "track_thresh": 0.5,  # Tracking confidence threshold
+                    "track_high_thresh": 0.6,  # High confidence threshold for tracking
+                    "track_match_thresh": 0.8,  # IoU threshold for track matching
+                    "frame_rate": 30,  # Frame rate for tracking
+                    "track_buffer": 30,  # Number of frames to keep lost tracks
+                },
+
+            # Depth Estimation Parameters
+            "baseline": 0.23,  # Stereo baseline in meters
+            "focal_length_px": 489.14,  # Focal length in pixels
+            "ema_alpha": 0.3,  # EMA smoothing factor (0-1, higher = less smoothing)
+            "roi_expansion": 10,  # Pixels to expand ROI around bounding box
+
+            # Camera Field of View (for angle calculation)
+            "fov_horizontal": 126.0,  # Horizontal FOV in degrees
+            "fov_vertical": 101.62  # Vertical FOV in degrees
+
+            # Buffer Configuration
+            "buffer_size": 10,  # Circular buffer size for object data
 
             # Stereo block matcher core parameters
             "minDisparity": 0,
