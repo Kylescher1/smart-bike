@@ -6,10 +6,37 @@ import os
 import glob
 import dill
 import copy
+import time
+from pathlib import Path
 
 from ..cam.Camera import Camera, CAMERA_CONFIG
 from .depth_processing import DepthProcessor
 # from .calibration import run_calibration
+
+# Import RKNNLite and YOLO processing functions for YOLO class
+try:
+    from yolo.rknn_inference import (
+        RKNNLite,
+        letterbox,
+        process_output,
+        draw_detections,
+        ByteTrackerWrapper
+    )
+except ImportError:
+    # Fallback: try direct import if yolo module not available
+    try:
+        from rknnlite.api import RKNNLite
+        RKNNLite = RKNNLite
+        letterbox = None
+        process_output = None
+        draw_detections = None
+        ByteTrackerWrapper = None
+    except ImportError:
+        RKNNLite = None
+        letterbox = None
+        process_output = None
+        draw_detections = None
+        ByteTrackerWrapper = None
 
 
 class VISION:
@@ -577,3 +604,279 @@ class VISION:
             confidenceThreshold=getattr(self, 'confidenceThreshold', 0.0),
         )
 
+class YOLO: 
+    def __init__(self, name="Unnamed YOLO", **kwargs):
+        """
+        Initialize YOLO instance.
+        Supports config via kwargs unpacking (following sensor pattern).
+        
+        Required kwargs:
+            model_path: Path to RKNN model file (.rknn)
+        
+        Optional kwargs:
+            conf_threshold: Confidence threshold (default: 0.25)
+            imgsz: Input image size (default: 640)
+            track_enabled: Enable object tracking (default: True)
+            track_thresh: Tracking confidence threshold (default: 0.5)
+            track_high_thresh: High confidence threshold for tracking (default: 0.6)
+            track_match_thresh: IoU threshold for track matching (default: 0.8)
+            frame_rate: Frame rate for tracking (default: 30)
+            track_buffer: Number of frames to keep lost tracks (default: 30)
+        """
+        if RKNNLite is None or process_output is None:
+            raise ImportError("YOLO dependencies not available. Please ensure yolo module is accessible.")
+        
+        # Load user-provided configuration (following MPU6250 pattern)
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+        
+        self.name = name
+        self.debug_mode = False
+        self.connected = False
+        self.rknn = None
+        self.tracker = None
+        
+        # Default values
+        self.conf_threshold = getattr(self, 'conf_threshold', 0.25)
+        self.imgsz = getattr(self, 'imgsz', 640)
+        self.track_enabled = getattr(self, 'track_enabled', True)
+        
+        # Pre-allocated buffer for inference
+        self.img_input_buffer = None
+
+    def start(self):
+        """Initialize and load RKNN model. Reads model_path from dill config."""
+        if self.connected:
+            return
+        
+        if RKNNLite is None:
+            raise ImportError("RKNNLite not available. Please install rknnlite or ensure yolo module is accessible.")
+        
+        print(f"{self.name}: Starting YOLO...")
+        
+        # Get model path from config
+        if not hasattr(self, 'model_path'):
+            raise ValueError(f"{self.name}: model_path not provided in configuration")
+        
+        model_path = Path(self.model_path).expanduser().resolve()
+        if not model_path.exists():
+            raise FileNotFoundError(f"{self.name}: Model file not found: {model_path}")
+        
+        print(f"📦 Loading RKNN model: {model_path}")
+        
+        self.rknn = RKNNLite(verbose=False)
+        ret = self.rknn.load_rknn(str(model_path))
+        if ret != 0:
+            self.rknn = None
+            raise RuntimeError(f"{self.name}: Failed to load RKNN model: {ret}")
+        
+        ret = self.rknn.init_runtime(target=None, core_mask=0)  # 0 = auto select core
+        if ret != 0:
+            self.rknn.release()
+            self.rknn = None
+            raise RuntimeError(f"{self.name}: Failed to initialize runtime: {ret}")
+        
+        # Initialize tracker if enabled
+        if self.track_enabled and ByteTrackerWrapper is not None:
+            self.tracker = ByteTrackerWrapper(
+                track_thresh=getattr(self, 'track_thresh', 0.5),
+                high_thresh=getattr(self, 'track_high_thresh', 0.6),
+                match_thresh=getattr(self, 'track_match_thresh', 0.8),
+                frame_rate=getattr(self, 'frame_rate', 30),
+                track_buffer=getattr(self, 'track_buffer', 30)
+            )
+            print(f"✅ ByteTrack tracking enabled")
+        else:
+            self.tracker = None
+        
+        print("✅ RKNN model loaded successfully")
+        self.connected = True
+        print(f"{self.name}: YOLO started successfully")
+
+    def stop(self):
+        """Release RKNN resources and cleanup."""
+        if not self.connected:
+            return
+        
+        print(f"{self.name}: Stopping YOLO...")
+        
+        if self.rknn is not None:
+            self.rknn.release()
+            self.rknn = None
+        
+        self.tracker = None
+        self.img_input_buffer = None
+        self.connected = False
+        print(f"{self.name}: YOLO stopped successfully")
+
+    def read(self, frame):
+        """
+        Process a frame through YOLO inference and return detections.
+        
+        Args:
+            frame: Input frame (numpy array, BGR format)
+        
+        Returns:
+            dict: {
+                'detections': List of detection dicts with keys:
+                    - 'bbox': [x1, y1, x2, y2]
+                    - 'score': float
+                    - 'class_id': int
+                    - 'class_name': str
+                    - 'track_id': int (if tracking enabled)
+                'annotated_frame': Frame with detections drawn (optional, if draw_detections available)
+                'num_detections': int
+                'num_tracks': int (if tracking enabled)
+                'inference_time_ms': float
+                'metadata': dict with additional info
+            }
+        """
+        if not self.connected:
+            raise RuntimeError(f"{self.name}: Not connected. Call start() first.")
+        
+        if frame is None:
+            return {
+                'detections': [],
+                'annotated_frame': None,
+                'num_detections': 0,
+                'num_tracks': 0,
+                'inference_time_ms': 0.0,
+                'metadata': {'error': 'No frame provided'}
+            }
+        
+        try:
+            h_orig, w_orig = frame.shape[:2]
+            
+            # Preprocess frame
+            img_resized, ratio, (dw, dh) = letterbox(frame, new_shape=(self.imgsz, self.imgsz))
+            img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+            
+            # Pre-allocate buffer
+            if self.img_input_buffer is None or self.img_input_buffer.shape != (1, self.imgsz, self.imgsz, 3):
+                self.img_input_buffer = np.zeros((1, self.imgsz, self.imgsz, 3), dtype=np.uint8)
+            self.img_input_buffer[0] = img_rgb.astype(np.uint8)
+            img_input = self.img_input_buffer
+            
+            # Run inference
+            inference_start = time.time()
+            try:
+                outputs = self.rknn.inference([img_input])
+            except Exception as e:
+                if self.debug_mode:
+                    print(f"{self.name}: Inference failed: {e}")
+                return {
+                    'detections': [],
+                    'annotated_frame': frame.copy(),
+                    'num_detections': 0,
+                    'num_tracks': 0,
+                    'inference_time_ms': 0.0,
+                    'metadata': {'error': str(e)}
+                }
+            
+            inference_time_ms = (time.time() - inference_start) * 1000
+            
+            # Process output
+            detections = []
+            if outputs is not None:
+                try:
+                    detections = process_output(outputs, conf_threshold=self.conf_threshold, img_shape=(self.imgsz, self.imgsz))
+                except Exception as e:
+                    if self.debug_mode:
+                        print(f"{self.name}: Failed to process output: {e}")
+                    detections = []
+            
+            # Scale boxes back to original image size
+            if detections:
+                scale = min(self.imgsz / w_orig, self.imgsz / h_orig)
+                new_w = int(w_orig * scale)
+                new_h = int(h_orig * scale)
+                pad_x = (self.imgsz - new_w) / 2
+                pad_y = (self.imgsz - new_h) / 2
+                
+                boxes = np.array([det['bbox'] for det in detections], dtype=np.float32)
+                boxes[:, [0, 2]] = (boxes[:, [0, 2]] - pad_x) / scale
+                boxes[:, [1, 3]] = (boxes[:, [1, 3]] - pad_y) / scale
+                
+                for i, det in enumerate(detections):
+                    det['bbox'] = [int(float(boxes[i, 0])), int(float(boxes[i, 1])), 
+                                  int(float(boxes[i, 2])), int(float(boxes[i, 3]))]
+            
+            # Update tracker if enabled
+            num_tracks = 0
+            if self.tracker is not None and self.track_enabled:
+                tracked_detections = self.tracker.update(detections)
+                detections = tracked_detections
+                num_tracks = len(self.tracker.tracked_tracks) if self.tracker else 0
+            
+            # Draw detections if draw_detections function is available
+            annotated_frame = None
+            if draw_detections is not None:
+                try:
+                    annotated_frame = draw_detections(frame.copy(), detections, tracker=self.tracker if self.track_enabled else None)
+                except Exception as e:
+                    if self.debug_mode:
+                        print(f"{self.name}: Failed to draw detections: {e}")
+                    annotated_frame = frame.copy()
+            else:
+                annotated_frame = frame.copy()
+            
+            return {
+                'detections': detections,
+                'annotated_frame': annotated_frame,
+                'num_detections': len(detections),
+                'num_tracks': num_tracks,
+                'inference_time_ms': inference_time_ms,
+                'metadata': {
+                    'timestamp': datetime.now().isoformat(),
+                    'frame_shape': (h_orig, w_orig),
+                    'imgsz': self.imgsz,
+                    'conf_threshold': self.conf_threshold,
+                    'track_enabled': self.track_enabled
+                }
+            }
+            
+        except Exception as e:
+            if self.debug_mode:
+                print(f"{self.name}: Error processing frame: {e}")
+                import traceback
+                traceback.print_exc()
+            return {
+                'detections': [],
+                'annotated_frame': frame.copy() if frame is not None else None,
+                'num_detections': 0,
+                'num_tracks': 0,
+                'inference_time_ms': 0.0,
+                'metadata': {'error': str(e)}
+            }
+    
+    def __getstate__(self):
+        """
+        Custom serialization for dill.
+        Excludes non-serializable RKNN instance, only saves model_path and config.
+        """
+        state = self.__dict__.copy()
+        # Remove non-serializable objects
+        state.pop('rknn', None)
+        state.pop('tracker', None)
+        state.pop('img_input_buffer', None)
+        # Convert Path objects to strings for serialization
+        if 'model_path' in state and isinstance(state['model_path'], Path):
+            state['model_path'] = str(state['model_path'])
+        return state
+    
+    def __setstate__(self, state):
+        """
+        Custom deserialization for dill.
+        Restores state and sets rknn to None (must call start() to reload model).
+        """
+        self.__dict__.update(state)
+        # RKNN instance must be reloaded via start() after deserialization
+        self.rknn = None
+        self.tracker = None
+        self.img_input_buffer = None
+        self.connected = False
+    
+    def __repr__(self):
+        model_path_str = getattr(self, 'model_path', 'Not set')
+        return f"<YOLO name={self.name}, model_path={model_path_str}, connected={self.connected}>" 
+ 
