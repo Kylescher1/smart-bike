@@ -605,6 +605,8 @@ class VISION:
         )
 
 class YOLO: 
+
+
     def __init__(self, name="Unnamed YOLO", **kwargs):
         """
         Initialize YOLO instance.
@@ -879,4 +881,6 @@ class YOLO:
     def __repr__(self):
         model_path_str = getattr(self, 'model_path', 'Not set')
         return f"<YOLO name={self.name}, model_path={model_path_str}, connected={self.connected}>" 
- 
+
+class DEPTH:
+    

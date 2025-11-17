@@ -7,7 +7,7 @@ It supports YOLO models and can process camera feeds or image files.
 Usage:
     python yolo_web_stream.py --model yolo/models/yolo11n.rknn --source 1
 
-    python yolo/rknn_inference.py --model yolo/models/yolov8n.rknn --source /path/to/image.jpg
+    python yolo/yolo.py --model yolo/models/yolov8n.rknn --source 0
 """
 
 import argparse
