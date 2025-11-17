@@ -5,18 +5,28 @@ Rock Pi 5B GPIO PWM Haptic Control Test
 This script controls a haptic output device using PWM on Rock Pi 5B GPIO pins.
 The PWM signal pulses in 1-second intervals, alternating between 0V and 5V equivalent.
 
-Note: Rock Pi 5B GPIO pins operate at 3.3V logic levels. To achieve true 0-5V output,
-you may need a level shifter or transistor circuit. However, PWM duty cycle control
-works effectively for haptic devices even at 3.3V levels.
+IMPORTANT NOTES:
+- GPIO sysfs is deprecated (use libgpiod for GPIO control), but PWM sysfs (/sys/class/pwm/)
+  is still the standard way to access PWM hardware on Linux.
+- Rock Pi 5B GPIO pins operate at 3.3V logic levels. To achieve true 0-5V output,
+  you may need a level shifter or transistor circuit. However, PWM duty cycle control
+  works effectively for haptic devices even at 3.3V levels.
 
 Installation:
     sudo apt-get install python3-periphery
+    sudo apt-get install gpiod  # For gpiofind/gpiodetect tools (optional)
 
 Finding PWM chip and channel:
     - Check Rock Pi 5B GPIO documentation for PWM-capable pins
-    - Common PWM chips: 0, 1, 7, etc.
     - Use: ls /sys/class/pwm/ to list available PWM chips
-    - Check device tree overlays for PWM configuration
+    - Use: cat /sys/kernel/debug/pwm to see PWM mappings
+    - Use: gpiodetect to list GPIO chips (for reference)
+    - Use: gpiofind PIN_X to find GPIO chip/line for a pin
+
+Rockchip GPIO Naming:
+    GPIO3_C5 = gpiochip3, line 21 (bank 3, bank_idx 21)
+    Formula: bank_idx = (group * 8) + pin
+             where group: A=0, B=1, C=2, D=3
 
 Usage:
     sudo python3 haptic_test.py
@@ -50,6 +60,12 @@ import sys
 #   1. Enable PWM overlay in device tree (see Rock Pi 5B docs)
 #   2. Run: ls /sys/class/pwm/ to see available chips
 #   3. Check: cat /sys/kernel/debug/pwm to see PWM mappings
+#   4. Use: gpiodetect to list GPIO chips (for reference)
+#   5. Use: gpiofind PIN_X to find GPIO chip/line (for GPIO, not PWM)
+#
+# NOTE: PWM uses /sys/class/pwm/ (not deprecated), while GPIO sysfs is deprecated.
+#       Use libgpiod (gpiofind, gpioset, etc.) for GPIO control, but PWM still
+#       uses the sysfs interface via python3-periphery.
 #
 PWM_CHIP = 7      # Start with pwmchip7 for Pin 3, or try pwmchip12 for Pin 12
 PWM_CHANNEL = 0   # Usually channel 0 for single PWM pins
@@ -75,6 +91,39 @@ def find_available_pwm_chips():
         return []
 
 
+def find_gpio_pin_info(pin_name=None):
+    """
+    Helper function to find GPIO chip and line using gpiofind command.
+    Useful for verifying pin mappings.
+    
+    Args:
+        pin_name: Pin name like "PIN_3" or "PIN_12" (optional)
+    
+    Returns:
+        Tuple of (gpiochip, line) or None if not found
+    """
+    import subprocess
+    if pin_name is None:
+        return None
+    
+    try:
+        result = subprocess.run(
+            ['gpiofind', pin_name],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split()
+            if len(parts) >= 2:
+                gpiochip = parts[0].replace('gpiochip', '')
+                line = parts[1]
+                return (gpiochip, line)
+    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+        pass  # gpiofind not available or pin not found
+    return None
+
+
 def main():
     """
     Main function to control haptic device via PWM.
@@ -89,6 +138,17 @@ def main():
     print("  - If needed, 5V power -> Pin 2 or Pin 4 (5V)")
     print("\nNote: GPIO pins output 3.3V, but PWM duty cycle works for haptic control")
     print("=" * 40)
+    
+    # Optional: Try to find GPIO pin info using gpiofind
+    print("\nChecking GPIO pin mappings (if gpiofind available)...")
+    pin3_info = find_gpio_pin_info("PIN_3")
+    pin12_info = find_gpio_pin_info("PIN_12")
+    if pin3_info:
+        print(f"  Pin 3: gpiochip{pin3_info[0]}, line {pin3_info[1]}")
+    if pin12_info:
+        print(f"  Pin 12: gpiochip{pin12_info[0]}, line {pin12_info[1]}")
+    if not pin3_info and not pin12_info:
+        print("  (gpiofind not available or pins not found - this is OK for PWM)")
     
     # Optional: List available PWM chips
     print("\nChecking available PWM chips...")
