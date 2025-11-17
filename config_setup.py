@@ -104,7 +104,7 @@ config = {
 
             # Camera Field of View (for angle calculation)
             "fov_horizontal": 126.0,  # Horizontal FOV in degrees
-            "fov_vertical": 101.62  # Vertical FOV in degrees
+            "fov_vertical": 101.62,  # Vertical FOV in degrees
 
             # Buffer Configuration
             "buffer_size": 10,  # Circular buffer size for object data
