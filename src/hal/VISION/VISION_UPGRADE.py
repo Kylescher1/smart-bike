@@ -122,6 +122,77 @@ except ImportError:
 
 
 # ============================================================================
+# Segmentation Processing Function
+# ============================================================================
+
+def process_seg_output(output, detections, img_shape=(640, 640)):
+    """
+    Process segmentation model output to extract masks.
+    Segmentation models output additional mask data after detection outputs.
+    
+    Args:
+        output: Raw RKNN model output (list of arrays)
+        detections: List of detection dicts from process_output
+        img_shape: Image shape (h, w)
+    
+    Returns:
+        Updated detections with 'mask' key added if masks are available
+    """
+    if not detections or len(output) < 4:
+        return detections
+    
+    h, w = img_shape
+    
+    # YOLOv8-seg typically outputs: [boxes, scores, classes, proto] or [boxes, scores, classes, coeffs, proto]
+    proto_mask = None
+    mask_coeffs = None
+    
+    if len(output) == 4:
+        # Format: [boxes, scores, classes, proto]
+        proto_mask = output[3]
+    elif len(output) >= 5:
+        # Format: [boxes, scores, classes, coeffs, proto]
+        mask_coeffs = output[3]
+        proto_mask = output[4]
+    
+    if proto_mask is None:
+        return detections
+    
+    # Get proto dimensions
+    if len(proto_mask.shape) == 4:
+        # Shape: [1, 32, proto_h, proto_w]
+        _, num_proto, proto_h, proto_w = proto_mask.shape
+        proto = proto_mask[0]  # [32, proto_h, proto_w]
+    elif len(proto_mask.shape) == 3:
+        # Shape: [32, proto_h, proto_w]
+        num_proto, proto_h, proto_w = proto_mask.shape
+        proto = proto_mask
+    else:
+        return detections  # Unknown format
+    
+    # Process masks if we have coefficients
+    if mask_coeffs is not None and len(mask_coeffs.shape) >= 2:
+        # mask_coeffs shape: [num_detections, 32] or [batch, num_detections, 32]
+        if len(mask_coeffs.shape) == 3:
+            mask_coeffs = mask_coeffs[0]  # Remove batch dimension
+        
+        for i, det in enumerate(detections):
+            if i < mask_coeffs.shape[0]:
+                coeffs = mask_coeffs[i]  # [32]
+                
+                # Combine: mask = sigmoid(coeffs @ proto)
+                # Reshape coeffs to [32, 1, 1] and proto to [32, proto_h, proto_w]
+                mask = np.sum(coeffs[:, None, None] * proto, axis=0)
+                mask = 1 / (1 + np.exp(-mask))  # sigmoid
+                
+                # Resize to image size
+                mask_resized = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
+                det['mask'] = (mask_resized > 0.5).astype(np.uint8)  # Binary mask
+    
+    return detections
+
+
+# ============================================================================
 # Camera Class
 # ============================================================================
 
@@ -259,6 +330,7 @@ class VisionYolo:
         self.tracker: Optional[ByteTrackerWrapper] = None
         self.img_input_buffer = None
         self.connected = False
+        self.is_seg_model = False  # Will be detected during model loading
     
     def start(self):
         """Load RKNN model and initialize tracker."""
@@ -278,6 +350,13 @@ class VisionYolo:
             self.rknn.release()
             self.rknn = None
             raise RuntimeError(f"Failed to initialize runtime: {ret}")
+        
+        # Detect if this is a segmentation model by checking model path
+        model_name = str(self.model_path).lower()
+        self.is_seg_model = 'seg' in model_name or 'segmentation' in model_name
+        
+        if self.is_seg_model:
+            print("✅ Segmentation model detected - masks will be processed")
         
         # Initialize tracker if enabled
         if self.track_enabled and ByteTrackerWrapper is not None:
@@ -346,6 +425,10 @@ class VisionYolo:
             if outputs is not None:
                 detections = process_output(outputs, conf_threshold=self.conf_threshold, 
                                           img_shape=(self.imgsz, self.imgsz))
+                
+                # Process segmentation masks if this is a seg model
+                if self.is_seg_model and len(outputs) >= 4:
+                    detections = process_seg_output(outputs, detections, img_shape=(self.imgsz, self.imgsz))
             
             # Scale boxes back to original image size
             if detections:
@@ -362,6 +445,14 @@ class VisionYolo:
                 for i, det in enumerate(detections):
                     det['bbox'] = [int(float(boxes[i, 0])), int(float(boxes[i, 1])), 
                                   int(float(boxes[i, 2])), int(float(boxes[i, 3]))]
+                    
+                    # Scale masks if present
+                    if 'mask' in det and det['mask'] is not None:
+                        mask = det['mask']
+                        # Scale mask coordinates back to original image
+                        mask_scaled = cv2.resize(mask.astype(np.float32), (w_orig, h_orig), 
+                                                interpolation=cv2.INTER_LINEAR)
+                        det['mask'] = (mask_scaled > 0.5).astype(np.uint8)
             
             # Update tracker if enabled (with error handling to prevent segfaults)
             if self.tracker is not None and self.track_enabled:
@@ -821,9 +912,13 @@ class VISION:
         self.camera.start()
         
         # Initialize YOLO (optional - not needed for calibration)
-        if self.yolo_config and 'model_path' in self.yolo_config:
+        model_path = self.yolo_config.get('model_path') if self.yolo_config else None
+        if model_path is None:
+            model_path = 'yolo/models/yolov8s-seg.rknn'  # Hardcoded default segmentation model
+        
+        if model_path:
             self.yolo = VisionYolo(
-                model_path=self.yolo_config['model_path'],
+                model_path=model_path,
                 conf_threshold=self.yolo_config.get('conf_threshold', 0.25),
                 imgsz=self.yolo_config.get('imgsz', 640),
                 track_enabled=self.yolo_config.get('track_enabled', True),
