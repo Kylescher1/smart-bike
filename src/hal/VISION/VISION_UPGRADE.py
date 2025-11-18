@@ -24,6 +24,8 @@ from typing import Optional, Dict, List, Tuple
 from collections import deque
 from pathlib import Path
 import dill
+import sys
+import gc
 
 from ..cam.Camera import Camera, CAMERA_CONFIG
 
@@ -612,6 +614,14 @@ class VISION:
         self.last_print_time = 0.0
         self.print_interval = 2.0  # Print every 2 seconds (reduced frequency)
         self.console_logging = True  # Can be disabled to save memory
+        
+        # Memory debugging state
+        self.memory_debug = True
+        self.last_memory_check = 0.0
+        self.memory_check_interval = 5.0  # Check memory every 5 seconds
+        self.initial_memory = None
+        self.last_data_collector_memory_check = 0.0
+        self.data_collector_memory_interval = 10.0  # Check memory in data collector every 10 seconds
     
     @property
     def left_camera(self) -> Optional[Camera]:
@@ -721,9 +731,17 @@ class VISION:
                     time.sleep(0.01)
                     continue
                 
-                # Store for debug
-                self.last_left_frame = left_rect.copy()
-                self.last_right_frame = right_rect.copy()
+                # Store for debug (limit frame size to prevent memory issues)
+                # Only store references, not full copies if frames are very large
+                if left_rect.shape[0] * left_rect.shape[1] <= 1920 * 1200:
+                    self.last_left_frame = left_rect.copy()
+                    self.last_right_frame = right_rect.copy()
+                else:
+                    # Resize before storing
+                    scale = min(1920 / left_rect.shape[1], 1200 / left_rect.shape[0])
+                    new_w, new_h = int(left_rect.shape[1] * scale), int(left_rect.shape[0] * scale)
+                    self.last_left_frame = cv2.resize(left_rect, (new_w, new_h))
+                    self.last_right_frame = cv2.resize(right_rect, (new_w, new_h))
                 
                 # Run YOLO detection on left frame
                 detections = self.yolo.detect(left_rect)
@@ -796,6 +814,13 @@ class VISION:
                     self.current_fps = self.fps_counter / elapsed
                     self.fps_counter = 0
                     self.fps_start_time = time.time()
+                
+                # Periodic memory check in data collector
+                current_time = time.time()
+                if self.memory_debug and (current_time - self.last_data_collector_memory_check) >= self.data_collector_memory_interval:
+                    self.last_data_collector_memory_check = current_time
+                    self._print_memory_stats("Data collector")
+                    gc.collect()
                 
             except Exception as e:
                 if self.debug_mode:
@@ -978,14 +1003,84 @@ class VISION:
             self.stereo_config[param_name] = value
         self.sgbm_needs_reinit = True
     
+    def _get_memory_usage(self) -> Dict:
+        """Get current memory usage statistics."""
+        try:
+            import psutil
+            import os
+            process = psutil.Process(os.getpid())
+            mem_info = process.memory_info()
+            return {
+                'rss_mb': mem_info.rss / 1024 / 1024,  # Resident Set Size in MB
+                'vms_mb': mem_info.vms / 1024 / 1024,  # Virtual Memory Size in MB
+                'percent': process.memory_percent(),
+            }
+        except ImportError:
+            # Fallback: estimate from numpy arrays and objects
+            total_size = 0
+            
+            # Estimate frame sizes
+            if self.last_left_frame is not None:
+                total_size += self.last_left_frame.nbytes / 1024 / 1024
+            if self.last_right_frame is not None:
+                total_size += self.last_right_frame.nbytes / 1024 / 1024
+            
+            # Estimate buffer size
+            with self.buffer_lock:
+                buffer_size_mb = sum(
+                    sys.getsizeof(entry) + sum(sys.getsizeof(obj) for obj in entry.get('objects', []))
+                    for entry in self.data_buffer
+                ) / 1024 / 1024
+            
+            return {
+                'estimated_mb': total_size + buffer_size_mb,
+                'frames_mb': total_size,
+                'buffer_mb': buffer_size_mb,
+            }
+    
+    def _print_memory_stats(self, context: str = ""):
+        """Print memory statistics."""
+        if not self.memory_debug:
+            return
+        
+        mem_info = self._get_memory_usage()
+        if 'rss_mb' in mem_info:
+            print(f"{self.name}: MEM[{context}] RSS: {mem_info['rss_mb']:.1f}MB, "
+                  f"VMS: {mem_info['vms_mb']:.1f}MB, Percent: {mem_info['percent']:.1f}%")
+        else:
+            print(f"{self.name}: MEM[{context}] Est: {mem_info.get('estimated_mb', 0):.1f}MB, "
+                  f"Frames: {mem_info.get('frames_mb', 0):.1f}MB, "
+                  f"Buffer: {mem_info.get('buffer_mb', 0):.1f}MB")
+        
+        # Print numpy array sizes
+        frame_sizes = []
+        if self.last_left_frame is not None:
+            frame_sizes.append(f"left: {self.last_left_frame.shape} {self.last_left_frame.nbytes/1024/1024:.1f}MB")
+        if self.last_right_frame is not None:
+            frame_sizes.append(f"right: {self.last_right_frame.shape} {self.last_right_frame.nbytes/1024/1024:.1f}MB")
+        if frame_sizes:
+            print(f"{self.name}: MEM[{context}] Frames: {', '.join(frame_sizes)}")
+        
+        # Print buffer info
+        with self.buffer_lock:
+            buffer_len = len(self.data_buffer)
+            total_objects = sum(len(entry.get('objects', [])) for entry in self.data_buffer)
+            print(f"{self.name}: MEM[{context}] Buffer: {buffer_len} entries, {total_objects} objects")
+    
     def _reinit_sgbm(self):
         """Reinitialize SGBM matcher with current parameters."""
         if self.depth is None:
             return
         
         try:
+            if self.memory_debug:
+                self._print_memory_stats("Before SGBM reinit")
+            
             # Stop old SGBM
             self.depth.stop()
+            
+            # Force garbage collection
+            gc.collect()
             
             # Update stereo_config with current values
             stereo_keys = ['minDisparity', 'numDisparitiesK', 'blockSize', 'P1', 'P2',
@@ -1006,8 +1101,13 @@ class VISION:
             self.depth.start()
             self.sgbm_needs_reinit = False
             
+            if self.memory_debug:
+                self._print_memory_stats("After SGBM reinit")
+            
         except Exception as e:
             print(f"{self.name}: Error reinitializing SGBM: {e}")
+            import traceback
+            traceback.print_exc()
     
     def debug_visual(self):
         """
@@ -1020,6 +1120,11 @@ class VISION:
         
         print(f"{self.name}: Starting visual debug mode with parameter tuning...")
         print(f"{self.name}: Press 'q' to exit, 's' to save parameters")
+        
+        # Initialize memory tracking
+        if self.memory_debug:
+            self.initial_memory = self._get_memory_usage()
+            self._print_memory_stats("Debug start")
         
         # Load config for saving
         self._load_config_for_saving()
@@ -1150,8 +1255,19 @@ class VISION:
                 if self.yolo and left_frame is not None:
                     try:
                         detections = self.yolo.detect(left_frame)
-                    except:
+                    except Exception as e:
+                        if self.debug_mode:
+                            print(f"{self.name}: YOLO detection error in debug_visual: {e}")
                         detections = []
+                
+                # Memory check (periodic)
+                if self.memory_debug:
+                    current_time = time.time()
+                    if current_time - self.last_memory_check >= self.memory_check_interval:
+                        self.last_memory_check = current_time
+                        self._print_memory_stats("Periodic check")
+                        # Force garbage collection periodically
+                        gc.collect()
                 
                 # Print to console (rate limited, simplified output)
                 if self.console_logging:
@@ -1177,6 +1293,15 @@ class VISION:
                 
                 # Start with left frame (use view if possible, but need copy for drawing)
                 h, w = left_frame.shape[:2]
+                # Limit frame copy size to prevent memory issues
+                if h * w > 1920 * 1200:  # If frame is very large, resize it
+                    scale = min(1920 / w, 1200 / h)
+                    new_w, new_h = int(w * scale), int(h * scale)
+                    left_frame = cv2.resize(left_frame, (new_w, new_h))
+                    if right_frame is not None:
+                        right_frame = cv2.resize(right_frame, (new_w, new_h))
+                    h, w = new_h, new_w
+                
                 display_frame = left_frame.copy()  # Need copy for drawing operations
                 
                 # Initialize depth overlay (reuse buffer if size matches)
@@ -1212,7 +1337,12 @@ class VISION:
                                 
                                 # Convert ROI disparity to depth map
                                 roi_h, roi_w = roi_disparity.shape[:2]
-                                roi_depth_map = np.zeros((roi_h, roi_w), dtype=np.float32)
+                                # Reuse buffer if possible, otherwise create new one
+                                if not hasattr(self, '_roi_depth_map_buffer') or \
+                                   self._roi_depth_map_buffer.shape != (roi_h, roi_w):
+                                    self._roi_depth_map_buffer = np.zeros((roi_h, roi_w), dtype=np.float32)
+                                roi_depth_map = self._roi_depth_map_buffer
+                                roi_depth_map.fill(0)  # Clear buffer
                                 
                                 # Convert disparity to depth pixel by pixel
                                 valid_mask = roi_disparity > 0
@@ -1223,8 +1353,14 @@ class VISION:
                                 if roi_y2 > roi_y1 and roi_x2 > roi_x1:
                                     # Resize ROI depth map to match ROI size if needed
                                     if roi_depth_map.shape != (roi_y2 - roi_y1, roi_x2 - roi_x1):
-                                        roi_depth_map = cv2.resize(roi_depth_map, (roi_x2 - roi_x1, roi_y2 - roi_y1))
-                                    depth_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = roi_depth_map
+                                        # Use temporary buffer for resize
+                                        if not hasattr(self, '_roi_resize_buffer') or \
+                                           self._roi_resize_buffer.shape != (roi_y2 - roi_y1, roi_x2 - roi_x1):
+                                            self._roi_resize_buffer = np.zeros((roi_y2 - roi_y1, roi_x2 - roi_x1), dtype=np.float32)
+                                        temp_buffer = cv2.resize(roi_depth_map, (roi_x2 - roi_x1, roi_y2 - roi_y1))
+                                        depth_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = temp_buffer
+                                    else:
+                                        depth_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = roi_depth_map
                         except Exception as e:
                             if self.debug_mode:
                                 print(f"{self.name}: Error computing ROI disparity: {e}")
@@ -1234,7 +1370,13 @@ class VISION:
                         # Normalize depth map for visualization
                         valid_mask = depth_overlay > 0
                         if np.any(valid_mask):
-                            depth_normalized = np.zeros_like(depth_overlay, dtype=np.uint8)
+                            # Reuse buffers
+                            if not hasattr(self, '_depth_normalized_buffer') or \
+                               self._depth_normalized_buffer.shape != depth_overlay.shape:
+                                self._depth_normalized_buffer = np.zeros_like(depth_overlay, dtype=np.uint8)
+                            depth_normalized = self._depth_normalized_buffer
+                            depth_normalized.fill(0)
+                            
                             min_depth = depth_overlay[valid_mask].min()
                             max_depth = depth_overlay[valid_mask].max()
                             if max_depth > min_depth:
@@ -1244,7 +1386,16 @@ class VISION:
                             depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
                             
                             # Blend only in ROI regions (50/50 blend)
-                            mask_3d = np.stack([valid_mask] * 3, axis=2)
+                            # Reuse mask buffer
+                            if not hasattr(self, '_mask_3d_buffer') or \
+                               self._mask_3d_buffer.shape[:2] != valid_mask.shape:
+                                self._mask_3d_buffer = np.stack([valid_mask] * 3, axis=2)
+                            else:
+                                # Update mask buffer
+                                for i in range(3):
+                                    self._mask_3d_buffer[:, :, i] = valid_mask
+                            mask_3d = self._mask_3d_buffer
+                            
                             display_frame[mask_3d] = (display_frame[mask_3d] * 0.5 + 
                                                       depth_colored[mask_3d] * 0.5).astype(np.uint8)
                 
@@ -1447,6 +1598,22 @@ class VISION:
             cv2.destroyWindow(window_name)
             cv2.destroyWindow(trackbar_window)
             cv2.destroyWindow(radar_window)
+            
+            # Cleanup buffers
+            if hasattr(self, '_roi_depth_map_buffer'):
+                del self._roi_depth_map_buffer
+            if hasattr(self, '_roi_resize_buffer'):
+                del self._roi_resize_buffer
+            if hasattr(self, '_depth_normalized_buffer'):
+                del self._depth_normalized_buffer
+            if hasattr(self, '_mask_3d_buffer'):
+                del self._mask_3d_buffer
+            
+            gc.collect()
+            
+            if self.memory_debug:
+                self._print_memory_stats("Debug end")
+            
             print(f"{self.name}: Visual debug mode ended")
     
     def __repr__(self):
