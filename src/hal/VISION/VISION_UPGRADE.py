@@ -80,45 +80,51 @@ def validate_cv2_array(arr, min_dims=2, allow_none=False):
     return True
 
 # Import YOLO dependencies
+# Try Ultralytics YOLO first (preferred backend)
 try:
-    # Try importing from yolo.rknn_inference (if it exists)
-    from yolo.rknn_inference import (
-        RKNNLite,
+    from ultralytics import YOLO
+    ULTRALYTICS_AVAILABLE = True
+except ImportError:
+    YOLO = None
+    ULTRALYTICS_AVAILABLE = False
+
+# Import tracking wrapper (still needed for ByteTrack)
+try:
+    from yolo.yolo import ByteTrackerWrapper
+    TRACKER_AVAILABLE = True
+except ImportError:
+    try:
+        from yolo.rknn_inference import ByteTrackerWrapper
+        TRACKER_AVAILABLE = True
+    except ImportError:
+        ByteTrackerWrapper = None
+        TRACKER_AVAILABLE = False
+
+# Legacy RKNN imports (kept for backward compatibility, but not used)
+try:
+    from yolo.yolo import (
         letterbox,
         process_output,
         draw_detections,
-        ByteTrackerWrapper
     )
-    YOLO_AVAILABLE = True
+    RKNN_AVAILABLE = True
 except ImportError:
     try:
-        # Try importing from yolo.yolo (where functions are actually defined)
-        from yolo.yolo import (
+        from yolo.rknn_inference import (
+            RKNNLite,
             letterbox,
             process_output,
             draw_detections,
-            ByteTrackerWrapper
         )
-        # RKNNLite is imported in yolo.yolo but may not be exported, import directly
-        from rknnlite.api import RKNNLite
-        YOLO_AVAILABLE = True
+        RKNN_AVAILABLE = True
     except ImportError:
-        try:
-            # Fallback: try direct import if yolo module not available
-            from rknnlite.api import RKNNLite
-            RKNNLite = RKNNLite
-            letterbox = None
-            process_output = None
-            draw_detections = None
-            ByteTrackerWrapper = None
-            YOLO_AVAILABLE = False
-        except ImportError:
-            RKNNLite = None
-            letterbox = None
-            process_output = None
-            draw_detections = None
-            ByteTrackerWrapper = None
-            YOLO_AVAILABLE = False
+        RKNNLite = None
+        letterbox = None
+        process_output = None
+        draw_detections = None
+        RKNN_AVAILABLE = False
+
+YOLO_AVAILABLE = ULTRALYTICS_AVAILABLE or RKNN_AVAILABLE
 
 
 # ============================================================================
@@ -298,24 +304,25 @@ class VisionCamera:
 
 class VisionYolo:
     """
-    Loads YOLO model and runs inference on camera stream.
+    Loads YOLO model and runs inference on camera stream using Ultralytics YOLO.
     Outputs bounding boxes, segmentation masks (if available), class IDs, and confidence scores.
     """
     
     def __init__(self, model_path: str, conf_threshold: float = 0.25, 
-                 imgsz: int = 640, track_enabled: bool = True, **track_kwargs):
+                 imgsz: int = 640, track_enabled: bool = True, device: Optional[str] = None, **track_kwargs):
         """
         Initialize YOLO detector.
         
         Args:
-            model_path: Path to RKNN model file
+            model_path: Path to YOLO model file (.pt, .onnx, etc.)
             conf_threshold: Confidence threshold for detections
             imgsz: Input image size for YOLO
             track_enabled: Enable object tracking
+            device: Computation device (None for auto, 'cpu', '0' for GPU, etc.)
             **track_kwargs: Additional tracking parameters
         """
-        if not YOLO_AVAILABLE or RKNNLite is None or process_output is None:
-            raise ImportError("YOLO dependencies not available. Please ensure yolo module is accessible.")
+        if not ULTRALYTICS_AVAILABLE or YOLO is None:
+            raise ImportError("Ultralytics YOLO not available. Please install: pip install ultralytics")
         
         self.model_path = Path(model_path).expanduser().resolve()
         if not self.model_path.exists():
@@ -324,42 +331,42 @@ class VisionYolo:
         self.conf_threshold = conf_threshold
         self.imgsz = imgsz
         self.track_enabled = track_enabled
+        self.device = device
         self.track_kwargs = track_kwargs
         
-        self.rknn: Optional[RKNNLite] = None
+        self.model: Optional[YOLO] = None
         self.tracker: Optional[ByteTrackerWrapper] = None
-        self.img_input_buffer = None
         self.connected = False
         self.is_seg_model = False  # Will be detected during model loading
     
     def start(self):
-        """Load RKNN model and initialize tracker."""
+        """Load Ultralytics YOLO model and initialize tracker."""
         if self.connected:
             return
         
-        print(f"📦 Loading RKNN model: {self.model_path}")
+        print(f"📦 Loading Ultralytics YOLO model: {self.model_path}")
         
-        self.rknn = RKNNLite(verbose=False)
-        ret = self.rknn.load_rknn(str(self.model_path))
-        if ret != 0:
-            self.rknn = None
-            raise RuntimeError(f"Failed to load RKNN model: {ret}")
+        try:
+            self.model = YOLO(str(self.model_path))
+            print(f"✅ Model loaded from {self.model_path}")
+        except Exception as e:
+            self.model = None
+            raise RuntimeError(f"Failed to load YOLO model: {e}")
         
-        ret = self.rknn.init_runtime(target=None, core_mask=0)
-        if ret != 0:
-            self.rknn.release()
-            self.rknn = None
-            raise RuntimeError(f"Failed to initialize runtime: {ret}")
-        
-        # Detect if this is a segmentation model by checking model path
+        # Detect if this is a segmentation model
         model_name = str(self.model_path).lower()
         self.is_seg_model = 'seg' in model_name or 'segmentation' in model_name
+        
+        # Also check model task type
+        if hasattr(self.model, 'task'):
+            if self.model.task == 'segment':
+                self.is_seg_model = True
         
         if self.is_seg_model:
             print("✅ Segmentation model detected - masks will be processed")
         
         # Initialize tracker if enabled
-        if self.track_enabled and ByteTrackerWrapper is not None:
+        if self.track_enabled and TRACKER_AVAILABLE and ByteTrackerWrapper is not None:
             self.tracker = ByteTrackerWrapper(
                 track_thresh=self.track_kwargs.get('track_thresh', 0.5),
                 high_thresh=self.track_kwargs.get('track_high_thresh', 0.6),
@@ -371,90 +378,115 @@ class VisionYolo:
         else:
             self.tracker = None
         
-        print("✅ RKNN model loaded successfully")
+        print("✅ Ultralytics YOLO model loaded successfully")
         self.connected = True
     
     def stop(self):
-        """Release RKNN resources."""
+        """Release model resources."""
         if not self.connected:
             return
         
-        if self.rknn is not None:
-            self.rknn.release()
-            self.rknn = None
-        
+        # Ultralytics YOLO models don't need explicit cleanup
+        self.model = None
         self.tracker = None
-        self.img_input_buffer = None
         self.connected = False
     
     def detect(self, frame: np.ndarray) -> List[Dict]:
         """
-        Run YOLO inference on frame.
+        Run YOLO inference on frame using Ultralytics YOLO.
         
         Args:
             frame: Input frame (BGR format)
         
         Returns:
-            List of detection dicts with keys: bbox, score, class_id, class_name, track_id (if tracking)
+            List of detection dicts with keys: bbox, score, class_id, class_name, track_id (if tracking), mask (if seg model)
         """
-        if not self.connected or frame is None:
+        if not self.connected or frame is None or self.model is None:
             return []
         
         try:
             h_orig, w_orig = frame.shape[:2]
             
-            # Preprocess frame
-            img_resized, ratio, (dw, dh) = letterbox(frame, new_shape=(self.imgsz, self.imgsz))
-            img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-            
-            # Pre-allocate buffer
-            if self.img_input_buffer is None or self.img_input_buffer.shape != (1, self.imgsz, self.imgsz, 3):
-                self.img_input_buffer = np.zeros((1, self.imgsz, self.imgsz, 3), dtype=np.uint8)
-            self.img_input_buffer[0] = img_rgb.astype(np.uint8)
-            img_input = self.img_input_buffer
-            
-            # Run inference (with error handling to prevent segfaults)
+            # Run inference with Ultralytics YOLO
+            # Note: Ultralytics expects BGR frames and handles preprocessing internally
             try:
-                outputs = self.rknn.inference([img_input])
+                results = self.model.predict(
+                    source=[frame],
+                    imgsz=self.imgsz,
+                    conf=self.conf_threshold,
+                    device=self.device,
+                    verbose=False,
+                    stream=False  # Return list of results
+                )
+                result = results[0]  # Get first (and only) result
             except Exception as e:
-                print(f"RKNN inference error: {e}")
+                print(f"Ultralytics YOLO inference error: {e}")
                 return []
             
-            # Process output
+            # Extract detections from Ultralytics result
             detections = []
-            if outputs is not None:
-                detections = process_output(outputs, conf_threshold=self.conf_threshold, 
-                                          img_shape=(self.imgsz, self.imgsz))
-                
-                # Process segmentation masks if this is a seg model
-                if self.is_seg_model and len(outputs) >= 4:
-                    detections = process_seg_output(outputs, detections, img_shape=(self.imgsz, self.imgsz))
             
-            # Scale boxes back to original image size
-            if detections:
-                scale = min(self.imgsz / w_orig, self.imgsz / h_orig)
-                new_w = int(w_orig * scale)
-                new_h = int(h_orig * scale)
-                pad_x = (self.imgsz - new_w) / 2
-                pad_y = (self.imgsz - new_h) / 2
+            if result.boxes is not None and len(result.boxes) > 0:
+                # Get boxes, scores, and classes
+                boxes_xyxy = result.boxes.xyxy.cpu().numpy()  # [x1, y1, x2, y2]
+                confs = result.boxes.conf.cpu().numpy()
+                classes = result.boxes.cls.cpu().numpy().astype(int)
                 
-                boxes = np.array([det['bbox'] for det in detections], dtype=np.float32)
-                boxes[:, [0, 2]] = (boxes[:, [0, 2]] - pad_x) / scale
-                boxes[:, [1, 3]] = (boxes[:, [1, 3]] - pad_y) / scale
+                # Get class names
+                names = result.names if hasattr(result, 'names') else None
+                if names is None and hasattr(result, 'model') and hasattr(result.model, 'names'):
+                    names = result.model.names
                 
-                for i, det in enumerate(detections):
-                    det['bbox'] = [int(float(boxes[i, 0])), int(float(boxes[i, 1])), 
-                                  int(float(boxes[i, 2])), int(float(boxes[i, 3]))]
+                # Process each detection
+                for idx in range(len(boxes_xyxy)):
+                    bbox = boxes_xyxy[idx]
+                    conf = float(confs[idx])
+                    class_id = int(classes[idx])
                     
-                    # Scale masks if present
-                    if 'mask' in det and det['mask'] is not None:
-                        mask = det['mask']
-                        # Scale mask coordinates back to original image
-                        mask_scaled = cv2.resize(mask.astype(np.float32), (w_orig, h_orig), 
-                                                interpolation=cv2.INTER_LINEAR)
-                        det['mask'] = (mask_scaled > 0.5).astype(np.uint8)
+                    # Get class name
+                    class_name = str(class_id)
+                    if isinstance(names, dict):
+                        class_name = names.get(class_id, class_name)
+                    elif isinstance(names, (list, tuple)) and class_id < len(names):
+                        class_name = names[class_id]
+                    
+                    # Convert bbox to list format [x1, y1, x2, y2]
+                    bbox_list = [int(float(bbox[0])), int(float(bbox[1])), 
+                                 int(float(bbox[2])), int(float(bbox[3]))]
+                    
+                    det = {
+                        'bbox': bbox_list,
+                        'score': conf,
+                        'class_id': class_id,
+                        'class_name': class_name
+                    }
+                    
+                    # Extract segmentation mask if available
+                    if self.is_seg_model and result.masks is not None:
+                        try:
+                            # Get mask for this detection
+                            if idx < len(result.masks.data):
+                                mask_data = result.masks.data[idx].cpu().numpy()  # [H, W] mask
+                                
+                                # Resize mask to original image size
+                                if mask_data.shape != (h_orig, w_orig):
+                                    mask_resized = cv2.resize(
+                                        mask_data.astype(np.float32), 
+                                        (w_orig, h_orig), 
+                                        interpolation=cv2.INTER_LINEAR
+                                    )
+                                else:
+                                    mask_resized = mask_data
+                                
+                                # Convert to binary mask
+                                det['mask'] = (mask_resized > 0.5).astype(np.uint8)
+                        except Exception as e:
+                            # Mask extraction failed, continue without mask
+                            pass  # Silently skip mask if extraction fails
+                    
+                    detections.append(det)
             
-            # Update tracker if enabled (with error handling to prevent segfaults)
+            # Update tracker if enabled
             if self.tracker is not None and self.track_enabled:
                 try:
                     detections = self.tracker.update(detections)
@@ -466,6 +498,8 @@ class VisionYolo:
             
         except Exception as e:
             print(f"YOLO detection error: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
 
@@ -917,14 +951,35 @@ class VISION:
         
         # Initialize YOLO (optional - not needed for calibration)
         model_path = self.yolo_config.get('model_path') if self.yolo_config else None
-        if model_path is None:
-            model_path = 'yolo/models/yolov11n.rknn'  # Hardcoded default segmentation model
+        
+        # If model_path is None or points to .rknn file, use default .pt model (same as live_demo.py)
+        if model_path is None or (isinstance(model_path, str) and model_path.endswith('.rknn')):
+            # Default to yolo11n.pt (same as live_demo.py)
+            default_model = 'yolo/models/yolo11n.pt'
+            if Path(default_model).exists():
+                model_path = default_model
+            else:
+                # Fallback: try to find any yolo11n.pt in models directory
+                models_dir = Path('yolo/models')
+                if models_dir.exists():
+                    pt_models = list(models_dir.glob('yolo11n*.pt'))
+                    if pt_models:
+                        model_path = str(pt_models[0])
+                    else:
+                        # Last resort: use default path anyway (will error if not found)
+                        model_path = default_model
+                else:
+                    model_path = default_model
+            
+            if model_path != self.yolo_config.get('model_path'):
+                print(f"⚠️  Switching from RKNN to Ultralytics YOLO model: {model_path}")
         
         if model_path:
             self.yolo = VisionYolo(
                 model_path=model_path,
                 conf_threshold=self.yolo_config.get('conf_threshold', 0.25),
                 imgsz=self.yolo_config.get('imgsz', 640),
+                device=self.yolo_config.get('device', None),  # None = auto-detect
                 track_enabled=self.yolo_config.get('track_enabled', True),
                 track_thresh=self.yolo_config.get('track_thresh', 0.5),
                 track_high_thresh=self.yolo_config.get('track_high_thresh', 0.6),
