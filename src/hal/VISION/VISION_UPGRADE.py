@@ -332,19 +332,90 @@ class VisionCamera:
         if self.left_camera is None or self.right_camera is None:
             return None, None
         
+        # Initialize timing stats if not exists
+        if not hasattr(self, '_capture_timing_stats'):
+            self._capture_timing_stats = {
+                'left_read': [],
+                'right_read': [],
+                'left_remap': [],
+                'right_remap': [],
+                'total': []
+            }
+            self._capture_timing_count = 0
+        
+        total_start = time.time()
+        
+        # Read raw frames
+        left_read_start = time.time()
         left_raw = self.left_camera.read_frame()
+        left_read_time = (time.time() - left_read_start) * 1000  # ms
+        
+        right_read_start = time.time()
         right_raw = self.right_camera.read_frame()
+        right_read_time = (time.time() - right_read_start) * 1000  # ms
         
         if left_raw is None or right_raw is None:
             return None, None
         
         # Apply rectification only if maps are available
         if self.has_maps:
-            left_rect = cv2.remap(left_raw, self.left_map_x, self.left_map_y, cv2.INTER_LINEAR)
-            right_rect = cv2.remap(right_raw, self.right_map_x, self.right_map_y, cv2.INTER_LINEAR)
+            left_remap_start = time.time()
+            
+            # Scale maps if input resolution doesn't match map resolution
+            h_raw, w_raw = left_raw.shape[:2]
+            h_map, w_map = self.left_map_x.shape[:2]
+            
+            if (h_raw, w_raw) != (h_map, w_map):
+                # Scale maps to match input resolution
+                scale_x = w_raw / w_map
+                scale_y = h_raw / h_map
+                left_map_x_scaled = cv2.resize(self.left_map_x, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_x
+                left_map_y_scaled = cv2.resize(self.left_map_y, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_y
+                right_map_x_scaled = cv2.resize(self.right_map_x, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_x
+                right_map_y_scaled = cv2.resize(self.right_map_y, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_y
+            else:
+                # Maps already match resolution
+                left_map_x_scaled = self.left_map_x
+                left_map_y_scaled = self.left_map_y
+                right_map_x_scaled = self.right_map_x
+                right_map_y_scaled = self.right_map_y
+            
+            left_rect = cv2.remap(left_raw, left_map_x_scaled, left_map_y_scaled, cv2.INTER_LINEAR)
+            left_remap_time = (time.time() - left_remap_start) * 1000  # ms
+            
+            right_remap_start = time.time()
+            right_rect = cv2.remap(right_raw, right_map_x_scaled, right_map_y_scaled, cv2.INTER_LINEAR)
+            right_remap_time = (time.time() - right_remap_start) * 1000  # ms
+            
+            total_time = (time.time() - total_start) * 1000  # ms
+            
+            # Store timing stats
+            self._capture_timing_stats['left_read'].append(left_read_time)
+            self._capture_timing_stats['right_read'].append(right_read_time)
+            self._capture_timing_stats['left_remap'].append(left_remap_time)
+            self._capture_timing_stats['right_remap'].append(right_remap_time)
+            self._capture_timing_stats['total'].append(total_time)
+            self._capture_timing_count += 1
+            
+            # Print timing summary every 60 frames
+            if self._capture_timing_count % 60 == 0:
+                avg_left_read = np.mean(self._capture_timing_stats['left_read'][-60:])
+                avg_right_read = np.mean(self._capture_timing_stats['right_read'][-60:])
+                avg_left_remap = np.mean(self._capture_timing_stats['left_remap'][-60:])
+                avg_right_remap = np.mean(self._capture_timing_stats['right_remap'][-60:])
+                avg_total = np.mean(self._capture_timing_stats['total'][-60:])
+                
+                print(f"[CAPTURE TIMING] Frame {self._capture_timing_count}: "
+                      f"LeftRead={avg_left_read:.1f}ms | "
+                      f"RightRead={avg_right_read:.1f}ms | "
+                      f"LeftRemap={avg_left_remap:.1f}ms | "
+                      f"RightRemap={avg_right_remap:.1f}ms | "
+                      f"Total={avg_total:.1f}ms")
+            
             return left_rect, right_rect
         else:
             # Return raw frames for calibration
+            total_time = (time.time() - total_start) * 1000  # ms
             return left_raw, right_raw
 
 
@@ -812,6 +883,15 @@ class VisionDepth:
         
         # Calculate numDisparities - must be integer and divisible by 16
         num_disp_k = int(self.stereo_config.get('numDisparitiesK', 2))
+        
+        # Auto-adjust numDisparitiesK for lower resolutions
+        # At 640x480, reduce numDisparitiesK to avoid memory issues with small ROIs
+        # Default config might have numDisparitiesK=4 (64 disparities) which is too large
+        # For 640x480, use numDisparitiesK=2 (32 disparities) as maximum
+        if num_disp_k > 2:
+            print(f"⚠️ Reducing numDisparitiesK from {num_disp_k} to 2 for lower resolution (640x480)")
+            num_disp_k = 2
+        
         num_disparities = max(16, 16 * num_disp_k)
         # Ensure it's divisible by 16 (round down if needed)
         num_disparities = (num_disparities // 16) * 16
@@ -971,6 +1051,36 @@ class VisionDepth:
                     return None
                 if gray_left.shape != gray_right.shape:
                     return None
+                
+                # Validate ROI dimensions are reasonable
+                roi_h, roi_w = gray_left.shape[:2]
+                if roi_h <= 0 or roi_w <= 0:
+                    return None
+                if roi_h > 10000 or roi_w > 10000:  # Sanity check
+                    print(f"⚠️ Suspicious ROI dimensions: {roi_w}x{roi_h}")
+                    return None
+                
+                # Check numDisparities vs ROI width
+                # SGBM needs ROI width to be >= numDisparities for valid computation
+                num_disp_k = int(self.stereo_config.get('numDisparitiesK', 2))
+                num_disparities = max(16, 16 * num_disp_k)
+                num_disparities = (num_disparities // 16) * 16
+                
+                if roi_w < num_disparities:
+                    # ROI too small for configured numDisparities
+                    # Reduce numDisparities to fit ROI (must be divisible by 16)
+                    # Use at most roi_w - 16 to leave some margin
+                    max_disp = max(16, ((roi_w - 16) // 16) * 16)
+                    if max_disp < 16:
+                        # ROI is too small even for minimum disparity
+                        return None
+                    
+                    # Create temporary SGBM with reduced numDisparities
+                    # Note: This is a workaround - ideally we'd cache multiple SGBM instances
+                    # For now, we'll skip small ROIs to avoid the overhead
+                    # TODO: Cache SGBM instances for different numDisparities
+                    return None  # Skip small ROIs for now
+                
                 if gray_left.dtype != np.uint8 or gray_right.dtype != np.uint8:
                     # Ensure uint8 for SGBM
                     gray_left = gray_left.astype(np.uint8)
@@ -981,6 +1091,10 @@ class VisionDepth:
                     gray_left = np.ascontiguousarray(gray_left)
                 if not gray_right.flags['C_CONTIGUOUS']:
                     gray_right = np.ascontiguousarray(gray_right)
+                
+                # Final shape validation
+                if gray_left.shape[0] <= 0 or gray_left.shape[1] <= 0:
+                    return None
                 
                 # Call stereo.compute with validated inputs - use lock for thread safety
                 with self.opencv_lock:
@@ -993,6 +1107,8 @@ class VisionDepth:
                 disparity[disparity < 0] = 0
             except Exception as e:
                 print(f"Stereo compute error: {e}")
+                import traceback
+                traceback.print_exc()
                 return None
             
             return disparity
@@ -1395,15 +1511,10 @@ class VISION:
                 # Thread-safe frame storage with lock
                 frame_copy_start = time.time()
                 with self.frame_lock:
-                    if left_rect.shape[0] * left_rect.shape[1] <= 1920 * 1200:
-                        self.last_left_frame = left_rect.copy()
-                        self.last_right_frame = right_rect.copy()
-                    else:
-                        # Resize before storing
-                        scale = min(1920 / left_rect.shape[1], 1200 / left_rect.shape[0])
-                        new_w, new_h = int(left_rect.shape[1] * scale), int(left_rect.shape[0] * scale)
-                        self.last_left_frame = cv2.resize(left_rect, (new_w, new_h))
-                        self.last_right_frame = cv2.resize(right_rect, (new_w, new_h))
+                    # At 640x480, frames are small enough to store directly
+                    # No need to resize - just copy
+                    self.last_left_frame = left_rect.copy()
+                    self.last_right_frame = right_rect.copy()
                 frame_copy_time = (time.time() - frame_copy_start) * 1000  # ms
                 
                 # Run YOLO detection on left frame

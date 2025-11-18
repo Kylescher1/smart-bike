@@ -11,11 +11,12 @@ def get_default_backend():
         return cv2.CAP_V4L2
 
 # Centralized configuration
+# Using 640x480 for faster capture and processing (YOLO resizes to 640x640 anyway)
 CAMERA_CONFIG: Dict[str, int | str] = {
     #"backend": cv2.CAP_V4L2,
     "backend": get_default_backend(),
-    "width": 1920,
-    "height": 1200,
+    "width": 640,
+    "height": 480,
     "fps": 60,
     "fourcc": "MJPG",  # string form for clarity
 }
