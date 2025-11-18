@@ -3,15 +3,13 @@ Vision System Upgrade - Complete Refactor
 
 This module implements a new vision system architecture with:
 - YOLO object detection
-- ROI-based stereo depth estimation
-- Temporal smoothing (EMA)
+- Custom block matching for depth estimation (in debug mode)
 - Thread-safe buffering
 - Structured object detection output
 
 Architecture:
 - Camera class: Handles stereo camera capture and rectification
 - Yolo class: Runs YOLO inference on camera stream
-- Depth class: Computes depth for detected objects using SGBM stereo
 - VISION class: Main interface with start(), stop(), read(), debug()
 """
 
@@ -837,406 +835,6 @@ class VisionYolo:
 
 
 # ============================================================================
-# Depth Class
-# ============================================================================
-
-class VisionDepth:
-    """
-    Handles SGBM initialization, ROI disparity computation, depth calculation, and temporal smoothing (EMA).
-    """
-    
-    def __init__(self, stereo_config: Dict, q_matrix: Optional[np.ndarray] = None,
-                 baseline: float = 0.12, focal_length_px: float = 800.0,
-                 ema_alpha: float = 0.3, roi_expansion: int = 10):
-        """
-        Initialize depth processor.
-        
-        Args:
-            stereo_config: SGBM configuration dict with keys:
-                - minDisparity, numDisparitiesK, blockSize, P1, P2, etc.
-            q_matrix: Q matrix from stereo calibration (optional, for reprojection)
-            baseline: Stereo baseline in meters
-            focal_length_px: Focal length in pixels
-            ema_alpha: EMA smoothing factor (0-1, higher = less smoothing)
-            roi_expansion: Pixels to expand ROI around bounding box
-        """
-        self.stereo_config = stereo_config
-        self.q_matrix = q_matrix
-        self.baseline = baseline
-        self.focal_length_px = focal_length_px
-        self.ema_alpha = ema_alpha
-        self.roi_expansion = roi_expansion
-        
-        # Initialize SGBM matcher
-        self.stereo: Optional[cv2.StereoSGBM] = None
-        
-        # Temporal smoothing: track depth per object ID
-        self.depth_history: Dict[int, float] = {}  # track_id -> smoothed_depth
-    
-    def start(self):
-        """Initialize SGBM stereo matcher."""
-        if self.stereo is not None:
-            return
-        
-        block_size = int(self.stereo_config.get('blockSize', 11))
-        block_size = block_size if block_size % 2 == 1 else block_size + 1
-        
-        # Calculate numDisparities - must be integer and divisible by 16
-        num_disp_k = int(self.stereo_config.get('numDisparitiesK', 2))
-        
-        # Auto-adjust numDisparitiesK for lower resolutions
-        # At 640x480, reduce numDisparitiesK to avoid memory issues with small ROIs
-        # Default config might have numDisparitiesK=4 (64 disparities) which is too large
-        # For 640x480, use numDisparitiesK=2 (32 disparities) as maximum
-        if num_disp_k > 2:
-            print(f"⚠️ Reducing numDisparitiesK from {num_disp_k} to 2 for lower resolution (640x480)")
-            num_disp_k = 2
-        
-        num_disparities = max(16, 16 * num_disp_k)
-        # Ensure it's divisible by 16 (round down if needed)
-        num_disparities = (num_disparities // 16) * 16
-        
-        P1 = int(self.stereo_config.get('P1', 8 * 1 * block_size * block_size))
-        P2 = int(self.stereo_config.get('P2', 32 * 1 * block_size * block_size))
-        
-        sgbm_mode = int(self.stereo_config.get('sgbmMode', 2))
-        mode_map = {
-            0: cv2.STEREO_SGBM_MODE_SGBM,
-            1: cv2.STEREO_SGBM_MODE_HH,
-            2: cv2.STEREO_SGBM_MODE_SGBM_3WAY,
-        }
-        mode = mode_map.get(sgbm_mode, cv2.STEREO_SGBM_MODE_SGBM_3WAY)
-        
-        self.stereo = cv2.StereoSGBM_create(
-            minDisparity=int(self.stereo_config.get('minDisparity', 0)),
-            numDisparities=int(num_disparities),
-            blockSize=max(3, block_size),
-            P1=P1,
-            P2=P2,
-            preFilterCap=int(self.stereo_config.get('preFilterCap', 43)),
-            uniquenessRatio=int(self.stereo_config.get('uniquenessRatio', 1)),
-            speckleWindowSize=int(self.stereo_config.get('speckleWindowSize', 196)),
-            speckleRange=int(self.stereo_config.get('speckleRange', 34)),
-            disp12MaxDiff=int(self.stereo_config.get('disp12MaxDiff', 18)),
-            mode=mode,
-        )
-        
-        print("✅ SGBM stereo matcher initialized")
-    
-    def stop(self):
-        """Cleanup."""
-        self.stereo = None
-        self.depth_history.clear()
-    
-    def compute_roi_disparity(self, left_rect: np.ndarray, right_rect: np.ndarray,
-                              bbox: List[int]) -> Optional[np.ndarray]:
-        """
-        Compute disparity only in ROI around bounding box.
-        This method crops the images to the object's ROI before passing to SGBM,
-        making it much more efficient than processing the full frame.
-        
-        Args:
-            left_rect: Rectified left frame (full resolution)
-            right_rect: Rectified right frame (full resolution)
-            bbox: Bounding box [x1, y1, x2, y2] in full frame coordinates
-        
-        Returns:
-            Disparity map for ROI only, or None on error
-        """
-        if self.stereo is None:
-            return None
-        
-        # Validate inputs to prevent segfaults
-        if left_rect is None or right_rect is None:
-            return None
-        if not hasattr(left_rect, 'shape') or not hasattr(right_rect, 'shape'):
-            return None
-        if len(left_rect.shape) < 2 or len(right_rect.shape) < 2:
-            return None
-        if left_rect.shape != right_rect.shape:
-            return None
-        
-        try:
-            x1, y1, x2, y2 = bbox
-            h, w = left_rect.shape[:2]
-            
-            # Validate bbox coordinates
-            if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1:
-                return None
-            if x1 >= w or y1 >= h:
-                return None
-            
-            # Expand ROI and convert to integers for array slicing
-            x1 = int(max(0, x1 - self.roi_expansion))
-            y1 = int(max(0, y1 - self.roi_expansion))
-            x2 = int(min(w, x2 + self.roi_expansion))
-            y2 = int(min(h, y2 + self.roi_expansion))
-            
-            # Ensure valid ROI size
-            if x2 <= x1 or y2 <= y1:
-                return None
-            if (x2 - x1) < 5 or (y2 - y1) < 5:  # Minimum ROI size
-                return None
-            
-            # Extract ROI (cropped region around object) - validate bounds
-            if y2 > h or x2 > w or y1 < 0 or x1 < 0:
-                return None
-            
-            # Ensure arrays are contiguous before slicing (prevents segfaults)
-            if not left_rect.flags['C_CONTIGUOUS']:
-                left_rect = np.ascontiguousarray(left_rect)
-            if not right_rect.flags['C_CONTIGUOUS']:
-                right_rect = np.ascontiguousarray(right_rect)
-            
-            left_roi = left_rect[y1:y2, x1:x2]
-            right_roi = right_rect[y1:y2, x1:x2]
-            
-            if left_roi.size == 0 or right_roi.size == 0:
-                return None
-            if left_roi.shape != right_roi.shape:
-                return None
-            
-            # Convert to grayscale with validation (most common segfault source)
-            try:
-                # Validate arrays before OpenCV operations
-                if not validate_cv2_array(left_roi) or not validate_cv2_array(right_roi):
-                    return None
-                
-                # Ensure arrays are contiguous
-                if not left_roi.flags['C_CONTIGUOUS']:
-                    left_roi = np.ascontiguousarray(left_roi)
-                if not right_roi.flags['C_CONTIGUOUS']:
-                    right_roi = np.ascontiguousarray(right_roi)
-                
-                # Validate shape before cvtColor - use lock for thread safety
-                # Note: opencv_lock is passed from VISION class or created here
-                opencv_lock = getattr(self, 'opencv_lock', threading.Lock())
-                with opencv_lock:
-                    if len(left_roi.shape) == 3:
-                        if left_roi.shape[2] != 3:  # Must be BGR
-                            return None
-                        gray_left = cv2.cvtColor(left_roi, cv2.COLOR_BGR2GRAY)
-                    elif len(left_roi.shape) == 2:
-                        gray_left = left_roi.copy()
-                    else:
-                        return None
-                    
-                    if len(right_roi.shape) == 3:
-                        if right_roi.shape[2] != 3:  # Must be BGR
-                            return None
-                        gray_right = cv2.cvtColor(right_roi, cv2.COLOR_BGR2GRAY)
-                    elif len(right_roi.shape) == 2:
-                        gray_right = right_roi.copy()
-                    else:
-                        return None
-                
-                # Final validation
-                if gray_left is None or gray_right is None:
-                    return None
-                if gray_left.shape != gray_right.shape:
-                    return None
-                if gray_left.size == 0 or gray_right.size == 0:
-                    return None
-            except Exception as e:
-                print(f"Grayscale conversion error: {e}")
-                return None
-            
-            # Compute disparity on cropped ROI only (much faster than full frame)
-            # This is a common segfault source - validate everything
-            try:
-                # Final validation before stereo.compute
-                if gray_left is None or gray_right is None:
-                    return None
-                if not validate_cv2_array(gray_left, min_dims=2) or not validate_cv2_array(gray_right, min_dims=2):
-                    return None
-                if gray_left.shape != gray_right.shape:
-                    return None
-                
-                # Validate ROI dimensions are reasonable
-                roi_h, roi_w = gray_left.shape[:2]
-                if roi_h <= 0 or roi_w <= 0:
-                    return None
-                if roi_h > 10000 or roi_w > 10000:  # Sanity check
-                    print(f"⚠️ Suspicious ROI dimensions: {roi_w}x{roi_h}")
-                    return None
-                
-                # Check numDisparities vs ROI width
-                # SGBM needs ROI width to be >= numDisparities for valid computation
-                num_disp_k = int(self.stereo_config.get('numDisparitiesK', 2))
-                num_disparities = max(16, 16 * num_disp_k)
-                num_disparities = (num_disparities // 16) * 16
-                
-                if roi_w < num_disparities:
-                    # ROI too small for configured numDisparities
-                    # Reduce numDisparities to fit ROI (must be divisible by 16)
-                    # Use at most roi_w - 16 to leave some margin
-                    max_disp = max(16, ((roi_w - 16) // 16) * 16)
-                    if max_disp < 16:
-                        # ROI is too small even for minimum disparity
-                        return None
-                    
-                    # Create temporary SGBM with reduced numDisparities
-                    # Note: This is a workaround - ideally we'd cache multiple SGBM instances
-                    # For now, we'll skip small ROIs to avoid the overhead
-                    # TODO: Cache SGBM instances for different numDisparities
-                    return None  # Skip small ROIs for now
-                
-                if gray_left.dtype != np.uint8 or gray_right.dtype != np.uint8:
-                    # Ensure uint8 for SGBM
-                    gray_left = gray_left.astype(np.uint8)
-                    gray_right = gray_right.astype(np.uint8)
-                
-                # Ensure contiguous
-                if not gray_left.flags['C_CONTIGUOUS']:
-                    gray_left = np.ascontiguousarray(gray_left)
-                if not gray_right.flags['C_CONTIGUOUS']:
-                    gray_right = np.ascontiguousarray(gray_right)
-                
-                # Final shape validation
-                if gray_left.shape[0] <= 0 or gray_left.shape[1] <= 0:
-                    return None
-                
-                # Call stereo.compute with validated inputs - use lock for thread safety
-                with self.opencv_lock:
-                    disparity = self.stereo.compute(gray_left, gray_right)
-                if disparity is None:
-                    return None
-                if not isinstance(disparity, np.ndarray):
-                    return None
-                disparity = disparity.astype(np.float32) / 16.0
-                disparity[disparity < 0] = 0
-            except Exception as e:
-                print(f"Stereo compute error: {e}")
-                import traceback
-                traceback.print_exc()
-                return None
-            
-            return disparity
-        except Exception as e:
-            return None
-    
-    def disparity_to_depth(self, disparity: np.ndarray, method: str = 'median') -> Optional[float]:
-        """
-        Convert disparity to depth using specified method.
-        
-        Args:
-            disparity: Disparity map
-            method: 'median', 'mean', or 'q_matrix' (if Q matrix available)
-        
-        Returns:
-            Depth in meters, or None if invalid
-        """
-        if disparity is None or disparity.size == 0:
-            return None
-        
-        valid_disparity = disparity[disparity > 0]
-        if valid_disparity.size == 0:
-            return None
-        
-        # Remove outliers using z-score thresholding
-        if len(valid_disparity) > 3:
-            mean_disp = np.mean(valid_disparity)
-            std_disp = np.std(valid_disparity)
-            if std_disp > 0:
-                z_scores = np.abs((valid_disparity - mean_disp) / std_disp)
-                valid_disparity = valid_disparity[z_scores < 2.0]  # 2 sigma threshold
-        
-        if valid_disparity.size == 0:
-            return None
-        
-        # Compute median disparity
-        median_disp = np.median(valid_disparity)
-        
-        if median_disp <= 0:
-            return None
-        
-        # Convert to depth using power law (higher disparity = closer objects)
-        # Power law: depth = k / (disparity ^ power)
-        # Power of ~1.3 is a rough approximation (will be replaced with calibrated equation)
-        k = self.focal_length_px * self.baseline
-        power = 1.3  # Rough guess, will be updated with real calibration
-        depth = k / (median_disp ** power)
-        
-        return float(depth)
-    
-    def estimate_depth(self, left_rect: np.ndarray, right_rect: np.ndarray,
-                      bbox: List[int], track_id: Optional[int] = None) -> Optional[float]:
-        """
-        Estimate depth for a detected object.
-        
-        Args:
-            left_rect: Rectified left frame
-            right_rect: Rectified right frame
-            bbox: Bounding box [x1, y1, x2, y2]
-            track_id: Optional track ID for temporal smoothing
-        
-        Returns:
-            Smoothed depth in meters, or None if invalid
-        """
-        # Initialize timing stats if not exists
-        if not hasattr(self, '_depth_timing_stats'):
-            self._depth_timing_stats = {
-                'disparity': [],
-                'depth_convert': [],
-                'smoothing': [],
-                'total': []
-            }
-            self._depth_timing_count = 0
-        
-        total_start = time.time()
-        
-        # Compute ROI disparity
-        disparity_start = time.time()
-        disparity = self.compute_roi_disparity(left_rect, right_rect, bbox)
-        disparity_time = (time.time() - disparity_start) * 1000  # ms
-        
-        if disparity is None:
-            return None
-        
-        # Convert to depth
-        depth_convert_start = time.time()
-        depth = self.disparity_to_depth(disparity)
-        depth_convert_time = (time.time() - depth_convert_start) * 1000  # ms
-        
-        if depth is None:
-            return None
-        
-        # Apply temporal smoothing (EMA) if track_id provided
-        smoothing_start = time.time()
-        if track_id is not None:
-            if track_id in self.depth_history:
-                # EMA: new_depth = alpha * current + (1 - alpha) * previous
-                depth = self.ema_alpha * depth + (1 - self.ema_alpha) * self.depth_history[track_id]
-            
-            self.depth_history[track_id] = depth
-        smoothing_time = (time.time() - smoothing_start) * 1000  # ms
-        
-        total_time = (time.time() - total_start) * 1000  # ms
-        
-        # Store timing stats
-        self._depth_timing_stats['disparity'].append(disparity_time)
-        self._depth_timing_stats['depth_convert'].append(depth_convert_time)
-        self._depth_timing_stats['smoothing'].append(smoothing_time)
-        self._depth_timing_stats['total'].append(total_time)
-        self._depth_timing_count += 1
-        
-        # Print timing summary every 100 depth computations
-        if self._depth_timing_count % 100 == 0:
-            avg_disparity = np.mean(self._depth_timing_stats['disparity'][-100:])
-            avg_depth_convert = np.mean(self._depth_timing_stats['depth_convert'][-100:])
-            avg_smoothing = np.mean(self._depth_timing_stats['smoothing'][-100:])
-            avg_total = np.mean(self._depth_timing_stats['total'][-100:])
-            
-            print(f"[DEPTH TIMING] Count {self._depth_timing_count}: "
-                  f"Disparity={avg_disparity:.1f}ms | "
-                  f"DepthConvert={avg_depth_convert:.1f}ms | "
-                  f"Smoothing={avg_smoothing:.1f}ms | "
-                  f"Total={avg_total:.1f}ms")
-        
-        return depth
-
-
-# ============================================================================
 # Main VISION Class
 # ============================================================================
 
@@ -1256,12 +854,8 @@ class VISION:
                 - camera.left: Left camera config
                 - camera.right: Right camera config
                 - camera.yolo: YOLO config (model_path, conf_threshold, etc.)
-                - SGBM parameters (minDisparity, blockSize, etc.)
-                - Q: Q matrix from calibration
                 - baseline: Stereo baseline (meters)
                 - focal_length_px: Focal length (pixels)
-                - ema_alpha: EMA smoothing factor
-                - roi_expansion: ROI expansion pixels
                 - buffer_size: Circular buffer size
                 - safe_mode: If True, disables features that might cause segfaults
         """
@@ -1278,23 +872,9 @@ class VISION:
         self.right_config = kwargs.get('right', {})
         self.yolo_config = kwargs.get('yolo', {})
         
-        # Extract stereo config (all SGBM params)
-        self.stereo_config = {}
-        stereo_keys = ['minDisparity', 'numDisparitiesK', 'blockSize', 'P1', 'P2',
-                      'preFilterCap', 'uniquenessRatio', 'speckleWindowSize',
-                      'speckleRange', 'disp12MaxDiff', 'sgbmMode']
-        for key in stereo_keys:
-            if hasattr(self, key):
-                self.stereo_config[key] = getattr(self, key)
-        
-        # Depth parameters
+        # Depth parameters (for custom block matching)
         self.baseline = getattr(self, 'baseline', 0.12)  # meters
         self.focal_length_px = getattr(self, 'focal_length_px', 800.0)  # pixels
-        self.ema_alpha = getattr(self, 'ema_alpha', 0.3)
-        self.roi_expansion = getattr(self, 'roi_expansion', 10)
-        
-        # Q matrix
-        self.Q = getattr(self, 'Q', None)
         
         # Buffer configuration (reduced for memory efficiency)
         # Force smaller buffer even if config says otherwise
@@ -1304,7 +884,6 @@ class VISION:
         # Initialize components
         self.camera: Optional[VisionCamera] = None
         self.yolo: Optional[VisionYolo] = None
-        self.depth: Optional[VisionDepth] = None
         
         # Runtime state
         self.connected = False
@@ -1329,7 +908,6 @@ class VISION:
         # Parameter tuning state
         self.config_path = getattr(self, 'config_path', 'config.dill')
         self.original_config = None  # Store original config for saving
-        self.sgbm_needs_reinit = False  # Flag to reinitialize SGBM when params change
         
         # Console logging state
         self.last_print_time = 0.0
@@ -1423,21 +1001,6 @@ class VISION:
             print("⚠️ YOLO config not provided - skipping YOLO initialization (calibration mode)")
             self.yolo = None
         
-        # Initialize depth processor (optional - not needed for calibration)
-        if self.stereo_config:
-            self.depth = VisionDepth(
-                stereo_config=self.stereo_config,
-                q_matrix=self.Q,
-                baseline=self.baseline,
-                focal_length_px=self.focal_length_px,
-                ema_alpha=self.ema_alpha,
-                roi_expansion=self.roi_expansion
-            )
-            # Pass OpenCV lock to depth processor for thread safety
-            self.depth.opencv_lock = self.opencv_lock
-            self.depth.start()
-        else:
-            self.depth = None
         
         # Start background processing thread only if YOLO is available
         # (calibration doesn't need background processing)
@@ -1470,10 +1033,6 @@ class VISION:
             self.yolo.stop()
             self.yolo = None
         
-        if self.depth:
-            self.depth.stop()
-            self.depth = None
-        
         print(f"{self.name}: Vision system stopped")
     
     def _data_collector(self):
@@ -1487,7 +1046,6 @@ class VISION:
             'capture': [],
             'frame_copy': [],
             'yolo_detect': [],
-            'depth_compute': [],
             'angle_compute': [],
             'buffer_update': [],
             'total_loop': []
@@ -1527,28 +1085,16 @@ class VISION:
                     self.last_detections_cache = detections.copy() if detections else []
                     self.last_detections_time = time.time()
                 
-                # Only compute depth if there are detections (ROI-based, not full frame)
-                # Process each detection: compute depth and angles
+                # Process each detection: compute angles (depth computation removed - SGBM outdated)
                 objects = []
-                depth_total_time = 0
                 angle_total_time = 0
                 
-                if detections and self.depth is not None:
+                if detections:
                     for det in detections:
                         bbox = det['bbox']
                         # Ensure bbox coordinates are integers
                         bbox = [int(coord) for coord in bbox]
                         x1, y1, x2, y2 = bbox
-                        
-                        # Compute depth using ROI-based SGBM (only processes cropped region around object)
-                        # This crops the images to the object's ROI before passing to SGBM for efficiency
-                        track_id = det.get('track_id', None)
-                        depth_start = time.time()
-                        depth = self.depth.estimate_depth(left_rect, right_rect, bbox, track_id)
-                        depth_total_time += (time.time() - depth_start) * 1000  # ms
-                        
-                        if depth is None:
-                            continue  # Skip if depth estimation failed
                         
                         # Compute angles (theta = horizontal, alpha = vertical)
                         angle_start = time.time()
@@ -1567,11 +1113,12 @@ class VISION:
                         angle_total_time += (time.time() - angle_start) * 1000  # ms
                         
                         # Use track_id as object ID, or assign new ID
+                        track_id = det.get('track_id', None)
                         obj_id = track_id if track_id is not None else object_id_counter
                         if track_id is None:
                             object_id_counter += 1
                         
-                        # Create object dict
+                        # Create object dict (depth set to 0.0 since SGBM removed)
                         obj = {
                             'theta': float(theta),
                             'alpha': float(alpha),
@@ -1580,7 +1127,7 @@ class VISION:
                             'confidence': float(det['score']),
                             'id': int(obj_id),
                             'type': str(det['class_name']),
-                            'depth': float(depth)
+                            'depth': 0.0  # Depth computation removed (SGBM outdated)
                         }
                         objects.append(obj)
                 
@@ -1603,7 +1150,6 @@ class VISION:
                 timing_stats['capture'].append(capture_time)
                 timing_stats['frame_copy'].append(frame_copy_time)
                 timing_stats['yolo_detect'].append(yolo_time)
-                timing_stats['depth_compute'].append(depth_total_time)
                 timing_stats['angle_compute'].append(angle_total_time)
                 timing_stats['buffer_update'].append(buffer_time)
                 timing_stats['total_loop'].append(total_loop_time)
@@ -1614,7 +1160,6 @@ class VISION:
                     avg_capture = np.mean(timing_stats['capture'][-60:])
                     avg_frame_copy = np.mean(timing_stats['frame_copy'][-60:])
                     avg_yolo = np.mean(timing_stats['yolo_detect'][-60:])
-                    avg_depth = np.mean(timing_stats['depth_compute'][-60:])
                     avg_angle = np.mean(timing_stats['angle_compute'][-60:])
                     avg_buffer = np.mean(timing_stats['buffer_update'][-60:])
                     avg_total = np.mean(timing_stats['total_loop'][-60:])
@@ -1623,7 +1168,6 @@ class VISION:
                           f"Capture={avg_capture:.1f}ms | "
                           f"FrameCopy={avg_frame_copy:.1f}ms | "
                           f"YOLO={avg_yolo:.1f}ms | "
-                          f"Depth={avg_depth:.1f}ms | "
                           f"Angle={avg_angle:.1f}ms | "
                           f"Buffer={avg_buffer:.1f}ms | "
                           f"Total={avg_total:.1f}ms ({1000/avg_total:.1f} FPS)")
@@ -1765,19 +1309,9 @@ class VISION:
             if 'yolo' in camera_config:
                 camera_config['yolo']['conf_threshold'] = self.yolo_config.get('conf_threshold', 0.25)
             
-            # Update SGBM parameters
-            stereo_keys = ['minDisparity', 'numDisparitiesK', 'blockSize', 'P1', 'P2',
-                          'preFilterCap', 'uniquenessRatio', 'speckleWindowSize',
-                          'speckleRange', 'disp12MaxDiff', 'sgbmMode']
-            for key in stereo_keys:
-                if hasattr(self, key):
-                    camera_config[key] = getattr(self, key)
-            
-            # Update depth parameters
+            # Update depth parameters (for custom block matching)
             camera_config['baseline'] = self.baseline
             camera_config['focal_length_px'] = self.focal_length_px
-            camera_config['ema_alpha'] = self.ema_alpha
-            camera_config['roi_expansion'] = self.roi_expansion
             
             # Update FOV parameters if they exist
             if hasattr(self, 'fov_horizontal'):
@@ -1798,10 +1332,6 @@ class VISION:
             traceback.print_exc()
             return False
     
-    def _on_trackbar_change(self, val):
-        """Callback for trackbar changes - triggers SGBM reinitialization if needed."""
-        self.sgbm_needs_reinit = True
-    
     def _update_yolo_threshold(self, val):
         """Update YOLO confidence threshold."""
         threshold = val / 100.0  # Convert from 0-100 to 0.0-1.0
@@ -1809,30 +1339,6 @@ class VISION:
             self.yolo_config['conf_threshold'] = threshold
         if self.yolo:
             self.yolo.conf_threshold = threshold
-    
-    def _update_stereo_param(self, param_name, val, scale=1.0):
-        """Update stereo parameter."""
-        value = val * scale
-        # Ensure integer parameters are integers
-        int_params = ['minDisparity', 'numDisparitiesK', 'blockSize', 'preFilterCap', 
-                     'uniquenessRatio', 'speckleWindowSize', 'speckleRange', 
-                     'disp12MaxDiff', 'sgbmMode']
-        if param_name in int_params:
-            value = int(value)
-        
-        # Ensure blockSize is odd (SGBM requirement)
-        if param_name == 'blockSize':
-            if value % 2 == 0:
-                value += 1
-        
-        # Ensure P1 and P2 are integers
-        if param_name in ['P1', 'P2']:
-            value = int(value)
-        
-        setattr(self, param_name, value)
-        if param_name in self.stereo_config:
-            self.stereo_config[param_name] = value
-        self.sgbm_needs_reinit = True
     
     def _get_memory_usage(self) -> Dict:
         """Get current memory usage statistics."""
@@ -1900,48 +1406,6 @@ class VISION:
             total_objects = sum(len(entry.get('objects', [])) for entry in self.data_buffer)
             print(f"{self.name}: MEM[{context}] Buffer: {buffer_len} entries, {total_objects} objects")
     
-    def _reinit_sgbm(self):
-        """Reinitialize SGBM matcher with current parameters."""
-        if self.depth is None:
-            return
-        
-        try:
-            if self.memory_debug:
-                self._print_memory_stats("Before SGBM reinit")
-            
-            # Stop old SGBM
-            self.depth.stop()
-            
-            # Force garbage collection
-            gc.collect()
-            
-            # Update stereo_config with current values
-            stereo_keys = ['minDisparity', 'numDisparitiesK', 'blockSize', 'P1', 'P2',
-                          'preFilterCap', 'uniquenessRatio', 'speckleWindowSize',
-                          'speckleRange', 'disp12MaxDiff', 'sgbmMode']
-            for key in stereo_keys:
-                if hasattr(self, key):
-                    self.stereo_config[key] = getattr(self, key)
-            
-            # Update depth processor attributes
-            self.depth.stereo_config = self.stereo_config
-            self.depth.baseline = self.baseline
-            self.depth.focal_length_px = self.focal_length_px
-            self.depth.ema_alpha = self.ema_alpha
-            self.depth.roi_expansion = self.roi_expansion
-            
-            # Restart SGBM
-            self.depth.start()
-            self.sgbm_needs_reinit = False
-            
-            if self.memory_debug:
-                self._print_memory_stats("After SGBM reinit")
-            
-        except Exception as e:
-            print(f"{self.name}: Error reinitializing SGBM: {e}")
-            import traceback
-            traceback.print_exc()
-    
     def debug_visual(self):
         """
         Visual debug mode with interactive parameter tuning via trackbars.
@@ -1949,7 +1413,8 @@ class VISION:
         """
         
         def custom_block_matching(left_img: np.ndarray, right_img: np.ndarray, 
-                                  bbox: List[int], circle_radius: int = 15) -> Tuple[Optional[float], Optional[Dict]]:
+                                  bbox: List[int], circle_radius: int = 15,
+                                  vis_data: Optional[Dict] = None) -> Tuple[Optional[float], Optional[Dict]]:
             """
             Custom block matching algorithm for depth estimation.
             
@@ -1969,7 +1434,9 @@ class VISION:
             if left_img is None or right_img is None:
                 return None, None
             
-            vis_data = {}
+            # Initialize vis_data dict if provided, otherwise use None
+            if vis_data is None:
+                vis_data = {}
             
             x1, y1, x2, y2 = bbox
             
@@ -1984,9 +1451,10 @@ class VISION:
             if actual_radius < 5:
                 return None, None  # Too small
             
-            vis_data['center_x'] = center_x
-            vis_data['center_y'] = center_y
-            vis_data['radius'] = actual_radius
+            if vis_data is not None:
+                vis_data['center_x'] = center_x
+                vis_data['center_y'] = center_y
+                vis_data['radius'] = actual_radius
             
             # Validate bounds
             h, w = left_img.shape[:2]
@@ -2021,10 +1489,11 @@ class VISION:
             if left_circle.size == 0:
                 return None, None
             
-            # Store visualization data
-            vis_data['left_circle'] = left_circle.copy()
-            vis_data['circle_mask'] = circle_mask.copy()
-            vis_data['patch_coords'] = (patch_x1, patch_y1, patch_x2, patch_y2)
+            # Store visualization data (only if vis_data dict provided)
+            if vis_data is not None:
+                vis_data['left_circle'] = left_circle.copy()
+                vis_data['circle_mask'] = circle_mask.copy()
+                vis_data['patch_coords'] = (patch_x1, patch_y1, patch_x2, patch_y2)
             
             # Convert right image to grayscale if needed
             if len(right_img.shape) == 3:
@@ -2038,13 +1507,21 @@ class VISION:
             if search_range < 10:
                 return None, None
             
+            # Performance optimization: Use step size to reduce search iterations
+            # Step by 2 pixels for faster search (can be adjusted)
+            step_size = 2
+            search_offsets = range(-search_range, 0, step_size)
+            
             min_diff = float('inf')
             best_disparity = 0
             best_right_patch = None
             best_offset = 0
             
-            # Search horizontally for best match
-            for offset in range(-search_range, 0):  # Search leftward (negative disparity)
+            # Pre-compute left circle masked for faster comparison
+            left_circle_masked = left_circle[circle_mask].astype(np.float32)
+            
+            # Search horizontally for best match (optimized with step size)
+            for offset in search_offsets:
                 search_x1 = center_x + offset - actual_radius
                 search_x2 = center_x + offset + actual_radius
                 
@@ -2057,24 +1534,28 @@ class VISION:
                 if right_patch.shape != left_circle.shape:
                     continue
                 
-                # Apply same circular mask to right patch
-                right_patch_masked = right_patch.copy()
-                right_patch_masked[~circle_mask] = 0
+                # Apply same circular mask to right patch (vectorized)
+                right_patch_masked = right_patch[circle_mask].astype(np.float32)
                 
-                # Calculate intensity difference (sum of absolute differences)
-                diff = np.sum(np.abs(left_circle.astype(np.float32) - right_patch_masked.astype(np.float32)))
+                # Calculate intensity difference (vectorized SAD)
+                diff = np.sum(np.abs(left_circle_masked - right_patch_masked))
                 
                 if diff < min_diff:
                     min_diff = diff
                     best_disparity = abs(offset)  # Disparity is positive value
-                    best_right_patch = right_patch_masked.copy()
                     best_offset = offset
+                    # Only copy patch if we need visualization (lazy evaluation)
+                    if vis_data is not None:
+                        best_right_patch = right_patch.copy()
+                        best_right_patch[~circle_mask] = 0
             
             # Return disparity if we found a reasonable match
             if min_diff < float('inf') and best_disparity > 0:
-                vis_data['right_match'] = best_right_patch
-                vis_data['best_offset'] = best_offset
-                vis_data['min_diff'] = min_diff
+                if vis_data is not None:
+                    vis_data['best_offset'] = best_offset
+                    vis_data['min_diff'] = min_diff
+                    if best_right_patch is not None:
+                        vis_data['right_match'] = best_right_patch
                 return float(best_disparity), vis_data
             
             return None, None
@@ -2084,7 +1565,7 @@ class VISION:
             return
         
         print(f"{self.name}: Starting visual debug mode with parameter tuning...")
-        print(f"{self.name}: Press 'q' to exit, 's' to save parameters")
+        print(f"{self.name}: Press 'q' to exit, 's' to save parameters, 'b' to toggle block matching visualization")
         if self.safe_mode:
             print(f"{self.name}: ⚠️ SAFE MODE ENABLED - Some features disabled to prevent crashes")
         
@@ -2132,72 +1613,18 @@ class VISION:
             yolo_conf = int(self.yolo_config.get('conf_threshold', 0.25) * 100)
             cv2.createTrackbar('YOLO Conf', trackbar_window, yolo_conf, 100, self._update_yolo_threshold)
         
-        # Create trackbars for SGBM parameters
-        min_disparity = getattr(self, 'minDisparity', 0)
-        num_disp_k = getattr(self, 'numDisparitiesK', 2)
-        block_size = getattr(self, 'blockSize', 11)
-        p1_val = getattr(self, 'P1', 968)
-        p2_val = getattr(self, 'P2', 3872)
-        prefilter_cap = getattr(self, 'preFilterCap', 43)
-        uniqueness = getattr(self, 'uniquenessRatio', 1)
-        speckle_win = getattr(self, 'speckleWindowSize', 196)
-        speckle_range = getattr(self, 'speckleRange', 34)
-        disp12_max_diff = getattr(self, 'disp12MaxDiff', 18)
-        sgbm_mode = getattr(self, 'sgbmMode', 2)
-        
-        cv2.createTrackbar('MinDisparity', trackbar_window, min_disparity, 50, 
-                          lambda v: self._update_stereo_param('minDisparity', v))
-        cv2.createTrackbar('NumDispK', trackbar_window, num_disp_k, 10, 
-                          lambda v: self._update_stereo_param('numDisparitiesK', v))
-        cv2.createTrackbar('BlockSize', trackbar_window, block_size, 25, 
-                          lambda v: self._update_stereo_param('blockSize', v))
-        cv2.createTrackbar('P1 (x100)', trackbar_window, p1_val // 100, 200, 
-                          lambda v: self._update_stereo_param('P1', v, 100.0))
-        cv2.createTrackbar('P2 (x100)', trackbar_window, p2_val // 100, 500, 
-                          lambda v: self._update_stereo_param('P2', v, 100.0))
-        cv2.createTrackbar('PreFilterCap', trackbar_window, prefilter_cap, 100, 
-                          lambda v: self._update_stereo_param('preFilterCap', v))
-        cv2.createTrackbar('Uniqueness', trackbar_window, uniqueness, 20, 
-                          lambda v: self._update_stereo_param('uniquenessRatio', v))
-        cv2.createTrackbar('SpeckleWin', trackbar_window, speckle_win, 300, 
-                          lambda v: self._update_stereo_param('speckleWindowSize', v))
-        cv2.createTrackbar('SpeckleRange', trackbar_window, speckle_range, 100, 
-                          lambda v: self._update_stereo_param('speckleRange', v))
-        cv2.createTrackbar('Disp12MaxDiff', trackbar_window, disp12_max_diff, 50, 
-                          lambda v: self._update_stereo_param('disp12MaxDiff', v))
-        cv2.createTrackbar('SGBMMode', trackbar_window, sgbm_mode, 2, 
-                          lambda v: self._update_stereo_param('sgbmMode', v))
-        
-        # Create trackbars for depth parameters
+        # Create trackbars for depth parameters (for custom block matching)
         baseline_val = int(self.baseline * 1000)  # Convert to mm for trackbar
         focal_val = int(self.focal_length_px)
-        ema_val = int(self.ema_alpha * 100)
-        roi_exp_val = self.roi_expansion
         
         def update_baseline(v):
             self.baseline = v / 1000.0
-            if self.depth:
-                self.depth.baseline = v / 1000.0
         
         def update_focal(v):
             self.focal_length_px = float(v)
-            if self.depth:
-                self.depth.focal_length_px = float(v)
-        
-        def update_ema(v):
-            self.ema_alpha = v / 100.0
-            if self.depth:
-                self.depth.ema_alpha = v / 100.0
-        
-        def update_roi(v):
-            self.roi_expansion = v
-            if self.depth:
-                self.depth.roi_expansion = v
         
         cv2.createTrackbar('Baseline (mm)', trackbar_window, baseline_val, 500, update_baseline)
         cv2.createTrackbar('Focal (px)', trackbar_window, focal_val, 2000, update_focal)
-        cv2.createTrackbar('EMA Alpha (x100)', trackbar_window, ema_val, 100, update_ema)
-        cv2.createTrackbar('ROI Expand', trackbar_window, roi_exp_val, 50, update_roi)
         
         # Create trackbars for FOV parameters
         fov_h_val = int(getattr(self, 'fov_horizontal', 60.0))
@@ -2218,6 +1645,17 @@ class VISION:
         trackbar_img = np.zeros((200, 300, 3), dtype=np.uint8)  # Increased height for save button
         depth_overlay_buffer = None  # Will be allocated when needed
         
+        # Performance optimization: Cache grayscale right image
+        right_gray_cache = None
+        right_gray_cache_frame_id = None
+        
+        # Performance optimization: Reduce radar redraw frequency
+        radar_update_counter = 0
+        radar_update_interval = 2  # Update radar every N frames
+        
+        # Performance optimization: Skip block matching visualization unless needed
+        show_blockmatch = False  # Can be toggled with 'b' key
+        
         # Save button coordinates (for visual feedback)
         button_x, button_y = 10, 120
         button_w, button_h = 150, 40
@@ -2225,6 +1663,7 @@ class VISION:
         try:
             while True:
                 # Get latest frames and data (thread-safe copy)
+                # Optimize: Minimize lock time by copying only what's needed
                 with self.frame_lock:
                     if self.last_left_frame is not None:
                         left_frame = self.last_left_frame.copy()  # Copy immediately to avoid race condition
@@ -2319,13 +1758,11 @@ class VISION:
                 if depth_overlay_buffer is None or depth_overlay_buffer.shape != (new_h, new_w):
                     depth_overlay_buffer = np.zeros((new_h, new_w), dtype=np.float32)
                 
-                # Only compute ROI-based disparity for detected objects (not full frame)
-                # This matches production behavior - SGBM only processes cropped regions
+                # Only compute ROI-based disparity for detected objects using custom block matching
                 # Limit to max 3 detections to prevent memory issues
                 # In safe mode, skip depth computation entirely to isolate segfault source
                 max_detections_for_depth = 3
-                if (not self.safe_mode and detections and right_frame is not None and 
-                    self.depth is not None and self.depth.stereo is not None):
+                if (not self.safe_mode and detections and right_frame is not None):
                     # Reuse depth overlay buffer (clear it first only if we have new detections)
                     # This prevents flickering when detections temporarily disappear
                     depth_overlay_buffer.fill(0)
@@ -2335,19 +1772,23 @@ class VISION:
                     orig_h, orig_w = left_frame.shape[:2] if hasattr(left_frame, 'shape') else (h, w)
                     if display_scale != 1.0:
                         # Need to use original frames for depth, not resized
-                        # Thread-safe access with lock
-                        with self.frame_lock:
-                            if self.last_left_frame is not None and self.last_right_frame is not None:
-                                orig_left = self.last_left_frame.copy()  # Copy to avoid race condition
-                                orig_right = self.last_right_frame.copy()
-                            else:
-                                orig_left = None
-                                orig_right = None
-                        if orig_left is None or orig_right is None:
-                            continue  # Skip if frames not available
+                        # Optimize: Reuse frames we already copied above
+                        orig_left = left_frame
+                        orig_right = right_frame
                     else:
                         orig_left = left_frame
                         orig_right = right_frame
+                    
+                    # Performance optimization: Cache grayscale right image
+                    # Only convert if frame changed or cache is invalid
+                    current_frame_id = id(orig_right) if orig_right is not None else None
+                    if right_gray_cache is None or right_gray_cache_frame_id != current_frame_id:
+                        if orig_right is not None:
+                            if len(orig_right.shape) == 3:
+                                right_gray_cache = cv2.cvtColor(orig_right, cv2.COLOR_BGR2GRAY)
+                            else:
+                                right_gray_cache = orig_right
+                            right_gray_cache_frame_id = current_frame_id
                     
                     # Compute ROI-based disparity for each detected object (limited)
                     for det in detections[:max_detections_for_depth]:
@@ -2369,9 +1810,9 @@ class VISION:
                             if len(orig_left.shape) < 2 or len(orig_right.shape) < 2:
                                 continue
                             
-                            # Validate bbox coordinates (allow some margin for roi_expansion)
+                            # Validate bbox coordinates
                             h_orig, w_orig = orig_left.shape[:2]
-                            margin = self.depth.roi_expansion + 10  # Allow some margin
+                            margin = 10  # Allow some margin
                             if x1 < -margin or y1 < -margin or x2 > w_orig + margin or y2 > h_orig + margin:
                                 continue
                             if x2 <= x1 or y2 <= y1:
@@ -2381,7 +1822,15 @@ class VISION:
                                 continue
                             
                             # Use custom block matching instead of SGBM
-                            disparity_value, vis_data = custom_block_matching(orig_left, orig_right, bbox_int, circle_radius=15)
+                            # Performance: Only compute visualization if blockmatch window is shown
+                            vis_data_dict = {} if show_blockmatch else None
+                            disparity_value, vis_data = custom_block_matching(
+                                orig_left, 
+                                right_gray_cache if right_gray_cache is not None else orig_right, 
+                                bbox_int, 
+                                circle_radius=15,
+                                vis_data=vis_data_dict
+                            )
                             
                             if disparity_value is not None and disparity_value > 0:
                                 # Calculate depth from disparity using power law
@@ -2397,8 +1846,8 @@ class VISION:
                                 else:
                                     depth_value = 0.0
                                 
-                                # Store visualization data for block matching window
-                                if vis_data and 'left_circle' in vis_data:
+                                # Store visualization data for block matching window (only if enabled)
+                                if show_blockmatch and vis_data and 'left_circle' in vis_data:
                                     # Create visualization showing search algorithm on full right image
                                     left_circle_vis = vis_data['left_circle']
                                     vis_center_x = vis_data.get('center_x', (x1 + x2) // 2)
@@ -2513,8 +1962,10 @@ class VISION:
                                     cv2.putText(blockmatch_vis, depth_text, (5, info_y + 30), 
                                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                                     
-                                    # Display in block matching window
-                                    cv2.imshow(blockmatch_window, blockmatch_vis)
+                                    # Display in block matching window (only if enabled)
+                                    if show_blockmatch:
+                                        with self.opencv_lock:
+                                            cv2.imshow(blockmatch_window, blockmatch_vis)
                                 
                                 # Create a small depth overlay for visualization
                                 # Use bbox region for overlay
@@ -2724,41 +2175,59 @@ class VISION:
                     cv2.putText(display_frame, obj_text, (10, 90), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 
-                # Check if SGBM needs reinitialization
-                if self.sgbm_needs_reinit and self.depth is not None:
-                    self._reinit_sgbm()
                 
                 # Create radar map visualization (reuse buffer)
-                radar_img.fill(0)  # Clear previous frame
-                center_x, center_y = radar_size // 2, radar_size // 2
-                max_range = 2.0  # Maximum depth in meters to display (reduced for better resolution)
+                # Performance optimization: Only redraw grid periodically, update objects every frame
+                radar_update_counter += 1
+                should_redraw_grid = (radar_update_counter % radar_update_interval == 0)
                 
-                # Draw radar grid (concentric circles and angle lines)
-                for r in range(1, 6):  # 5 range circles
-                    radius = int((r / 5.0) * (radar_size // 2 - 20))
-                    cv2.circle(radar_img, (center_x, center_y), radius, (50, 50, 50), 1)
-                    # Draw range labels
-                    range_text = f"{r * max_range / 5:.1f}m"
-                    cv2.putText(radar_img, range_text, (center_x + radius - 30, center_y - radius + 15),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
-                
-                # Draw angle lines (rotated 90° left: 0° = up, 90° = right, 180° = down, 270° = left)
-                # After rotation: original 0° (right) becomes -90° (up), so we show -90°, 0°, 90°, 180°
-                for angle_deg in [-90, 0, 90, 180]:
-                    angle_rad = np.radians(angle_deg)
-                    end_x = int(center_x + (radar_size // 2 - 10) * np.cos(angle_rad))
-                    end_y = int(center_y + (radar_size // 2 - 10) * np.sin(angle_rad))
-                    cv2.line(radar_img, (center_x, center_y), (end_x, end_y), (50, 50, 50), 1)
-                    # Draw angle labels
-                    label_x = int(center_x + (radar_size // 2 - 5) * np.cos(angle_rad))
-                    label_y = int(center_y + (radar_size // 2 - 5) * np.sin(angle_rad))
-                    # Display angle as positive (0-360 range)
-                    display_angle = angle_deg if angle_deg >= 0 else angle_deg + 360
-                    cv2.putText(radar_img, f"{display_angle}°", (label_x - 10, label_y + 5),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
-                
-                # Draw center point (camera position)
-                cv2.circle(radar_img, (center_x, center_y), 5, (0, 255, 255), -1)
+                if should_redraw_grid:
+                    radar_img.fill(0)  # Clear previous frame
+                    center_x, center_y = radar_size // 2, radar_size // 2
+                    max_range = 2.0  # Maximum depth in meters to display (reduced for better resolution)
+                    
+                    # Draw radar grid (concentric circles and angle lines)
+                    for r in range(1, 6):  # 5 range circles
+                        radius = int((r / 5.0) * (radar_size // 2 - 20))
+                        cv2.circle(radar_img, (center_x, center_y), radius, (50, 50, 50), 1)
+                        # Draw range labels
+                        range_text = f"{r * max_range / 5:.1f}m"
+                        cv2.putText(radar_img, range_text, (center_x + radius - 30, center_y - radius + 15),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+                    
+                    # Draw angle lines (rotated 90° left: 0° = up, 90° = right, 180° = down, 270° = left)
+                    # After rotation: original 0° (right) becomes -90° (up), so we show -90°, 0°, 90°, 180°
+                    for angle_deg in [-90, 0, 90, 180]:
+                        angle_rad = np.radians(angle_deg)
+                        end_x = int(center_x + (radar_size // 2 - 10) * np.cos(angle_rad))
+                        end_y = int(center_y + (radar_size // 2 - 10) * np.sin(angle_rad))
+                        cv2.line(radar_img, (center_x, center_y), (end_x, end_y), (50, 50, 50), 1)
+                        # Draw angle labels
+                        label_x = int(center_x + (radar_size // 2 - 5) * np.cos(angle_rad))
+                        label_y = int(center_y + (radar_size // 2 - 5) * np.sin(angle_rad))
+                        # Display angle as positive (0-360 range)
+                        display_angle = angle_deg if angle_deg >= 0 else angle_deg + 360
+                        cv2.putText(radar_img, f"{display_angle}°", (label_x - 10, label_y + 5),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+                    
+                    # Draw center point (camera position)
+                    cv2.circle(radar_img, (center_x, center_y), 5, (0, 255, 255), -1)
+                else:
+                    # Just clear objects area (faster than full redraw)
+                    center_x, center_y = radar_size // 2, radar_size // 2
+                    max_range = 2.0
+                    # Clear only the area where objects are drawn
+                    cv2.rectangle(radar_img, (0, 0), (radar_size, radar_size), (0, 0, 0), -1)
+                    # Redraw grid quickly (just circles and lines, no text)
+                    for r in range(1, 6):
+                        radius = int((r / 5.0) * (radar_size // 2 - 20))
+                        cv2.circle(radar_img, (center_x, center_y), radius, (50, 50, 50), 1)
+                    for angle_deg in [-90, 0, 90, 180]:
+                        angle_rad = np.radians(angle_deg)
+                        end_x = int(center_x + (radar_size // 2 - 10) * np.cos(angle_rad))
+                        end_y = int(center_y + (radar_size // 2 - 10) * np.sin(angle_rad))
+                        cv2.line(radar_img, (center_x, center_y), (end_x, end_y), (50, 50, 50), 1)
+                    cv2.circle(radar_img, (center_x, center_y), 5, (0, 255, 255), -1)
                 
                 # Plot objects on radar map
                 if objects:
@@ -2882,6 +2351,16 @@ class VISION:
                         with self.opencv_lock:
                             cv2.imshow(trackbar_window, trackbar_img)
                         time.sleep(0.5)  # Show feedback for 0.5 seconds
+                elif key == ord('b') or key == ord('B'):
+                    # Toggle block matching visualization
+                    show_blockmatch = not show_blockmatch
+                    if not show_blockmatch:
+                        # Hide window if disabling
+                        try:
+                            cv2.destroyWindow(blockmatch_window)
+                        except:
+                            pass
+                    print(f"{self.name}: Block matching visualization: {'ON' if show_blockmatch else 'OFF'}")
                 
                 # Cleanup temporary variables
                 del display_frame
