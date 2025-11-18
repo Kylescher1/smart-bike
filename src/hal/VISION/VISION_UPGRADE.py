@@ -29,6 +29,50 @@ import gc
 
 from ..cam.Camera import Camera, CAMERA_CONFIG
 
+# ============================================================================
+# Safe OpenCV Wrappers (prevent segfaults)
+# ============================================================================
+
+def safe_cv2_operation(operation_name: str):
+    """Decorator to safely wrap OpenCV operations with validation"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            try:
+                # Validate all numpy array arguments
+                for arg in args:
+                    if isinstance(arg, np.ndarray):
+                        if not arg.flags['C_CONTIGUOUS']:
+                            arg = np.ascontiguousarray(arg)
+                        if arg.size == 0:
+                            return None
+                        if not hasattr(arg, 'shape') or len(arg.shape) < 2:
+                            return None
+                return func(*args, **kwargs)
+            except Exception as e:
+                print(f"OpenCV {operation_name} error: {e}")
+                return None
+        return wrapper
+    return decorator
+
+def validate_cv2_array(arr, min_dims=2, allow_none=False):
+    """Validate array before passing to OpenCV
+    
+    Returns:
+        True if valid, False if invalid, None if None and allow_none=True
+    """
+    if arr is None:
+        return None if allow_none else False
+    if not isinstance(arr, np.ndarray):
+        return False
+    if arr.size == 0:
+        return False
+    if not hasattr(arr, 'shape'):
+        return False
+    if len(arr.shape) < min_dims:
+        return False
+    # Note: Caller should ensure contiguous with np.ascontiguousarray() if needed
+    return True
+
 # Import YOLO dependencies
 try:
     # Try importing from yolo.rknn_inference (if it exists)
@@ -479,31 +523,79 @@ class VisionDepth:
             if left_roi.shape != right_roi.shape:
                 return None
             
-            # Convert to grayscale with validation
+            # Convert to grayscale with validation (most common segfault source)
             try:
+                # Validate arrays before OpenCV operations
+                if not validate_cv2_array(left_roi) or not validate_cv2_array(right_roi):
+                    return None
+                
+                # Ensure arrays are contiguous
+                if not left_roi.flags['C_CONTIGUOUS']:
+                    left_roi = np.ascontiguousarray(left_roi)
+                if not right_roi.flags['C_CONTIGUOUS']:
+                    right_roi = np.ascontiguousarray(right_roi)
+                
+                # Validate shape before cvtColor
                 if len(left_roi.shape) == 3:
+                    if left_roi.shape[2] != 3:  # Must be BGR
+                        return None
                     gray_left = cv2.cvtColor(left_roi, cv2.COLOR_BGR2GRAY)
-                else:
+                elif len(left_roi.shape) == 2:
                     gray_left = left_roi.copy()
+                else:
+                    return None
                 
                 if len(right_roi.shape) == 3:
+                    if right_roi.shape[2] != 3:  # Must be BGR
+                        return None
                     gray_right = cv2.cvtColor(right_roi, cv2.COLOR_BGR2GRAY)
-                else:
+                elif len(right_roi.shape) == 2:
                     gray_right = right_roi.copy()
+                else:
+                    return None
                 
+                # Final validation
+                if gray_left is None or gray_right is None:
+                    return None
                 if gray_left.shape != gray_right.shape:
                     return None
+                if gray_left.size == 0 or gray_right.size == 0:
+                    return None
             except Exception as e:
+                print(f"Grayscale conversion error: {e}")
                 return None
             
             # Compute disparity on cropped ROI only (much faster than full frame)
+            # This is a common segfault source - validate everything
             try:
+                # Final validation before stereo.compute
+                if gray_left is None or gray_right is None:
+                    return None
+                if not validate_cv2_array(gray_left, min_dims=2) or not validate_cv2_array(gray_right, min_dims=2):
+                    return None
+                if gray_left.shape != gray_right.shape:
+                    return None
+                if gray_left.dtype != np.uint8 or gray_right.dtype != np.uint8:
+                    # Ensure uint8 for SGBM
+                    gray_left = gray_left.astype(np.uint8)
+                    gray_right = gray_right.astype(np.uint8)
+                
+                # Ensure contiguous
+                if not gray_left.flags['C_CONTIGUOUS']:
+                    gray_left = np.ascontiguousarray(gray_left)
+                if not gray_right.flags['C_CONTIGUOUS']:
+                    gray_right = np.ascontiguousarray(gray_right)
+                
+                # Call stereo.compute with validated inputs
                 disparity = self.stereo.compute(gray_left, gray_right)
                 if disparity is None:
+                    return None
+                if not isinstance(disparity, np.ndarray):
                     return None
                 disparity = disparity.astype(np.float32) / 16.0
                 disparity[disparity < 0] = 0
             except Exception as e:
+                print(f"Stereo compute error: {e}")
                 return None
             
             return disparity
@@ -1511,10 +1603,18 @@ class VISION:
                                     if (disp_roi_y1 >= 0 and disp_roi_y2 <= depth_overlay.shape[0] and
                                         disp_roi_x1 >= 0 and disp_roi_x2 <= depth_overlay.shape[1]):
                                         try:
-                                            # Resize depth map to display size
+                                            # Resize depth map to display size (validate before cv2.resize)
                                             target_size = (disp_roi_x2 - disp_roi_x1, disp_roi_y2 - disp_roi_y1)
                                             if target_size[0] > 0 and target_size[1] > 0:
+                                                # Validate roi_depth_map before resize
+                                                if not validate_cv2_array(roi_depth_map, min_dims=2):
+                                                    continue
+                                                if not roi_depth_map.flags['C_CONTIGUOUS']:
+                                                    roi_depth_map = np.ascontiguousarray(roi_depth_map)
+                                                
                                                 roi_depth_display = cv2.resize(roi_depth_map, target_size)
+                                                if roi_depth_display is None:
+                                                    continue
                                                 if roi_depth_display.shape[:2] == (disp_roi_y2 - disp_roi_y1, disp_roi_x2 - disp_roi_x1):
                                                     depth_overlay[disp_roi_y1:disp_roi_y2, disp_roi_x1:disp_roi_x2] = roi_depth_display
                                                 del roi_depth_display  # Cleanup immediately
@@ -1552,7 +1652,16 @@ class VISION:
                             depth_normalized[valid_mask] = ((depth_overlay[valid_mask] - min_depth) / 
                                                              (max_depth - min_depth) * 255).astype(np.uint8)
                         
+                        # Validate before applyColorMap (common segfault source)
+                        if not validate_cv2_array(depth_normalized, min_dims=2):
+                            continue
+                        if depth_normalized.dtype != np.uint8:
+                            depth_normalized = depth_normalized.astype(np.uint8)
+                        if not depth_normalized.flags['C_CONTIGUOUS']:
+                            depth_normalized = np.ascontiguousarray(depth_normalized)
                         depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
+                        if depth_colored is None:
+                            continue
                         
                         # Blend only in ROI regions (50/50 blend)
                         # Reuse mask buffer
@@ -1586,7 +1695,16 @@ class VISION:
                                 depth_normalized[valid_mask] = ((depth_overlay[valid_mask] - min_depth) / 
                                                                  (max_depth - min_depth) * 255).astype(np.uint8)
                                 
+                                # Validate before applyColorMap
+                                if not validate_cv2_array(depth_normalized, min_dims=2):
+                                    continue
+                                if depth_normalized.dtype != np.uint8:
+                                    depth_normalized = depth_normalized.astype(np.uint8)
+                                if not depth_normalized.flags['C_CONTIGUOUS']:
+                                    depth_normalized = np.ascontiguousarray(depth_normalized)
                                 depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
+                                if depth_colored is None:
+                                    continue
                                 
                                 # Blend with reduced opacity for stale overlays (fade effect)
                                 if not hasattr(self, '_mask_3d_buffer') or \
