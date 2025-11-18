@@ -62,13 +62,19 @@ def main():
     # dash = dashboard.SensorDashboard(list(sensors.values()))
 
     try:
-        while True:
-            sensor_data = {}
-            for name, sensor in sensors.items():
-                sensor.debug()
-                sensor_data.update({name: sensor.read()})
-            # time.sleep(1)
-            # dash.update()
+        # Check if camera sensor has debug_visual method and call it
+        camera_sensor = sensors.get('camera')
+        if camera_sensor and hasattr(camera_sensor, 'debug_visual'):
+            camera_sensor.debug_visual()
+        else:
+            # Fallback to regular debug loop
+            while True:
+                sensor_data = {}
+                for name, sensor in sensors.items():
+                    sensor.debug()
+                    sensor_data.update({name: sensor.read()})
+                # time.sleep(1)
+                # dash.update()
     except KeyboardInterrupt: #Closed file
         print("\nStopping sensors...")
         for sensor in sensors.values():
