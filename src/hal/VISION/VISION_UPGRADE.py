@@ -80,13 +80,87 @@ def validate_cv2_array(arr, min_dims=2, allow_none=False):
     return True
 
 # Import YOLO dependencies
-# Try Ultralytics YOLO first (preferred backend)
+# Prioritize RKNN NPU backend (much faster than CPU/GPU)
+# Add system dist-packages to path for rknnlite (system package)
+import site
+system_packages = '/usr/lib/python3/dist-packages'
+if system_packages not in sys.path:
+    sys.path.insert(0, system_packages)
+
+# Try RKNN imports first (preferred - NPU backend)
 try:
-    from ultralytics import YOLO
-    ULTRALYTICS_AVAILABLE = True
+    from rknnlite.api import RKNNLite
+    from yolo.rknn_inference import (
+        letterbox,
+        process_output,
+        draw_detections,
+        COCO_CLASSES,
+    )
+    RKNN_AVAILABLE = True
+    RKNNLite_available = True
 except ImportError:
-    YOLO = None
+    try:
+        # Try alternative import path
+        from yolo.yolo import (
+            RKNNLite,
+            letterbox,
+            process_output,
+            draw_detections,
+        )
+        # COCO_CLASSES might not be in yolo.yolo, try to get it from rknn_inference
+        try:
+            from yolo.rknn_inference import COCO_CLASSES
+        except ImportError:
+            # Fallback: define COCO_CLASSES if not available
+            COCO_CLASSES = [
+                'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
+                'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat',
+                'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack',
+                'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
+                'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
+                'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+                'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake',
+                'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop',
+                'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
+                'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier',
+                'toothbrush'
+            ]
+        RKNN_AVAILABLE = True
+        RKNNLite_available = True
+    except ImportError:
+        RKNNLite = None
+        letterbox = None
+        process_output = None
+        draw_detections = None
+        COCO_CLASSES = [
+            'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
+            'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat',
+            'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack',
+            'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
+            'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
+            'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+            'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake',
+            'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop',
+            'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
+            'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier',
+            'toothbrush'
+        ]
+        RKNN_AVAILABLE = False
+        RKNNLite_available = False
+
+# Fallback to Ultralytics YOLO (CPU/GPU - slower)
+# Lazy import: Only import when actually needed to avoid logging conflicts
+# Check availability without importing (to avoid torch logging issues)
+ULTRALYTICS_AVAILABLE = False
+try:
+    import importlib.util
+    spec = importlib.util.find_spec("ultralytics")
+    ULTRALYTICS_AVAILABLE = spec is not None
+except Exception:
     ULTRALYTICS_AVAILABLE = False
+
+# Don't import YOLO here - import it lazily when needed
+YOLO = None
 
 # Import tracking wrapper (still needed for ByteTrack)
 try:
@@ -100,31 +174,7 @@ except ImportError:
         ByteTrackerWrapper = None
         TRACKER_AVAILABLE = False
 
-# Legacy RKNN imports (kept for backward compatibility, but not used)
-try:
-    from yolo.yolo import (
-        letterbox,
-        process_output,
-        draw_detections,
-    )
-    RKNN_AVAILABLE = True
-except ImportError:
-    try:
-        from yolo.rknn_inference import (
-            RKNNLite,
-            letterbox,
-            process_output,
-            draw_detections,
-        )
-        RKNN_AVAILABLE = True
-    except ImportError:
-        RKNNLite = None
-        letterbox = None
-        process_output = None
-        draw_detections = None
-        RKNN_AVAILABLE = False
-
-YOLO_AVAILABLE = ULTRALYTICS_AVAILABLE or RKNN_AVAILABLE
+YOLO_AVAILABLE = RKNN_AVAILABLE or ULTRALYTICS_AVAILABLE
 
 
 # ============================================================================
@@ -304,25 +354,28 @@ class VisionCamera:
 
 class VisionYolo:
     """
-    Loads YOLO model and runs inference on camera stream using Ultralytics YOLO.
+    Loads YOLO model and runs inference on camera stream using RKNN NPU backend (fast) or Ultralytics YOLO (fallback).
     Outputs bounding boxes, segmentation masks (if available), class IDs, and confidence scores.
     """
     
     def __init__(self, model_path: str, conf_threshold: float = 0.25, 
-                 imgsz: int = 640, track_enabled: bool = True, device: Optional[str] = None, **track_kwargs):
+                 imgsz: int = 640, track_enabled: bool = True, device: Optional[str] = None, 
+                 target: Optional[str] = None, core: int = 0, **track_kwargs):
         """
         Initialize YOLO detector.
         
         Args:
-            model_path: Path to YOLO model file (.pt, .onnx, etc.)
+            model_path: Path to YOLO model file (.rknn preferred, .pt fallback)
             conf_threshold: Confidence threshold for detections
             imgsz: Input image size for YOLO
             track_enabled: Enable object tracking
-            device: Computation device (None for auto, 'cpu', '0' for GPU, etc.)
+            device: Computation device (for Ultralytics fallback: None for auto, 'cpu', '0' for GPU, etc.)
+            target: RKNN target platform (None for on-device NPU, or 'RK3562'/'RK3566'/'RK3568'/'RK3588')
+            core: NPU core mask (0=auto, 1=core0, 2=core1, 4=core2, 3=core0+1, 7=all)
             **track_kwargs: Additional tracking parameters
         """
-        if not ULTRALYTICS_AVAILABLE or YOLO is None:
-            raise ImportError("Ultralytics YOLO not available. Please install: pip install ultralytics")
+        if not RKNN_AVAILABLE and not ULTRALYTICS_AVAILABLE:
+            raise ImportError("Neither RKNN nor Ultralytics YOLO available. Please install rknnlite or ultralytics")
         
         self.model_path = Path(model_path).expanduser().resolve()
         if not self.model_path.exists():
@@ -332,38 +385,97 @@ class VisionYolo:
         self.imgsz = imgsz
         self.track_enabled = track_enabled
         self.device = device
+        self.target = target
+        self.core = core
         self.track_kwargs = track_kwargs
         
-        self.model: Optional[YOLO] = None
+        # Determine backend based on model file extension
+        self.use_rknn = self.model_path.suffix.lower() == '.rknn' and RKNN_AVAILABLE
+        self.use_ultralytics = not self.use_rknn and ULTRALYTICS_AVAILABLE
+        
+        if self.use_rknn:
+            self.rknn: Optional[RKNNLite] = None
+            self.model = None
+        else:
+            self.rknn = None
+            self.model = None  # Will be Ultralytics YOLO instance when loaded
+        
         self.tracker: Optional[ByteTrackerWrapper] = None
         self.connected = False
-        self.is_seg_model = False  # Will be detected during model loading
+        self.is_seg_model = False
+        
+        # Pre-allocated buffers for RKNN preprocessing (performance optimization)
+        self.img_input_buffer: Optional[np.ndarray] = None
+        self.last_letterbox_params = None  # Cache letterbox params for box scaling
     
     def start(self):
-        """Load Ultralytics YOLO model and initialize tracker."""
+        """Load YOLO model (RKNN NPU preferred, Ultralytics fallback) and initialize tracker."""
         if self.connected:
             return
         
-        print(f"📦 Loading Ultralytics YOLO model: {self.model_path}")
+        if self.use_rknn:
+            # Use RKNN NPU backend (much faster)
+            if not RKNN_AVAILABLE or RKNNLite is None:
+                raise RuntimeError("RKNN not available but .rknn model specified")
+            
+            print(f"📦 Loading RKNN NPU model: {self.model_path}")
+            
+            try:
+                self.rknn = RKNNLite(verbose=False)
+                
+                # Load model
+                ret = self.rknn.load_rknn(str(self.model_path))
+                if ret != 0:
+                    raise RuntimeError(f"Failed to load RKNN model: {ret}")
+                
+                # Initialize runtime (None = on-device NPU)
+                target = None if (self.target is None or self.target.lower() == 'none' or self.target == '') else self.target
+                ret = self.rknn.init_runtime(target=target, core_mask=self.core)
+                if ret != 0:
+                    raise RuntimeError(f"Failed to initialize RKNN runtime: {ret}")
+                
+                print(f"✅ RKNN NPU model loaded successfully from {self.model_path}")
+                print(f"   Using NPU backend (target={target}, core={self.core})")
+                
+            except Exception as e:
+                self.rknn = None
+                raise RuntimeError(f"Failed to load RKNN model: {e}")
         
-        try:
-            self.model = YOLO(str(self.model_path))
-            print(f"✅ Model loaded from {self.model_path}")
-        except Exception as e:
-            self.model = None
-            raise RuntimeError(f"Failed to load YOLO model: {e}")
-        
-        # Detect if this is a segmentation model
-        model_name = str(self.model_path).lower()
-        self.is_seg_model = 'seg' in model_name or 'segmentation' in model_name
-        
-        # Also check model task type
-        if hasattr(self.model, 'task'):
-            if self.model.task == 'segment':
-                self.is_seg_model = True
-        
-        if self.is_seg_model:
-            print("✅ Segmentation model detected - masks will be processed")
+        elif self.use_ultralytics:
+            # Fallback to Ultralytics YOLO (CPU/GPU - slower)
+            # Lazy import to avoid logging conflicts at module load time
+            if not ULTRALYTICS_AVAILABLE:
+                raise RuntimeError("Ultralytics YOLO not available. Please install: pip install ultralytics")
+            
+            # Import here (lazy) to avoid torch logging issues at module load
+            try:
+                from ultralytics import YOLO as UltralyticsYOLO
+            except Exception as e:
+                raise RuntimeError(f"Failed to import Ultralytics YOLO: {e}. This may be due to logging conflicts.")
+            
+            print(f"📦 Loading Ultralytics YOLO model: {self.model_path}")
+            print(f"⚠️  Using CPU/GPU backend (slower than NPU)")
+            
+            try:
+                self.model = UltralyticsYOLO(str(self.model_path))
+                print(f"✅ Model loaded from {self.model_path}")
+            except Exception as e:
+                self.model = None
+                raise RuntimeError(f"Failed to load YOLO model: {e}")
+            
+            # Detect if this is a segmentation model
+            model_name = str(self.model_path).lower()
+            self.is_seg_model = 'seg' in model_name or 'segmentation' in model_name
+            
+            # Also check model task type
+            if hasattr(self.model, 'task'):
+                if self.model.task == 'segment':
+                    self.is_seg_model = True
+            
+            if self.is_seg_model:
+                print("✅ Segmentation model detected - masks will be processed")
+        else:
+            raise RuntimeError("No suitable backend available for model")
         
         # Initialize tracker if enabled
         if self.track_enabled and TRACKER_AVAILABLE and ByteTrackerWrapper is not None:
@@ -378,7 +490,6 @@ class VisionYolo:
         else:
             self.tracker = None
         
-        print("✅ Ultralytics YOLO model loaded successfully")
         self.connected = True
     
     def stop(self):
@@ -386,14 +497,21 @@ class VisionYolo:
         if not self.connected:
             return
         
-        # Ultralytics YOLO models don't need explicit cleanup
-        self.model = None
+        if self.rknn is not None:
+            self.rknn.release()
+            self.rknn = None
+        
+        if self.model is not None:
+            self.model = None
+        
         self.tracker = None
+        self.img_input_buffer = None
+        self.last_letterbox_params = None
         self.connected = False
     
     def detect(self, frame: np.ndarray) -> List[Dict]:
         """
-        Run YOLO inference on frame using Ultralytics YOLO.
+        Run YOLO inference on frame using RKNN NPU (preferred) or Ultralytics YOLO (fallback).
         
         Args:
             frame: Input frame (BGR format)
@@ -401,9 +519,151 @@ class VisionYolo:
         Returns:
             List of detection dicts with keys: bbox, score, class_id, class_name, track_id (if tracking), mask (if seg model)
         """
-        if not self.connected or frame is None or self.model is None:
+        if not self.connected or frame is None:
             return []
         
+        if self.rknn is not None:
+            # RKNN NPU backend (fast path)
+            return self._detect_rknn(frame)
+        elif self.model is not None:
+            # Ultralytics YOLO backend (fallback - slower)
+            return self._detect_ultralytics(frame)
+        else:
+            return []
+    
+    def _detect_rknn(self, frame: np.ndarray) -> List[Dict]:
+        """Run inference using RKNN NPU backend (optimized)."""
+        try:
+            # Initialize timing stats if not exists
+            if not hasattr(self, '_timing_stats'):
+                self._timing_stats = {
+                    'preprocess': [],
+                    'inference': [],
+                    'postprocess': [],
+                    'box_scale': [],
+                    'tracking': [],
+                    'total': []
+                }
+                self._timing_frame_count = 0
+            
+            total_start = time.time()
+            h_orig, w_orig = frame.shape[:2]
+            
+            # Preprocess (optimized: reuse buffers, same as rknn_inference.py)
+            preprocess_start = time.time()
+            img_resized, ratio, (dw, dh) = letterbox(frame, new_shape=(self.imgsz, self.imgsz))
+            img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+            
+            # RKNN expects 4D input: (batch, height, width, channels) for NHWC format
+            # Pre-allocate buffer if not exists, or reuse if same size (performance optimization)
+            if self.img_input_buffer is None or self.img_input_buffer.shape != (1, self.imgsz, self.imgsz, 3):
+                self.img_input_buffer = np.zeros((1, self.imgsz, self.imgsz, 3), dtype=np.uint8)
+            self.img_input_buffer[0] = img_rgb.astype(np.uint8)
+            img_input = self.img_input_buffer
+            
+            # Cache letterbox params for box scaling
+            self.last_letterbox_params = {
+                'ratio': ratio,
+                'dw': dw,
+                'dh': dh,
+                'h_orig': h_orig,
+                'w_orig': w_orig
+            }
+            preprocess_time = (time.time() - preprocess_start) * 1000  # ms
+            
+            # Run inference on NPU
+            inference_start = time.time()
+            try:
+                outputs = self.rknn.inference([img_input])
+            except Exception as e:
+                print(f"RKNN inference error: {e}")
+                return []
+            inference_time = (time.time() - inference_start) * 1000  # ms
+            
+            if outputs is None:
+                return []
+            
+            # Process output (same as rknn_inference.py)
+            postprocess_start = time.time()
+            try:
+                detections = process_output(outputs, conf_threshold=self.conf_threshold, img_shape=(self.imgsz, self.imgsz))
+            except Exception as e:
+                print(f"RKNN post-processing error: {e}")
+                return []
+            postprocess_time = (time.time() - postprocess_start) * 1000  # ms
+            
+            # Scale boxes back to original image size (vectorized for speed)
+            box_scale_start = time.time()
+            if detections and self.last_letterbox_params:
+                params = self.last_letterbox_params
+                scale = params['ratio']
+                pad_x = params['dw']
+                pad_y = params['dh']
+                
+                # Vectorized box scaling (much faster than loop)
+                boxes = np.array([det['bbox'] for det in detections], dtype=np.float32)
+                boxes[:, [0, 2]] = (boxes[:, [0, 2]] - pad_x) / scale
+                boxes[:, [1, 3]] = (boxes[:, [1, 3]] - pad_y) / scale
+                boxes = boxes.astype(np.int32)
+                
+                # Clip to image bounds
+                boxes[:, 0] = np.clip(boxes[:, 0], 0, params['w_orig'])
+                boxes[:, 1] = np.clip(boxes[:, 1], 0, params['h_orig'])
+                boxes[:, 2] = np.clip(boxes[:, 2], 0, params['w_orig'])
+                boxes[:, 3] = np.clip(boxes[:, 3], 0, params['h_orig'])
+                
+                for i, det in enumerate(detections):
+                    det['bbox'] = boxes[i].tolist()
+            box_scale_time = (time.time() - box_scale_start) * 1000  # ms
+            
+            # Update tracker if enabled
+            tracking_start = time.time()
+            if self.tracker is not None and self.track_enabled:
+                try:
+                    detections = self.tracker.update(detections)
+                except Exception as e:
+                    print(f"Tracker update error: {e}")
+                    # Return detections without tracking on error
+            tracking_time = (time.time() - tracking_start) * 1000  # ms
+            
+            total_time = (time.time() - total_start) * 1000  # ms
+            
+            # Store timing stats
+            self._timing_stats['preprocess'].append(preprocess_time)
+            self._timing_stats['inference'].append(inference_time)
+            self._timing_stats['postprocess'].append(postprocess_time)
+            self._timing_stats['box_scale'].append(box_scale_time)
+            self._timing_stats['tracking'].append(tracking_time)
+            self._timing_stats['total'].append(total_time)
+            self._timing_frame_count += 1
+            
+            # Print timing summary every 60 frames
+            if self._timing_frame_count % 60 == 0:
+                avg_preprocess = np.mean(self._timing_stats['preprocess'][-60:])
+                avg_inference = np.mean(self._timing_stats['inference'][-60:])
+                avg_postprocess = np.mean(self._timing_stats['postprocess'][-60:])
+                avg_box_scale = np.mean(self._timing_stats['box_scale'][-60:])
+                avg_tracking = np.mean(self._timing_stats['tracking'][-60:])
+                avg_total = np.mean(self._timing_stats['total'][-60:])
+                
+                print(f"[RKNN TIMING] Frame {self._timing_frame_count}: "
+                      f"Preprocess={avg_preprocess:.1f}ms | "
+                      f"Inference={avg_inference:.1f}ms | "
+                      f"Postprocess={avg_postprocess:.1f}ms | "
+                      f"BoxScale={avg_box_scale:.1f}ms | "
+                      f"Tracking={avg_tracking:.1f}ms | "
+                      f"Total={avg_total:.1f}ms ({1000/avg_total:.1f} FPS)")
+            
+            return detections
+            
+        except Exception as e:
+            print(f"RKNN detection error: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def _detect_ultralytics(self, frame: np.ndarray) -> List[Dict]:
+        """Run inference using Ultralytics YOLO backend (fallback - slower)."""
         try:
             h_orig, w_orig = frame.shape[:2]
             
@@ -449,6 +709,8 @@ class VisionYolo:
                         class_name = names.get(class_id, class_name)
                     elif isinstance(names, (list, tuple)) and class_id < len(names):
                         class_name = names[class_id]
+                    elif class_id < len(COCO_CLASSES):
+                        class_name = COCO_CLASSES[class_id]
                     
                     # Convert bbox to list format [x1, y1, x2, y2]
                     bbox_list = [int(float(bbox[0])), int(float(bbox[1])), 
@@ -497,7 +759,7 @@ class VisionYolo:
             return detections
             
         except Exception as e:
-            print(f"YOLO detection error: {e}")
+            print(f"Ultralytics YOLO detection error: {e}")
             import traceback
             traceback.print_exc()
             return []
@@ -795,23 +1057,65 @@ class VisionDepth:
         Returns:
             Smoothed depth in meters, or None if invalid
         """
+        # Initialize timing stats if not exists
+        if not hasattr(self, '_depth_timing_stats'):
+            self._depth_timing_stats = {
+                'disparity': [],
+                'depth_convert': [],
+                'smoothing': [],
+                'total': []
+            }
+            self._depth_timing_count = 0
+        
+        total_start = time.time()
+        
         # Compute ROI disparity
+        disparity_start = time.time()
         disparity = self.compute_roi_disparity(left_rect, right_rect, bbox)
+        disparity_time = (time.time() - disparity_start) * 1000  # ms
+        
         if disparity is None:
             return None
         
         # Convert to depth
+        depth_convert_start = time.time()
         depth = self.disparity_to_depth(disparity)
+        depth_convert_time = (time.time() - depth_convert_start) * 1000  # ms
+        
         if depth is None:
             return None
         
         # Apply temporal smoothing (EMA) if track_id provided
+        smoothing_start = time.time()
         if track_id is not None:
             if track_id in self.depth_history:
                 # EMA: new_depth = alpha * current + (1 - alpha) * previous
                 depth = self.ema_alpha * depth + (1 - self.ema_alpha) * self.depth_history[track_id]
             
             self.depth_history[track_id] = depth
+        smoothing_time = (time.time() - smoothing_start) * 1000  # ms
+        
+        total_time = (time.time() - total_start) * 1000  # ms
+        
+        # Store timing stats
+        self._depth_timing_stats['disparity'].append(disparity_time)
+        self._depth_timing_stats['depth_convert'].append(depth_convert_time)
+        self._depth_timing_stats['smoothing'].append(smoothing_time)
+        self._depth_timing_stats['total'].append(total_time)
+        self._depth_timing_count += 1
+        
+        # Print timing summary every 100 depth computations
+        if self._depth_timing_count % 100 == 0:
+            avg_disparity = np.mean(self._depth_timing_stats['disparity'][-100:])
+            avg_depth_convert = np.mean(self._depth_timing_stats['depth_convert'][-100:])
+            avg_smoothing = np.mean(self._depth_timing_stats['smoothing'][-100:])
+            avg_total = np.mean(self._depth_timing_stats['total'][-100:])
+            
+            print(f"[DEPTH TIMING] Count {self._depth_timing_count}: "
+                  f"Disparity={avg_disparity:.1f}ms | "
+                  f"DepthConvert={avg_depth_convert:.1f}ms | "
+                  f"Smoothing={avg_smoothing:.1f}ms | "
+                  f"Total={avg_total:.1f}ms")
         
         return depth
 
@@ -952,34 +1256,45 @@ class VISION:
         # Initialize YOLO (optional - not needed for calibration)
         model_path = self.yolo_config.get('model_path') if self.yolo_config else None
         
-        # If model_path is None or points to .rknn file, use default .pt model (same as live_demo.py)
-        if model_path is None or (isinstance(model_path, str) and model_path.endswith('.rknn')):
-            # Default to yolo11n.pt (same as live_demo.py)
-            default_model = 'yolo/models/yolo11n.pt'
-            if Path(default_model).exists():
-                model_path = default_model
-            else:
-                # Fallback: try to find any yolo11n.pt in models directory
-                models_dir = Path('yolo/models')
-                if models_dir.exists():
+        # Prefer .rknn models (NPU backend - much faster), fallback to .pt if needed
+        if model_path is None:
+            # Try to find default .rknn model first (NPU - fast)
+            models_dir = Path('yolo/models')
+            if models_dir.exists():
+                rknn_models = list(models_dir.glob('yolo11n*.rknn'))
+                if rknn_models:
+                    model_path = str(rknn_models[0])
+                    print(f"✅ Found default RKNN model: {model_path}")
+                else:
+                    # Fallback to .pt model (CPU/GPU - slower)
                     pt_models = list(models_dir.glob('yolo11n*.pt'))
                     if pt_models:
                         model_path = str(pt_models[0])
+                        print(f"⚠️  No .rknn model found, using .pt model (slower): {model_path}")
                     else:
-                        # Last resort: use default path anyway (will error if not found)
-                        model_path = default_model
-                else:
-                    model_path = default_model
-            
-            if model_path != self.yolo_config.get('model_path'):
-                print(f"⚠️  Switching from RKNN to Ultralytics YOLO model: {model_path}")
+                        # Last resort: use default path
+                        default_rknn = 'yolo/models/yolo11n.rknn'
+                        default_pt = 'yolo/models/yolo11n.pt'
+                        if Path(default_rknn).exists():
+                            model_path = default_rknn
+                        elif Path(default_pt).exists():
+                            model_path = default_pt
+                            print(f"⚠️  Using default .pt model (slower): {model_path}")
+                        else:
+                            model_path = default_rknn  # Will error if not found
         
         if model_path:
+            # Extract RKNN-specific config if available
+            target = self.yolo_config.get('target', None)
+            core = self.yolo_config.get('core', 0)
+            
             self.yolo = VisionYolo(
                 model_path=model_path,
                 conf_threshold=self.yolo_config.get('conf_threshold', 0.25),
                 imgsz=self.yolo_config.get('imgsz', 640),
-                device=self.yolo_config.get('device', None),  # None = auto-detect
+                device=self.yolo_config.get('device', None),  # For Ultralytics fallback
+                target=target,  # RKNN target platform
+                core=core,  # NPU core mask
                 track_enabled=self.yolo_config.get('track_enabled', True),
                 track_thresh=self.yolo_config.get('track_thresh', 0.5),
                 track_high_thresh=self.yolo_config.get('track_high_thresh', 0.6),
@@ -1051,16 +1366,34 @@ class VISION:
         
         object_id_counter = 0  # Incremental ID for objects
         
+        # Initialize timing stats
+        timing_stats = {
+            'capture': [],
+            'frame_copy': [],
+            'yolo_detect': [],
+            'depth_compute': [],
+            'angle_compute': [],
+            'buffer_update': [],
+            'total_loop': []
+        }
+        frame_count = 0
+        
         while not self.stop_event.is_set():
             try:
+                loop_start = time.time()
+                
                 # Read frames
+                capture_start = time.time()
                 left_rect, right_rect = self.camera.read_frames()
+                capture_time = (time.time() - capture_start) * 1000  # ms
+                
                 if left_rect is None or right_rect is None:
                     time.sleep(0.01)
                     continue
                 
                 # Store for debug (limit frame size to prevent memory issues)
                 # Thread-safe frame storage with lock
+                frame_copy_start = time.time()
                 with self.frame_lock:
                     if left_rect.shape[0] * left_rect.shape[1] <= 1920 * 1200:
                         self.last_left_frame = left_rect.copy()
@@ -1071,9 +1404,12 @@ class VISION:
                         new_w, new_h = int(left_rect.shape[1] * scale), int(left_rect.shape[0] * scale)
                         self.last_left_frame = cv2.resize(left_rect, (new_w, new_h))
                         self.last_right_frame = cv2.resize(right_rect, (new_w, new_h))
+                frame_copy_time = (time.time() - frame_copy_start) * 1000  # ms
                 
                 # Run YOLO detection on left frame
+                yolo_start = time.time()
                 detections = self.yolo.detect(left_rect)
+                yolo_time = (time.time() - yolo_start) * 1000  # ms
                 
                 # Cache detections for debug_visual to avoid double YOLO call (thread-safe)
                 with self.frame_lock:  # Reuse frame_lock for detection cache
@@ -1083,6 +1419,9 @@ class VISION:
                 # Only compute depth if there are detections (ROI-based, not full frame)
                 # Process each detection: compute depth and angles
                 objects = []
+                depth_total_time = 0
+                angle_total_time = 0
+                
                 if detections and self.depth is not None:
                     for det in detections:
                         bbox = det['bbox']
@@ -1093,12 +1432,15 @@ class VISION:
                         # Compute depth using ROI-based SGBM (only processes cropped region around object)
                         # This crops the images to the object's ROI before passing to SGBM for efficiency
                         track_id = det.get('track_id', None)
+                        depth_start = time.time()
                         depth = self.depth.estimate_depth(left_rect, right_rect, bbox, track_id)
+                        depth_total_time += (time.time() - depth_start) * 1000  # ms
                         
                         if depth is None:
                             continue  # Skip if depth estimation failed
                         
                         # Compute angles (theta = horizontal, alpha = vertical)
+                        angle_start = time.time()
                         h, w = left_rect.shape[:2]
                         center_x = (x1 + x2) / 2.0
                         center_y = (y1 + y2) / 2.0
@@ -1111,6 +1453,7 @@ class VISION:
                         # Pixel to angle conversion
                         theta = ((center_x - w / 2.0) / w) * fov_h  # horizontal angle
                         alpha = ((center_y - h / 2.0) / h) * fov_v  # vertical angle
+                        angle_total_time += (time.time() - angle_start) * 1000  # ms
                         
                         # Use track_id as object ID, or assign new ID
                         obj_id = track_id if track_id is not None else object_id_counter
@@ -1131,6 +1474,7 @@ class VISION:
                         objects.append(obj)
                 
                 # Create buffer entry (minimal data to save memory)
+                buffer_start = time.time()
                 buffer_entry = {
                     'timestamp': time.time(),
                     'objects': objects,
@@ -1140,6 +1484,38 @@ class VISION:
                 # Update buffer (thread-safe)
                 with self.buffer_lock:
                     self.data_buffer.append(buffer_entry)
+                buffer_time = (time.time() - buffer_start) * 1000  # ms
+                
+                total_loop_time = (time.time() - loop_start) * 1000  # ms
+                
+                # Store timing stats
+                timing_stats['capture'].append(capture_time)
+                timing_stats['frame_copy'].append(frame_copy_time)
+                timing_stats['yolo_detect'].append(yolo_time)
+                timing_stats['depth_compute'].append(depth_total_time)
+                timing_stats['angle_compute'].append(angle_total_time)
+                timing_stats['buffer_update'].append(buffer_time)
+                timing_stats['total_loop'].append(total_loop_time)
+                frame_count += 1
+                
+                # Print timing summary every 60 frames
+                if frame_count % 60 == 0:
+                    avg_capture = np.mean(timing_stats['capture'][-60:])
+                    avg_frame_copy = np.mean(timing_stats['frame_copy'][-60:])
+                    avg_yolo = np.mean(timing_stats['yolo_detect'][-60:])
+                    avg_depth = np.mean(timing_stats['depth_compute'][-60:])
+                    avg_angle = np.mean(timing_stats['angle_compute'][-60:])
+                    avg_buffer = np.mean(timing_stats['buffer_update'][-60:])
+                    avg_total = np.mean(timing_stats['total_loop'][-60:])
+                    
+                    print(f"[VISION TIMING] Frame {frame_count}: "
+                          f"Capture={avg_capture:.1f}ms | "
+                          f"FrameCopy={avg_frame_copy:.1f}ms | "
+                          f"YOLO={avg_yolo:.1f}ms | "
+                          f"Depth={avg_depth:.1f}ms | "
+                          f"Angle={avg_angle:.1f}ms | "
+                          f"Buffer={avg_buffer:.1f}ms | "
+                          f"Total={avg_total:.1f}ms ({1000/avg_total:.1f} FPS)")
                 
                 # Update FPS
                 self.fps_counter += 1
