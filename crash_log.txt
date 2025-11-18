@@ -1,0 +1,204 @@
+(venv) radxa@rock-5b:~/smart-bike$ python debug.py
+/home/radxa/smart-bike/venv/lib/python3.11/site-packages/matplotlib/projections/__init__.py:63: UserWarning: Unable to import Axes3D. This may be due to multiple versions of Matplotlib being installed (e.g. as a system package and as a pip package). As a result, the 3D projection is not available.
+  warnings.warn("Unable to import Axes3D. This may be due to multiple versions of "
+Loading Config...
+Loaded Config
+Device: camera | Properties: {'left': {'port': 1, 'position': quaternion(1, 0, 0, 0), 'z_direction': quaternion(0, 0, 0, 1), 'map_x': array([[ -53.256313,  -52.377647,  -51.498817, ..., 2007.117   ,
+        2008.1095  , 2009.102   ],
+       [ -53.308857,  -52.430294,  -51.55157 , ..., 2007.2119  ,
+        2008.2043  , 2009.1968  ],
+       [ -53.36135 ,  -52.482895,  -51.60428 , ..., 2007.3069  ,
+        2008.2992  , 2009.2915  ],
+       ...,
+       [ -12.221702,  -11.337289,  -10.452708, ..., 2015.4692  ,
+        2016.4596  , 2017.45    ],
+       [ -12.113863,  -11.229364,  -10.344698, ..., 2015.3984  ,
+        2016.3889  , 2017.3793  ],
+       [ -12.006021,  -11.121436,  -10.236684, ..., 2015.3276  ,
+        2016.3182  , 2017.3087  ]], shape=(1200, 1920), dtype=float32), 'map_y': array([[  14.230926,   14.119883,   14.008735, ...,  -57.59255 ,
+         -57.547104,  -57.501766],
+       [  15.235447,   15.124475,   15.013397, ...,  -56.535473,
+         -56.49003 ,  -56.4447  ],
+       [  16.24014 ,   16.12924 ,   16.018234, ...,  -55.478218,
+         -55.432777,  -55.38745 ],
+       ...,
+       [1252.37    , 1252.4512  , 1252.5325  , ..., 1248.7136  ,
+        1248.63    , 1248.5465  ],
+       [1253.3358  , 1253.417   , 1253.4984  , ..., 1249.7357  ,
+        1249.6522  , 1249.5687  ],
+       [1254.3014  , 1254.3827  , 1254.4641  , ..., 1250.7576  ,
+        1250.6741  , 1250.5906  ]], shape=(1200, 1920), dtype=float32), 'P': array([[512.51700492,   0.        , 977.36863693,   0.        ],
+       [  0.        , 512.51700492, 545.21725058,   0.        ],
+       [  0.        ,   0.        ,   1.        ,   0.        ]]), 'newK': array([[512.51700492,   0.        , 977.36863693],
+       [  0.        , 512.51700492, 545.21725058],
+       [  0.        ,   0.        ,   1.        ]]), 'D': array([[ 0.24868911],
+       [ 0.62580069],
+       [-0.72386169],
+       [ 0.31384158]]), 'R': array([[ 0.99967365, -0.01970189, -0.01626098],
+       [ 0.01977536,  0.9997949 ,  0.00437018],
+       [ 0.01617155, -0.00469032,  0.99985823]]), 'K': array([[620.20591932,   0.        , 972.40843864],
+       [  0.        , 618.40774175, 565.75311296],
+       [  0.        ,   0.        ,   1.        ]]), 'rms': 0.9341181898356336, 'map_size': (1920, 1200)}, 'right': {'port': 3, 'position': quaternion(1, 0, 0, 0), 'z_direction': quaternion(0, 0, 0, 1), 'map_x': array([[-183.35646, -182.27866, -181.20085, ..., 2128.1782 , 2129.5808 ,
+        2130.984  ],
+       [-183.33385, -182.25609, -181.17833, ..., 2128.1995 , 2129.602  ,
+        2131.0051 ],
+       [-183.31128, -182.23357, -181.15585, ..., 2128.2207 , 2129.6233 ,
+        2131.0264 ],
+       ...,
+       [-167.55319, -166.45586, -165.35847, ..., 2179.2673 , 2180.6965 ,
+        2182.126  ],
+       [-167.55322, -166.45583, -165.3584 , ..., 2179.333  , 2180.7625 ,
+        2182.192  ],
+       [-167.55328, -166.45584, -165.35835, ..., 2179.399  , 2180.8281 ,
+        2182.2578 ]], shape=(1200, 1920), dtype=float32), 'map_y': array([[ -80.22112 ,  -80.27355 ,  -80.326035, ..., -212.23233 ,
+        -212.33063 , -212.42897 ],
+       [ -79.09622 ,  -79.14863 ,  -79.20108 , ..., -210.9509  ,
+        -211.04906 , -211.14728 ],
+       [ -77.971344,  -78.02372 ,  -78.07614 , ..., -209.66951 ,
+        -209.76753 , -209.8656  ],
+       ...,
+       [1276.5527  , 1276.5618  , 1276.5707  , ..., 1329.1298  ,
+        1329.1844  , 1329.2393  ],
+       [1277.7096  , 1277.7186  , 1277.7277  , ..., 1330.451   ,
+        1330.5059  , 1330.5607  ],
+       [1278.8666  , 1278.8756  , 1278.8846  , ..., 1331.7723  ,
+        1331.8273  , 1331.8823  ]], shape=(1200, 1920), dtype=float32), 'P': array([[ 5.12517005e+02,  0.00000000e+00,  9.77368637e+02,
+        -1.15292068e+05],
+       [ 0.00000000e+00,  5.12517005e+02,  5.45217251e+02,
+         0.00000000e+00],
+       [ 0.00000000e+00,  0.00000000e+00,  1.00000000e+00,
+         0.00000000e+00]]), 'newK': array([[512.51700492,   0.        , 977.36863693],
+       [  0.        , 512.51700492, 545.21725058],
+       [  0.        ,   0.        ,   1.        ]]), 'D': array([[ 0.28349293],
+       [ 0.48249658],
+       [-0.52034511],
+       [ 0.29881155]]), 'R': array([[ 0.99921912, -0.02148395, -0.03316012],
+       [ 0.02133346,  0.99976048, -0.00488535],
+       [ 0.03325714,  0.00417412,  0.99943811]]), 'K': array([[625.29227759,   0.        , 915.46861127],
+       [  0.        , 622.28823016, 507.48550239],
+       [  0.        ,   0.        ,   1.        ]]), 'rms': 1.2066579054034443, 'map_size': (1920, 1200)}, 'who_to_run': 'src.hal.VISION.VISION_UPGRADE.VISION', 'yolo': {'model_path': 'yolo/models/yolo11n.rknn', 'conf_threshold': 0.25, 'imgsz': 640, 'track_enabled': True, 'track_thresh': 0.5, 'track_high_thresh': 0.6, 'track_match_thresh': 0.8, 'frame_rate': 30, 'track_buffer': 30}, 'baseline': 0.224, 'focal_length_px': 621.0, 'ema_alpha': 0.3, 'roi_expansion': 10, 'fov_horizontal': 114.0, 'fov_vertical': 87.0, 'buffer_size': 10, 'minDisparity': 45, 'numDisparitiesK': 4, 'numDisparities': 4, 'blockSize': 11, 'P1': 6300, 'P2': 5600, 'preFilterCap': 43, 'uniquenessRatio': 7, 'speckleWindowSize': 196, 'speckleRange': 98, 'disp12MaxDiff': 23, 'sgbmMode': 2, 'medianBlurK': 0, 'downSample': 57, 'crop': 128, 'farEnhance': 27, 'nearCutoff': 72, 'farCutoff': 5, 'useMorph': True, 'morphIter': 5, 'useBilateral': False, 'bilateralStrength': 20, 'useWLS': True, 'wlsLambda': 2389, 'wlsSigma': 2.1, 'smoothingKernel': 0, 'confidenceWindow': 5, 'confidenceThreshold': 0.0, 'objectThresholdMM': 1095, 'wsSigma': 2, 'wsMinArea': 800, 'edgeEqualize': True, 'edgeBilateralD': 13, 'edgeBilateralSigma': 200, 'edgeCannyKLow': 3.0, 'edgeCannyKHigh': 4.0, 'edgeUseScharr': True, 'colorFocusMM': 10612, 'colorSpanMM': 17800, 'segMode': 0, 'kmK': 4, 'kmSpatialX100': 50, 'rgTau': 50, 'rgSeedStep': 16, 'imageSize': None, 'Q': array([[ 1.00000000e+00,  0.00000000e+00,  0.00000000e+00,
+        -9.77368637e+02],
+       [ 0.00000000e+00,  1.00000000e+00,  0.00000000e+00,
+        -5.45217251e+02],
+       [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,
+         5.12517005e+02],
+       [ 0.00000000e+00,  0.00000000e+00,  4.44537958e-03,
+        -0.00000000e+00]]), 'stereo': {'R': array([[ 0.99985272,  0.0014866 ,  0.01709737],
+       [-0.00163881,  0.99995912,  0.00889201],
+       [-0.01708345, -0.00891872,  0.99981429]]), 'T': array([[-224.77700748],
+       [   4.83287134],
+       [   7.45945788]]), 'Q': array([[ 1.00000000e+00,  0.00000000e+00,  0.00000000e+00,
+        -9.77368637e+02],
+       [ 0.00000000e+00,  1.00000000e+00,  0.00000000e+00,
+        -5.45217251e+02],
+       [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,
+         5.12517005e+02],
+       [ 0.00000000e+00,  0.00000000e+00,  4.44537958e-03,
+        -0.00000000e+00]]), 'flags': 256, 'balance': 0.0, 'fov_scale': 1.2}, 'resolution': (1920, 1200)}
+============================================================
+Enabling Sensors...
+Loading: camera
+Loaded: camera
+camera: Starting vision system...
+✅ Left camera opened on port 1
+✅ Right camera opened on port 3
+📦 Loading RKNN NPU model: /home/radxa/smart-bike/yolo/models/yolo11n.rknn
+I RKNN: [17:04:50.392] RKNN Runtime Information, librknnrt version: 2.3.0 (c949ad889d@2024-11-07T11:35:33)
+I RKNN: [17:04:50.392] RKNN Driver Information, version: 0.9.8
+I RKNN: [17:04:50.392] RKNN Model Information, version: 6, toolkit version: 2.3.2(compiler version: 2.3.2 (e045de294f@2025-04-07T19:48:25)), target: RKNPU v2, target platform: rk3588, framework name: ONNX, framework layout: NCHW, model inference type: static_shape
+W RKNN: [17:04:50.406] query RKNN_QUERY_INPUT_DYNAMIC_RANGE error, rknn model is static shape type, please export rknn with dynamic_shapes
+W Query dynamic range failed. Ret code: RKNN_ERR_MODEL_INVALID. (If it is a static shape RKNN model, please ignore the above warning message.)
+✅ RKNN NPU model loaded successfully from /home/radxa/smart-bike/yolo/models/yolo11n.rknn
+   Using NPU backend (target=None, core=0)
+✅ ByteTrack tracking enabled
+⚠ Reducing numDisparitiesK from 4 to 2 for lower resolution (640x480)
+✅ SGBM stereo matcher initialized
+camera: Data collector started.
+camera: Vision system started successfully
+Started: camera
+Sensors Enabled
+============================================================
+Sensor Check Would go here
+============================================================
+camera: Starting visual debug mode with parameter tuning...
+camera: Press 'q' to exit, 's' to save parameters
+camera: MEM[Debug start] RSS: 366.0MB, VMS: 1443.9MB, Percent: 9.3%
+camera: MEM[Debug start] Buffer: 0 entries, 0 objects
+camera: Detected Wayland, forcing X11 backend
+camera: MEM[Periodic check] RSS: 437.4MB, VMS: 1566.7MB, Percent: 11.2%
+camera: MEM[Periodic check] Frames: left: (480, 640, 3) 0.9MB, right: (480, 640, 3) 0.9MB
+camera: MEM[Periodic check] Buffer: 0 entries, 0 objects
+camera: MEM[Before SGBM reinit] RSS: 438.9MB, VMS: 1570.2MB, Percent: 11.2%
+camera: MEM[Before SGBM reinit] Frames: left: (480, 640, 3) 0.9MB, right: (480, 640, 3) 0.9MB
+camera: MEM[Before SGBM reinit] Buffer: 0 entries, 0 objects
+⚠ Reducing numDisparitiesK from 4 to 2 for lower resolution (640x480)
+✅ SGBM stereo matcher initialized
+camera: MEM[After SGBM reinit] RSS: 438.9MB, VMS: 1572.2MB, Percent: 11.2%
+camera: MEM[After SGBM reinit] Frames: left: (480, 640, 3) 0.9MB, right: (480, 640, 3) 0.9MB
+camera: MEM[After SGBM reinit] Buffer: 0 entries, 0 objects
+camera: MEM[Data collector] RSS: 454.2MB, VMS: 1575.0MB, Percent: 11.6%
+camera: MEM[Data collector] Frames: left: (480, 640, 3) 0.9MB, right: (480, 640, 3) 0.9MB
+camera: MEM[Data collector] Buffer: 1 entries, 0 objects
+
+[17:04:53] Detections: 3
+  [0] tv conf:0.70 ID:2
+  [1] person conf:0.70 ID:0
+  [2] chair conf:0.86 ID:1
+
+[17:04:53] Objects: 2
+  ID:2 tv depth:1.02m θ:41.8°
+  ID:1 chair depth:1.01m θ:-10.6°
+
+[17:04:55] Detections: 3
+  [0] person conf:0.59 ID:0
+  [1] tv conf:0.70 ID:2
+  [2] chair conf:0.84 ID:1
+
+[17:04:55] Objects: 2
+  ID:2 tv depth:1.02m θ:41.8°
+  ID:1 chair depth:1.00m θ:-10.7°
+camera: MEM[Periodic check] RSS: 512.1MB, VMS: 1585.1MB, Percent: 13.1%
+camera: MEM[Periodic check] Frames: left: (480, 640, 3) 0.9MB, right: (480, 640, 3) 0.9MB
+camera: MEM[Periodic check] Buffer: 2 entries, 4 objects
+
+[17:04:57] Detections: 3
+  [0] person conf:0.57 ID:0
+  [1] tv conf:0.74 ID:2
+  [2] chair conf:0.85 ID:1
+
+[17:04:57] Objects: 2
+  ID:2 tv depth:1.02m θ:41.7°
+  ID:1 chair depth:1.00m θ:-10.6°
+[DEPTH TIMING] Count 100: Disparity=2.1ms | DepthConvert=0.4ms | Smoothing=0.0ms | Total=2.5ms
+
+[17:04:59] Detections: 3
+  [0] person conf:0.67 ID:0
+  [1] tv conf:0.72 ID:2
+  [2] chair conf:0.79 ID:3
+
+[17:04:59] Objects: 2
+  ID:2 tv depth:1.02m θ:41.7°
+  ID:3 chair depth:1.02m θ:17.9°
+[CAPTURE TIMING] Frame 60: LeftRead=34.2ms | RightRead=38.8ms | LeftRemap=20.7ms | RightRemap=8.6ms | Total=102.3ms
+[RKNN TIMING] Frame 60: Preprocess=0.6ms | Inference=26.1ms | Postprocess=11.3ms | BoxScale=0.1ms | Tracking=0.2ms | Total=38.2ms (26.2 FPS)
+[VISION TIMING] Frame 60: Capture=102.3ms | FrameCopy=0.2ms | YOLO=38.4ms | Depth=5.0ms | Angle=0.0ms | Buffer=0.0ms | Total=145.9ms (6.9 FPS)
+camera: MEM[Periodic check] RSS: 513.3MB, VMS: 1586.2MB, Percent: 13.1%
+camera: MEM[Periodic check] Frames: left: (480, 640, 3) 0.9MB, right: (480, 640, 3) 0.9MB
+camera: MEM[Periodic check] Buffer: 2 entries, 4 objects
+
+[17:05:01] Detections: 3
+  [0] person conf:0.60 ID:0
+  [1] tv conf:0.73 ID:2
+  [2] chair conf:0.88 ID:1
+
+[17:05:01] Objects: 2
+  ID:2 tv depth:1.02m θ:41.8°
+  ID:1 chair depth:1.01m θ:-10.6°
+camera: MEM[Data collector] RSS: 513.3MB, VMS: 1586.2MB, Percent: 13.1%
+camera: MEM[Data collector] Frames: left: (480, 640, 3) 0.9MB, right: (480, 640, 3) 0.9MB
+camera: MEM[Data collector] Buffer: 2 entries, 4 objects
+camera: MEM[Debug end] RSS: 508.5MB, VMS: 1581.2MB, Percent: 13.0%
+camera: MEM[Debug end] Frames: left: (480, 640, 3) 0.9MB, right: (480, 640, 3) 0.9MB
+camera: MEM[Debug end] Buffer: 2 entries, 4 objects
+camera: Visual debug mode ended
+(venv) radxa@rock-5b:~/smart-bike$
