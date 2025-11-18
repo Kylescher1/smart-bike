@@ -772,8 +772,12 @@ class VisionDepth:
         if median_disp <= 0:
             return None
         
-        # Convert to depth: Z = (f * B) / d
-        depth = (self.focal_length_px * self.baseline) / median_disp
+        # Convert to depth using power law (higher disparity = closer objects)
+        # Power law: depth = k / (disparity ^ power)
+        # Power of ~1.3 is a rough approximation (will be replaced with calibrated equation)
+        k = self.focal_length_px * self.baseline
+        power = 1.3  # Rough guess, will be updated with real calibration
+        depth = k / (median_disp ** power)
         
         return float(depth)
     
@@ -1893,9 +1897,16 @@ class VISION:
                             disparity_value, vis_data = custom_block_matching(orig_left, orig_right, bbox_int, circle_radius=15)
                             
                             if disparity_value is not None and disparity_value > 0:
-                                # Calculate depth from disparity
+                                # Calculate depth from disparity using power law
+                                # Higher disparity = closer objects (inverse relationship)
+                                # Using power law: depth = k / (disparity ^ power)
+                                # Power of ~1.2-1.5 is typical for stereo depth (rough approximation)
                                 if self.focal_length_px > 0 and self.baseline > 0:
-                                    depth_value = (self.focal_length_px * self.baseline) / disparity_value
+                                    # Base linear calculation
+                                    k = self.focal_length_px * self.baseline
+                                    # Apply power law (power ~1.3 as rough guess)
+                                    power = 1.3
+                                    depth_value = k / (disparity_value ** power)
                                 else:
                                     depth_value = 0.0
                                 
@@ -2233,7 +2244,7 @@ class VISION:
                 # Create radar map visualization (reuse buffer)
                 radar_img.fill(0)  # Clear previous frame
                 center_x, center_y = radar_size // 2, radar_size // 2
-                max_range = 10.0  # Maximum depth in meters to display
+                max_range = 2.0  # Maximum depth in meters to display (reduced for better resolution)
                 
                 # Draw radar grid (concentric circles and angle lines)
                 for r in range(1, 6):  # 5 range circles
@@ -2244,8 +2255,9 @@ class VISION:
                     cv2.putText(radar_img, range_text, (center_x + radius - 30, center_y - radius + 15),
                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
                 
-                # Draw angle lines (0°, 90°, 180°, 270°)
-                for angle_deg in [0, 90, 180, 270]:
+                # Draw angle lines (rotated 90° left: 0° = up, 90° = right, 180° = down, 270° = left)
+                # After rotation: original 0° (right) becomes -90° (up), so we show -90°, 0°, 90°, 180°
+                for angle_deg in [-90, 0, 90, 180]:
                     angle_rad = np.radians(angle_deg)
                     end_x = int(center_x + (radar_size // 2 - 10) * np.cos(angle_rad))
                     end_y = int(center_y + (radar_size // 2 - 10) * np.sin(angle_rad))
@@ -2253,7 +2265,9 @@ class VISION:
                     # Draw angle labels
                     label_x = int(center_x + (radar_size // 2 - 5) * np.cos(angle_rad))
                     label_y = int(center_y + (radar_size // 2 - 5) * np.sin(angle_rad))
-                    cv2.putText(radar_img, f"{angle_deg}°", (label_x - 10, label_y + 5),
+                    # Display angle as positive (0-360 range)
+                    display_angle = angle_deg if angle_deg >= 0 else angle_deg + 360
+                    cv2.putText(radar_img, f"{display_angle}°", (label_x - 10, label_y + 5),
                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
                 
                 # Draw center point (camera position)
@@ -2271,10 +2285,12 @@ class VISION:
                         if depth > 0 and depth <= max_range:
                             # Convert polar coordinates (theta, depth) to cartesian (x, y)
                             # Note: theta is horizontal angle, positive = right, negative = left
-                            # In radar view: 0° = right, 90° = down, 180° = left, 270° = up
+                            # Rotate radar 90° to the left:
+                            # - Original: 0° = right, 90° = down, 180° = left, 270° = up
+                            # - Rotated left: 0° = up, 90° = right, 180° = down, 270° = left
                             # Camera view: theta=0 is center, positive = right, negative = left
-                            # Convert camera theta to radar angle (camera right = radar 0°)
-                            radar_angle_rad = np.radians(theta)
+                            # Rotate left by subtracting 90 degrees
+                            radar_angle_rad = np.radians(theta - 90)
                             
                             # Scale depth to radar size
                             radius = int((depth / max_range) * (radar_size // 2 - 20))
