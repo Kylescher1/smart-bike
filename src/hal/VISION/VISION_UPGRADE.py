@@ -914,7 +914,7 @@ class VISION:
         # Initialize YOLO (optional - not needed for calibration)
         model_path = self.yolo_config.get('model_path') if self.yolo_config else None
         if model_path is None:
-            model_path = 'yolo/models/yolov8s-seg.rknn'  # Hardcoded default segmentation model
+            model_path = 'yolo/models/yolov11n.rknn'  # Hardcoded default segmentation model
         
         if model_path:
             self.yolo = VisionYolo(
@@ -1401,6 +1401,138 @@ class VISION:
         Visual debug mode with interactive parameter tuning via trackbars.
         Press 'q' to quit, 's' to save parameters to config.dill.
         """
+        
+        def custom_block_matching(left_img: np.ndarray, right_img: np.ndarray, 
+                                  bbox: List[int], circle_radius: int = 15) -> Tuple[Optional[float], Optional[Dict]]:
+            """
+            Custom block matching algorithm for depth estimation.
+            
+            Extracts a center circle from the object in left image and searches for it
+            in the right image by finding minimum intensity difference.
+            
+            Args:
+                left_img: Left rectified image
+                right_img: Right rectified image  
+                bbox: Bounding box [x1, y1, x2, y2]
+                circle_radius: Radius of center circle to extract (default 15 = ~30 pixels wide)
+            
+            Returns:
+                Tuple of (disparity value, visualization dict) or (None, None) if not found
+                Visualization dict contains: 'left_circle', 'right_match', 'center_x', 'center_y', 'best_offset'
+            """
+            if left_img is None or right_img is None:
+                return None, None
+            
+            vis_data = {}
+            
+            x1, y1, x2, y2 = bbox
+            
+            # Calculate center of bounding box
+            center_x = (x1 + x2) // 2
+            center_y = (y1 + y2) // 2
+            
+            # Ensure circle fits within bbox
+            bbox_w = x2 - x1
+            bbox_h = y2 - y1
+            actual_radius = min(circle_radius, bbox_w // 2 - 2, bbox_h // 2 - 2)
+            if actual_radius < 5:
+                return None, None  # Too small
+            
+            vis_data['center_x'] = center_x
+            vis_data['center_y'] = center_y
+            vis_data['radius'] = actual_radius
+            
+            # Validate bounds
+            h, w = left_img.shape[:2]
+            if center_x < actual_radius or center_x >= w - actual_radius:
+                return None, None
+            if center_y < actual_radius or center_y >= h - actual_radius:
+                return None, None
+            
+            # Extract circular region from left image (bounding box around circle)
+            patch_x1 = max(0, center_x - actual_radius)
+            patch_y1 = max(0, center_y - actual_radius)
+            patch_x2 = min(w, center_x + actual_radius)
+            patch_y2 = min(h, center_y + actual_radius)
+            
+            # Extract patch and convert to grayscale if needed
+            if len(left_img.shape) == 3:
+                left_patch = cv2.cvtColor(left_img[patch_y1:patch_y2, patch_x1:patch_x2], cv2.COLOR_BGR2GRAY)
+            else:
+                left_patch = left_img[patch_y1:patch_y2, patch_x1:patch_x2]
+            
+            # Create circular mask for the patch
+            patch_h, patch_w = left_patch.shape[:2]
+            patch_center_x = patch_w // 2
+            patch_center_y = patch_h // 2
+            y_coords, x_coords = np.ogrid[:patch_h, :patch_w]
+            circle_mask = (x_coords - patch_center_x)**2 + (y_coords - patch_center_y)**2 <= actual_radius**2
+            
+            # Apply mask to extract circular region
+            left_circle = left_patch.copy()
+            left_circle[~circle_mask] = 0
+            
+            if left_circle.size == 0:
+                return None, None
+            
+            # Store visualization data
+            vis_data['left_circle'] = left_circle.copy()
+            vis_data['circle_mask'] = circle_mask.copy()
+            vis_data['patch_coords'] = (patch_x1, patch_y1, patch_x2, patch_y2)
+            
+            # Convert right image to grayscale if needed
+            if len(right_img.shape) == 3:
+                right_gray = cv2.cvtColor(right_img, cv2.COLOR_BGR2GRAY)
+            else:
+                right_gray = right_img
+            
+            # Search range: objects in right image appear shifted left (negative disparity)
+            # Search from center_x to left (negative direction)
+            search_range = min(200, center_x - actual_radius)  # Limit search range
+            if search_range < 10:
+                return None, None
+            
+            min_diff = float('inf')
+            best_disparity = 0
+            best_right_patch = None
+            best_offset = 0
+            
+            # Search horizontally for best match
+            for offset in range(-search_range, 0):  # Search leftward (negative disparity)
+                search_x1 = center_x + offset - actual_radius
+                search_x2 = center_x + offset + actual_radius
+                
+                if search_x1 < 0 or search_x2 >= w:
+                    continue
+                
+                # Extract corresponding region from right image
+                right_patch = right_gray[patch_y1:patch_y2, search_x1:search_x2]
+                
+                if right_patch.shape != left_circle.shape:
+                    continue
+                
+                # Apply same circular mask to right patch
+                right_patch_masked = right_patch.copy()
+                right_patch_masked[~circle_mask] = 0
+                
+                # Calculate intensity difference (sum of absolute differences)
+                diff = np.sum(np.abs(left_circle.astype(np.float32) - right_patch_masked.astype(np.float32)))
+                
+                if diff < min_diff:
+                    min_diff = diff
+                    best_disparity = abs(offset)  # Disparity is positive value
+                    best_right_patch = right_patch_masked.copy()
+                    best_offset = offset
+            
+            # Return disparity if we found a reasonable match
+            if min_diff < float('inf') and best_disparity > 0:
+                vis_data['right_match'] = best_right_patch
+                vis_data['best_offset'] = best_offset
+                vis_data['min_diff'] = min_diff
+                return float(best_disparity), vis_data
+            
+            return None, None
+        
         if not self.connected:
             print(f"{self.name}: Cannot start visual debug mode. Vision system not connected. Call start() first.")
             return
@@ -1428,11 +1560,13 @@ class VISION:
         window_name = f"{self.name} - Visual Debug"
         trackbar_window = f"{self.name} - Parameters"
         radar_window = f"{self.name} - Radar Map"
+        blockmatch_window = f"{self.name} - Block Matching"
         
         try:
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
             cv2.namedWindow(trackbar_window, cv2.WINDOW_NORMAL)
             cv2.namedWindow(radar_window, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(blockmatch_window, cv2.WINDOW_NORMAL)
         except Exception as e:
             print(f"{self.name}: Warning: Window creation issue: {e}")
             print(f"{self.name}: Attempting to continue...")
@@ -1441,6 +1575,7 @@ class VISION:
                 cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
                 cv2.namedWindow(trackbar_window, cv2.WINDOW_AUTOSIZE)
                 cv2.namedWindow(radar_window, cv2.WINDOW_AUTOSIZE)
+                cv2.namedWindow(blockmatch_window, cv2.WINDOW_AUTOSIZE)
             except Exception as e2:
                 print(f"{self.name}: Failed to create window: {e2}")
                 print(f"{self.name}: Visual debug mode may not work properly")
@@ -1699,14 +1834,77 @@ class VISION:
                             if (x2 - x1) < 5 or (y2 - y1) < 5:
                                 continue
                             
-                            roi_disparity = self.depth.compute_roi_disparity(orig_left, orig_right, bbox_int)
-                            if roi_disparity is not None and roi_disparity.size > 0:
-                                # Expand ROI coordinates (accounting for roi_expansion)
-                                # Use original frame dimensions
-                                roi_x1 = max(0, x1 - self.depth.roi_expansion)
-                                roi_y1 = max(0, y1 - self.depth.roi_expansion)
-                                roi_x2 = min(orig_w, x2 + self.depth.roi_expansion)
-                                roi_y2 = min(orig_h, y2 + self.depth.roi_expansion)
+                            # Use custom block matching instead of SGBM
+                            disparity_value, vis_data = custom_block_matching(orig_left, orig_right, bbox_int, circle_radius=15)
+                            
+                            if disparity_value is not None and disparity_value > 0:
+                                # Calculate depth from disparity
+                                if self.focal_length_px > 0 and self.baseline > 0:
+                                    depth_value = (self.focal_length_px * self.baseline) / disparity_value
+                                else:
+                                    depth_value = 0.0
+                                
+                                # Store visualization data for block matching window
+                                if vis_data and 'left_circle' in vis_data:
+                                    # Create visualization image
+                                    left_circle_vis = vis_data['left_circle']
+                                    right_match_vis = vis_data.get('right_match', None)
+                                    
+                                    if right_match_vis is not None:
+                                        # Create side-by-side comparison
+                                        vis_h = max(left_circle_vis.shape[0], right_match_vis.shape[0])
+                                        vis_w = left_circle_vis.shape[1] + right_match_vis.shape[1] + 20
+                                        
+                                        blockmatch_vis = np.zeros((vis_h, vis_w, 3), dtype=np.uint8)
+                                        
+                                        # Convert to BGR if grayscale
+                                        if len(left_circle_vis.shape) == 2:
+                                            left_circle_bgr = cv2.cvtColor(left_circle_vis, cv2.COLOR_GRAY2BGR)
+                                        else:
+                                            left_circle_bgr = left_circle_vis
+                                        
+                                        if len(right_match_vis.shape) == 2:
+                                            right_match_bgr = cv2.cvtColor(right_match_vis, cv2.COLOR_GRAY2BGR)
+                                        else:
+                                            right_match_bgr = right_match_vis
+                                        
+                                        # Place left circle
+                                        lh, lw = left_circle_bgr.shape[:2]
+                                        blockmatch_vis[:lh, :lw] = left_circle_bgr
+                                        
+                                        # Place right match
+                                        rh, rw = right_match_bgr.shape[:2]
+                                        blockmatch_vis[:rh, lw+20:lw+20+rw] = right_match_bgr
+                                        
+                                        # Add text labels
+                                        cv2.putText(blockmatch_vis, "Left Circle", (5, 20), 
+                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                                        cv2.putText(blockmatch_vis, "Right Match", (lw+25, 20), 
+                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                                        
+                                        # Add disparity and depth values
+                                        info_text = f"Disparity: {disparity_value:.2f} px"
+                                        cv2.putText(blockmatch_vis, info_text, (5, vis_h - 40), 
+                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                                        
+                                        depth_text = f"Depth: {depth_value:.3f} m"
+                                        cv2.putText(blockmatch_vis, depth_text, (5, vis_h - 15), 
+                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                                        
+                                        # Draw arrow showing offset
+                                        arrow_start = (lw + 10, vis_h // 2)
+                                        arrow_end = (lw + 10 + vis_data.get('best_offset', 0), vis_h // 2)
+                                        cv2.arrowedLine(blockmatch_vis, arrow_start, arrow_end, (0, 0, 255), 2)
+                                        
+                                        # Display in block matching window
+                                        cv2.imshow(blockmatch_window, blockmatch_vis)
+                                
+                                # Create a small depth overlay for visualization
+                                # Use bbox region for overlay
+                                roi_x1 = max(0, x1)
+                                roi_y1 = max(0, y1)
+                                roi_x2 = min(orig_w, x2)
+                                roi_y2 = min(orig_h, y2)
                                 
                                 # Scale ROI coordinates for display overlay
                                 disp_roi_x1 = int(roi_x1 * scale_x)
@@ -1714,46 +1912,25 @@ class VISION:
                                 disp_roi_x2 = int(roi_x2 * scale_x)
                                 disp_roi_y2 = int(roi_y2 * scale_y)
                                 
-                                # Convert ROI disparity to depth map
-                                roi_h, roi_w = roi_disparity.shape[:2]
-                                # Reuse buffer if possible, otherwise create new one
-                                if not hasattr(self, '_roi_depth_map_buffer') or \
-                                   self._roi_depth_map_buffer.shape != (roi_h, roi_w):
-                                    self._roi_depth_map_buffer = np.zeros((roi_h, roi_w), dtype=np.float32)
-                                roi_depth_map = self._roi_depth_map_buffer
-                                roi_depth_map.fill(0)  # Clear buffer
+                                # Fill ROI region with depth value for visualization
+                                if (disp_roi_y1 >= 0 and disp_roi_y2 <= depth_overlay.shape[0] and
+                                    disp_roi_x1 >= 0 and disp_roi_x2 <= depth_overlay.shape[1] and
+                                    disp_roi_y2 > disp_roi_y1 and disp_roi_x2 > disp_roi_x1):
+                                    depth_overlay[disp_roi_y1:disp_roi_y2, disp_roi_x1:disp_roi_x2] = depth_value
                                 
-                                # Convert disparity to depth pixel by pixel
-                                valid_mask = roi_disparity > 0
-                                if np.any(valid_mask) and self.focal_length_px > 0 and self.baseline > 0:
-                                    roi_depth_map[valid_mask] = (self.focal_length_px * self.baseline) / roi_disparity[valid_mask]
-                                
-                                # Place ROI depth map into display overlay (scaled)
-                                if disp_roi_y2 > disp_roi_y1 and disp_roi_x2 > disp_roi_x1:
-                                    # Validate display overlay bounds to prevent segfaults
-                                    if (disp_roi_y1 >= 0 and disp_roi_y2 <= depth_overlay.shape[0] and
-                                        disp_roi_x1 >= 0 and disp_roi_x2 <= depth_overlay.shape[1]):
-                                        try:
-                                            # Resize depth map to display size (validate before cv2.resize)
-                                            target_size = (disp_roi_x2 - disp_roi_x1, disp_roi_y2 - disp_roi_y1)
-                                            if target_size[0] > 0 and target_size[1] > 0:
-                                                # Validate roi_depth_map before resize
-                                                if not validate_cv2_array(roi_depth_map, min_dims=2):
-                                                    continue
-                                                if not roi_depth_map.flags['C_CONTIGUOUS']:
-                                                    roi_depth_map = np.ascontiguousarray(roi_depth_map)
-                                                
-                                                # Use lock for thread-safe OpenCV resize
-                                                with self.opencv_lock:
-                                                    roi_depth_display = cv2.resize(roi_depth_map, target_size)
-                                                if roi_depth_display is None:
-                                                    continue
-                                                if roi_depth_display.shape[:2] == (disp_roi_y2 - disp_roi_y1, disp_roi_x2 - disp_roi_x1):
-                                                    depth_overlay[disp_roi_y1:disp_roi_y2, disp_roi_x1:disp_roi_x2] = roi_depth_display
-                                                del roi_depth_display  # Cleanup immediately
-                                        except Exception as e:
-                                            if self.debug_mode:
-                                                print(f"{self.name}: Error resizing/placing ROI depth: {e}")
+                                # Also draw disparity and depth on main display frame
+                                if display_frame is not None:
+                                    text_x = int(x1 * scale_x)
+                                    text_y = int(y1 * scale_y - 10) if y1 * scale_y > 30 else int(y2 * scale_y + 20)
+                                    text_y = max(20, min(text_y, new_h - 40))
+                                    
+                                    disp_text = f"D:{disparity_value:.1f}px"
+                                    depth_text = f"Z:{depth_value:.2f}m"
+                                    
+                                    cv2.putText(display_frame, disp_text, (text_x, text_y), 
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                                    cv2.putText(display_frame, depth_text, (text_x, text_y + 20), 
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
                         except Exception as e:
                             if self.debug_mode:
                                 print(f"{self.name}: Error computing ROI disparity: {e}")
