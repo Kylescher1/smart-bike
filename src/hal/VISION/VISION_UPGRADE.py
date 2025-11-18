@@ -1138,6 +1138,12 @@ class VISION:
             camera_config['ema_alpha'] = self.ema_alpha
             camera_config['roi_expansion'] = self.roi_expansion
             
+            # Update FOV parameters if they exist
+            if hasattr(self, 'fov_horizontal'):
+                camera_config['fov_horizontal'] = self.fov_horizontal
+            if hasattr(self, 'fov_vertical'):
+                camera_config['fov_vertical'] = self.fov_vertical
+            
             # Save updated config
             with open(self.config_path, "wb") as f:
                 dill.dump(self.original_config, f)
@@ -1417,11 +1423,28 @@ class VISION:
         cv2.createTrackbar('EMA Alpha (x100)', trackbar_window, ema_val, 100, update_ema)
         cv2.createTrackbar('ROI Expand', trackbar_window, roi_exp_val, 50, update_roi)
         
+        # Create trackbars for FOV parameters
+        fov_h_val = int(getattr(self, 'fov_horizontal', 60.0))
+        fov_v_val = int(getattr(self, 'fov_vertical', 45.0))
+        
+        def update_fov_h(v):
+            self.fov_horizontal = float(v)
+        
+        def update_fov_v(v):
+            self.fov_vertical = float(v)
+        
+        cv2.createTrackbar('FOV H (deg)', trackbar_window, fov_h_val, 180, update_fov_h)
+        cv2.createTrackbar('FOV V (deg)', trackbar_window, fov_v_val, 180, update_fov_v)
+        
         # Pre-allocate reusable buffers to avoid memory allocation every frame
         radar_size = 400
         radar_img = np.zeros((radar_size, radar_size, 3), dtype=np.uint8)
-        trackbar_img = np.zeros((400, 300, 3), dtype=np.uint8)
+        trackbar_img = np.zeros((200, 300, 3), dtype=np.uint8)  # Increased height for save button
         depth_overlay_buffer = None  # Will be allocated when needed
+        
+        # Save button coordinates (for visual feedback)
+        button_x, button_y = 10, 120
+        button_w, button_h = 150, 40
         
         try:
             while True:
@@ -1926,6 +1949,12 @@ class VISION:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                 cv2.putText(trackbar_img, "Press 'q' to quit", (10, 90), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                
+                # Draw save button (visual indicator)
+                cv2.rectangle(trackbar_img, (button_x, button_y), 
+                            (button_x + button_w, button_y + button_h), (0, 255, 0), 2)
+                cv2.putText(trackbar_img, "SAVE (S)", (button_x + 20, button_y + 28), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                 try:
                     if trackbar_img is not None and hasattr(trackbar_img, 'shape') and trackbar_img.size > 0:
                         # Use lock for thread-safe OpenCV imshow
@@ -1950,7 +1979,15 @@ class VISION:
                 if key == ord('q'):
                     break
                 elif key == ord('s') or key == ord('S'):
-                    self._save_config()
+                    if self._save_config():
+                        # Visual feedback - flash the button green
+                        cv2.rectangle(trackbar_img, (button_x, button_y), 
+                                    (button_x + button_w, button_y + button_h), (0, 255, 0), -1)
+                        cv2.putText(trackbar_img, "SAVED!", (button_x + 15, button_y + 28), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+                        with self.opencv_lock:
+                            cv2.imshow(trackbar_window, trackbar_img)
+                        time.sleep(0.5)  # Show feedback for 0.5 seconds
                 
                 # Cleanup temporary variables
                 del display_frame

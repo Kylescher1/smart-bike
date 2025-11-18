@@ -206,7 +206,10 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
         flags=stereo_flags,
     )
 
-    print(f"RMS reprojection error: {rms:.4f}, baseline: {np.linalg.norm(T):.3f} units")
+    # Calculate baseline from translation vector (in mm, convert to meters)
+    baseline_mm = np.linalg.norm(T)
+    baseline_m = baseline_mm / 1000.0  # Convert mm to meters
+    print(f"RMS reprojection error: {rms:.4f}, baseline: {baseline_mm:.3f} mm ({baseline_m:.4f} m)")
 
     R1, R2, P1, P2, vision.Q = cv2.fisheye.stereoRectify(
         K1,
@@ -278,10 +281,34 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
     camera_settings["left"]["map_size"] = tuple(map1x.shape[::-1])
     camera_settings["right"]["map_size"] = tuple(map2x.shape[::-1])
     camera_settings["Q"] = np.asarray(vision.Q, dtype=np.float64)
-
+    
+    # Calculate depth estimation parameters from calibration results
+    # Focal length: average of fx and fy from camera matrix (in pixels)
+    focal_left = (K1[0, 0] + K1[1, 1]) / 2.0
+    focal_right = (K2[0, 0] + K2[1, 1]) / 2.0
+    focal_length_px = (focal_left + focal_right) / 2.0  # Average focal length
+    
+    # Calculate FOV from focal length and image dimensions
+    # FOV = 2 * arctan(sensor_size / (2 * focal_length))
+    # For pixels: FOV = 2 * arctan(image_size_pixels / (2 * focal_length_pixels))
+    img_width, img_height = vision.img_shape
+    fov_horizontal = 2 * np.degrees(np.arctan(img_width / (2 * focal_length_px)))
+    fov_vertical = 2 * np.degrees(np.arctan(img_height / (2 * focal_length_px)))
+    
+    # Store depth estimation parameters
+    camera_settings["baseline"] = float(baseline_m)
+    camera_settings["focal_length_px"] = float(focal_length_px)
+    camera_settings["fov_horizontal"] = float(fov_horizontal)
+    camera_settings["fov_vertical"] = float(fov_vertical)
+    
     print(f"\n💾 Calibration complete")
     print(f"   Maps shape: {camera_settings['left']['map_x'].shape}")
     print(f"   Image size: {vision.img_shape}")
+    print(f"\n📐 Calculated Depth Parameters:")
+    print(f"   Baseline: {baseline_m:.4f} m ({baseline_mm:.2f} mm)")
+    print(f"   Focal Length: {focal_length_px:.2f} pixels")
+    print(f"   FOV Horizontal: {fov_horizontal:.2f}°")
+    print(f"   FOV Vertical: {fov_vertical:.2f}°")
 
     os.makedirs("calib_pairs", exist_ok=True)
     for i, (imgL, imgR, *_ ) in enumerate(captured_pairs):
