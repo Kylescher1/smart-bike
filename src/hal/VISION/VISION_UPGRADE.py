@@ -612,9 +612,11 @@ class VISION:
                 - ema_alpha: EMA smoothing factor
                 - roi_expansion: ROI expansion pixels
                 - buffer_size: Circular buffer size
+                - safe_mode: If True, disables features that might cause segfaults
         """
         self.name = name
         self.debug_mode = True
+        self.safe_mode = kwargs.get('safe_mode', False)  # Safe mode disables risky operations
         
         # Load configuration
         for k, v in kwargs.items():
@@ -1199,6 +1201,8 @@ class VISION:
         
         print(f"{self.name}: Starting visual debug mode with parameter tuning...")
         print(f"{self.name}: Press 'q' to exit, 's' to save parameters")
+        if self.safe_mode:
+            print(f"{self.name}: ⚠️ SAFE MODE ENABLED - Some features disabled to prevent crashes")
         
         # Initialize memory tracking
         if self.memory_debug:
@@ -1414,8 +1418,10 @@ class VISION:
                 # Only compute ROI-based disparity for detected objects (not full frame)
                 # This matches production behavior - SGBM only processes cropped regions
                 # Limit to max 3 detections to prevent memory issues
+                # In safe mode, skip depth computation entirely to isolate segfault source
                 max_detections_for_depth = 3
-                if detections and right_frame is not None and self.depth is not None and self.depth.stereo is not None:
+                if (not self.safe_mode and detections and right_frame is not None and 
+                    self.depth is not None and self.depth.stereo is not None):
                     # Reuse depth overlay buffer (clear it first only if we have new detections)
                     # This prevents flickering when detections temporarily disappear
                     depth_overlay_buffer.fill(0)

@@ -4,10 +4,26 @@ import sys
 from pathlib import Path
 import dashboard
 import time
+import faulthandler
+import traceback
+import signal
 # from termcolor import colored, cprint #earn this buddy
+
+# Enable faulthandler to get stack traces on segfaults
+faulthandler.enable()
+# Also write to file for better debugging
+faulthandler.enable(file=open('crash_log.txt', 'w'), all_threads=True)
 
 # make sure src folder is on sys.path
 sys.path.append(str(Path(__file__).resolve().parent / "src"))
+
+def signal_handler(sig, frame):
+    """Handle signals gracefully"""
+    print("\n⚠️ Received signal, shutting down...")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 def load_class_from_path(path: str):
     """Load a class given its full import path"""
