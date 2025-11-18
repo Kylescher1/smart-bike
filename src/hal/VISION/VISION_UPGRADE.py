@@ -1846,58 +1846,122 @@ class VISION:
                                 
                                 # Store visualization data for block matching window
                                 if vis_data and 'left_circle' in vis_data:
-                                    # Create visualization image
+                                    # Create visualization showing search algorithm on full right image
                                     left_circle_vis = vis_data['left_circle']
-                                    right_match_vis = vis_data.get('right_match', None)
+                                    vis_center_x = vis_data.get('center_x', (x1 + x2) // 2)
+                                    vis_center_y = vis_data.get('center_y', (y1 + y2) // 2)
+                                    radius = vis_data.get('radius', 15)
+                                    best_offset = vis_data.get('best_offset', 0)
                                     
-                                    if right_match_vis is not None:
-                                        # Create side-by-side comparison
-                                        vis_h = max(left_circle_vis.shape[0], right_match_vis.shape[0])
-                                        vis_w = left_circle_vis.shape[1] + right_match_vis.shape[1] + 20
-                                        
-                                        blockmatch_vis = np.zeros((vis_h, vis_w, 3), dtype=np.uint8)
-                                        
-                                        # Convert to BGR if grayscale
-                                        if len(left_circle_vis.shape) == 2:
-                                            left_circle_bgr = cv2.cvtColor(left_circle_vis, cv2.COLOR_GRAY2BGR)
-                                        else:
-                                            left_circle_bgr = left_circle_vis
-                                        
-                                        if len(right_match_vis.shape) == 2:
-                                            right_match_bgr = cv2.cvtColor(right_match_vis, cv2.COLOR_GRAY2BGR)
-                                        else:
-                                            right_match_bgr = right_match_vis
-                                        
-                                        # Place left circle
+                                    # Convert right image to BGR for visualization
+                                    if len(orig_right.shape) == 2:
+                                        right_img_vis = cv2.cvtColor(orig_right.copy(), cv2.COLOR_GRAY2BGR)
+                                    else:
+                                        right_img_vis = orig_right.copy()
+                                    
+                                    # Draw search area (where we searched)
+                                    search_start_x = max(0, vis_center_x - 200)  # Approximate search range
+                                    search_end_x = vis_center_x
+                                    cv2.rectangle(right_img_vis, 
+                                                 (search_start_x, max(0, vis_center_y - radius - 50)),
+                                                 (search_end_x, min(orig_h, vis_center_y + radius + 50)),
+                                                 (255, 255, 0), 2)  # Yellow rectangle for search area
+                                    
+                                    # Draw the best match location
+                                    match_x = vis_center_x + best_offset
+                                    match_x1 = match_x - radius
+                                    match_y1 = vis_center_y - radius
+                                    match_x2 = match_x + radius
+                                    match_y2 = vis_center_y + radius
+                                    
+                                    # Draw circle at best match location
+                                    cv2.circle(right_img_vis, (match_x, vis_center_y), radius, (0, 255, 0), 2)  # Green circle
+                                    cv2.rectangle(right_img_vis, (match_x1, match_y1), (match_x2, match_y2), 
+                                                 (0, 255, 0), 2)  # Green rectangle
+                                    
+                                    # Draw line from center to match location
+                                    cv2.line(right_img_vis, (vis_center_x, vis_center_y), (match_x, vis_center_y), 
+                                            (0, 0, 255), 2)  # Red line showing offset
+                                    
+                                    # Draw arrow pointing to match
+                                    arrow_length = abs(best_offset)
+                                    if arrow_length > 5:
+                                        cv2.arrowedLine(right_img_vis, 
+                                                        (vis_center_x, vis_center_y - radius - 20),
+                                                        (match_x, vis_center_y - radius - 20),
+                                                        (0, 0, 255), 2, tipLength=0.3)
+                                    
+                                    # Draw reference point (where we started searching from)
+                                    cv2.circle(right_img_vis, (vis_center_x, vis_center_y), 3, (255, 0, 0), -1)  # Blue dot
+                                    
+                                    # Create side-by-side visualization
+                                    # Resize right image if too large for display
+                                    max_display_h = 400
+                                    if right_img_vis.shape[0] > max_display_h:
+                                        scale = max_display_h / right_img_vis.shape[0]
+                                        new_w = int(right_img_vis.shape[1] * scale)
+                                        right_img_vis = cv2.resize(right_img_vis, (new_w, max_display_h))
+                                    
+                                    # Convert left circle to BGR
+                                    if len(left_circle_vis.shape) == 2:
+                                        left_circle_bgr = cv2.cvtColor(left_circle_vis, cv2.COLOR_GRAY2BGR)
+                                    else:
+                                        left_circle_bgr = left_circle_vis
+                                    
+                                    # Resize left circle to match height
+                                    lh, lw = left_circle_bgr.shape[:2]
+                                    rh, rw = right_img_vis.shape[:2]
+                                    
+                                    if lh != rh:
+                                        left_circle_bgr = cv2.resize(left_circle_bgr, 
+                                                                    (int(lw * rh / lh), rh))
                                         lh, lw = left_circle_bgr.shape[:2]
-                                        blockmatch_vis[:lh, :lw] = left_circle_bgr
-                                        
-                                        # Place right match
-                                        rh, rw = right_match_bgr.shape[:2]
-                                        blockmatch_vis[:rh, lw+20:lw+20+rw] = right_match_bgr
-                                        
-                                        # Add text labels
-                                        cv2.putText(blockmatch_vis, "Left Circle", (5, 20), 
-                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                                        cv2.putText(blockmatch_vis, "Right Match", (lw+25, 20), 
-                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                                        
-                                        # Add disparity and depth values
-                                        info_text = f"Disparity: {disparity_value:.2f} px"
-                                        cv2.putText(blockmatch_vis, info_text, (5, vis_h - 40), 
-                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                                        
-                                        depth_text = f"Depth: {depth_value:.3f} m"
-                                        cv2.putText(blockmatch_vis, depth_text, (5, vis_h - 15), 
-                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                                        
-                                        # Draw arrow showing offset
-                                        arrow_start = (lw + 10, vis_h // 2)
-                                        arrow_end = (lw + 10 + vis_data.get('best_offset', 0), vis_h // 2)
-                                        cv2.arrowedLine(blockmatch_vis, arrow_start, arrow_end, (0, 0, 255), 2)
-                                        
-                                        # Display in block matching window
-                                        cv2.imshow(blockmatch_window, blockmatch_vis)
+                                    
+                                    # Create combined visualization
+                                    vis_h = rh
+                                    vis_w = lw + rw + 30
+                                    blockmatch_vis = np.zeros((vis_h, vis_w, 3), dtype=np.uint8)
+                                    
+                                    # Place left circle on left
+                                    blockmatch_vis[:lh, :lw] = left_circle_bgr
+                                    
+                                    # Place right image with search visualization on right
+                                    blockmatch_vis[:rh, lw+30:lw+30+rw] = right_img_vis
+                                    
+                                    # Add text labels
+                                    cv2.putText(blockmatch_vis, "Left Circle", (5, 20), 
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                                    cv2.putText(blockmatch_vis, "Right Image (Search Area)", (lw+35, 20), 
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                                    
+                                    # Add legend
+                                    legend_y = 50
+                                    cv2.circle(blockmatch_vis, (lw+35, legend_y), 5, (255, 0, 0), -1)
+                                    cv2.putText(blockmatch_vis, "Search Start", (lw+50, legend_y+5), 
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                                    
+                                    legend_y += 25
+                                    cv2.circle(blockmatch_vis, (lw+35, legend_y), 5, (0, 255, 0), -1)
+                                    cv2.putText(blockmatch_vis, "Best Match", (lw+50, legend_y+5), 
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                                    
+                                    legend_y += 25
+                                    cv2.line(blockmatch_vis, (lw+30, legend_y), (lw+50, legend_y), (0, 0, 255), 2)
+                                    cv2.putText(blockmatch_vis, "Disparity", (lw+55, legend_y+5), 
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                                    
+                                    # Add disparity and depth values at bottom
+                                    info_y = vis_h - 50
+                                    info_text = f"Disparity: {disparity_value:.2f} px"
+                                    cv2.putText(blockmatch_vis, info_text, (5, info_y), 
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                                    
+                                    depth_text = f"Depth: {depth_value:.3f} m"
+                                    cv2.putText(blockmatch_vis, depth_text, (5, info_y + 30), 
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                                    
+                                    # Display in block matching window
+                                    cv2.imshow(blockmatch_window, blockmatch_vis)
                                 
                                 # Create a small depth overlay for visualization
                                 # Use bbox region for overlay
