@@ -284,8 +284,12 @@ class VisionYolo:
             self.img_input_buffer[0] = img_rgb.astype(np.uint8)
             img_input = self.img_input_buffer
             
-            # Run inference
-            outputs = self.rknn.inference([img_input])
+            # Run inference (with error handling to prevent segfaults)
+            try:
+                outputs = self.rknn.inference([img_input])
+            except Exception as e:
+                print(f"RKNN inference error: {e}")
+                return []
             
             # Process output
             detections = []
@@ -309,9 +313,13 @@ class VisionYolo:
                     det['bbox'] = [int(float(boxes[i, 0])), int(float(boxes[i, 1])), 
                                   int(float(boxes[i, 2])), int(float(boxes[i, 3]))]
             
-            # Update tracker if enabled
+            # Update tracker if enabled (with error handling to prevent segfaults)
             if self.tracker is not None and self.track_enabled:
-                detections = self.tracker.update(detections)
+                try:
+                    detections = self.tracker.update(detections)
+                except Exception as e:
+                    print(f"Tracker update error: {e}")
+                    # Return detections without tracking on error
             
             return detections
             
@@ -421,32 +429,86 @@ class VisionDepth:
         if self.stereo is None:
             return None
         
-        x1, y1, x2, y2 = bbox
-        h, w = left_rect.shape[:2]
-        
-        # Expand ROI and convert to integers for array slicing
-        x1 = int(max(0, x1 - self.roi_expansion))
-        y1 = int(max(0, y1 - self.roi_expansion))
-        x2 = int(min(w, x2 + self.roi_expansion))
-        y2 = int(min(h, y2 + self.roi_expansion))
-        
-        # Extract ROI (cropped region around object)
-        left_roi = left_rect[y1:y2, x1:x2]
-        right_roi = right_rect[y1:y2, x1:x2]
-        
-        if left_roi.size == 0 or right_roi.size == 0:
+        # Validate inputs to prevent segfaults
+        if left_rect is None or right_rect is None:
+            return None
+        if not hasattr(left_rect, 'shape') or not hasattr(right_rect, 'shape'):
+            return None
+        if len(left_rect.shape) < 2 or len(right_rect.shape) < 2:
+            return None
+        if left_rect.shape != right_rect.shape:
             return None
         
-        # Convert to grayscale
-        gray_left = cv2.cvtColor(left_roi, cv2.COLOR_BGR2GRAY) if len(left_roi.shape) == 3 else left_roi
-        gray_right = cv2.cvtColor(right_roi, cv2.COLOR_BGR2GRAY) if len(right_roi.shape) == 3 else right_roi
-        
-        # Compute disparity on cropped ROI only (much faster than full frame)
-        disparity = self.stereo.compute(gray_left, gray_right)
-        disparity = disparity.astype(np.float32) / 16.0
-        disparity[disparity < 0] = 0
-        
-        return disparity
+        try:
+            x1, y1, x2, y2 = bbox
+            h, w = left_rect.shape[:2]
+            
+            # Validate bbox coordinates
+            if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1:
+                return None
+            if x1 >= w or y1 >= h:
+                return None
+            
+            # Expand ROI and convert to integers for array slicing
+            x1 = int(max(0, x1 - self.roi_expansion))
+            y1 = int(max(0, y1 - self.roi_expansion))
+            x2 = int(min(w, x2 + self.roi_expansion))
+            y2 = int(min(h, y2 + self.roi_expansion))
+            
+            # Ensure valid ROI size
+            if x2 <= x1 or y2 <= y1:
+                return None
+            if (x2 - x1) < 5 or (y2 - y1) < 5:  # Minimum ROI size
+                return None
+            
+            # Extract ROI (cropped region around object) - validate bounds
+            if y2 > h or x2 > w or y1 < 0 or x1 < 0:
+                return None
+            
+            # Ensure arrays are contiguous before slicing (prevents segfaults)
+            if not left_rect.flags['C_CONTIGUOUS']:
+                left_rect = np.ascontiguousarray(left_rect)
+            if not right_rect.flags['C_CONTIGUOUS']:
+                right_rect = np.ascontiguousarray(right_rect)
+            
+            left_roi = left_rect[y1:y2, x1:x2]
+            right_roi = right_rect[y1:y2, x1:x2]
+            
+            if left_roi.size == 0 or right_roi.size == 0:
+                return None
+            if left_roi.shape != right_roi.shape:
+                return None
+            
+            # Convert to grayscale with validation
+            try:
+                if len(left_roi.shape) == 3:
+                    gray_left = cv2.cvtColor(left_roi, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray_left = left_roi.copy()
+                
+                if len(right_roi.shape) == 3:
+                    gray_right = cv2.cvtColor(right_roi, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray_right = right_roi.copy()
+                
+                if gray_left.shape != gray_right.shape:
+                    return None
+            except Exception as e:
+                return None
+            
+            # Compute disparity on cropped ROI only (much faster than full frame)
+            try:
+                disparity = self.stereo.compute(gray_left, gray_right)
+                if disparity is None:
+                    return None
+                disparity = disparity.astype(np.float32) / 16.0
+                disparity[disparity < 0] = 0
+            except Exception as e:
+                return None
+            
+            return disparity
+        except Exception as e:
+            return None
     
     def disparity_to_depth(self, disparity: np.ndarray, method: str = 'median') -> Optional[float]:
         """
@@ -1439,10 +1501,20 @@ class VISION:
                                 
                                 # Place ROI depth map into display overlay (scaled)
                                 if disp_roi_y2 > disp_roi_y1 and disp_roi_x2 > disp_roi_x1:
-                                    # Resize depth map to display size
-                                    roi_depth_display = cv2.resize(roi_depth_map, (disp_roi_x2 - disp_roi_x1, disp_roi_y2 - disp_roi_y1))
-                                    depth_overlay[disp_roi_y1:disp_roi_y2, disp_roi_x1:disp_roi_x2] = roi_depth_display
-                                    del roi_depth_display  # Cleanup immediately
+                                    # Validate display overlay bounds to prevent segfaults
+                                    if (disp_roi_y1 >= 0 and disp_roi_y2 <= depth_overlay.shape[0] and
+                                        disp_roi_x1 >= 0 and disp_roi_x2 <= depth_overlay.shape[1]):
+                                        try:
+                                            # Resize depth map to display size
+                                            target_size = (disp_roi_x2 - disp_roi_x1, disp_roi_y2 - disp_roi_y1)
+                                            if target_size[0] > 0 and target_size[1] > 0:
+                                                roi_depth_display = cv2.resize(roi_depth_map, target_size)
+                                                if roi_depth_display.shape[:2] == (disp_roi_y2 - disp_roi_y1, disp_roi_x2 - disp_roi_x1):
+                                                    depth_overlay[disp_roi_y1:disp_roi_y2, disp_roi_x1:disp_roi_x2] = roi_depth_display
+                                                del roi_depth_display  # Cleanup immediately
+                                        except Exception as e:
+                                            if self.debug_mode:
+                                                print(f"{self.name}: Error resizing/placing ROI depth: {e}")
                         except Exception as e:
                             if self.debug_mode:
                                 print(f"{self.name}: Error computing ROI disparity: {e}")
@@ -1454,7 +1526,10 @@ class VISION:
                 
                 # Overlay depth visualization only in ROI regions
                 # Only update overlay if we have new detections (prevents flickering)
-                if detections and np.any(depth_overlay > 0):
+                # Validate depth_overlay before use to prevent segfaults
+                if (detections and depth_overlay is not None and 
+                    hasattr(depth_overlay, 'shape') and len(depth_overlay.shape) >= 2 and
+                    np.any(depth_overlay > 0)):
                     # Normalize depth map for visualization
                     valid_mask = depth_overlay > 0
                     if np.any(valid_mask):
@@ -1486,7 +1561,8 @@ class VISION:
                         
                         display_frame[mask_3d] = (display_frame[mask_3d] * 0.5 + 
                                                   depth_colored[mask_3d] * 0.5).astype(np.uint8)
-                elif depth_overlay is not None and np.any(depth_overlay > 0):
+                elif (depth_overlay is not None and hasattr(depth_overlay, 'shape') and 
+                      len(depth_overlay.shape) >= 2 and np.any(depth_overlay > 0)):
                     # Keep previous overlay visible even if no new detections (smooth transition)
                     valid_mask = depth_overlay > 0
                     if np.any(valid_mask):
@@ -1688,8 +1764,11 @@ class VISION:
                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                 
                 # Display the frame (limit update rate to reduce memory pressure)
+                # Validate frame before display to prevent segfaults
                 try:
-                    cv2.imshow(window_name, display_frame)
+                    if display_frame is not None and hasattr(display_frame, 'shape') and len(display_frame.shape) >= 2:
+                        if display_frame.size > 0:
+                            cv2.imshow(window_name, display_frame)
                 except Exception as e:
                     if self.debug_mode:
                         print(f"{self.name}: imshow error: {e}")
@@ -1703,15 +1782,19 @@ class VISION:
                 cv2.putText(trackbar_img, "Press 'q' to quit", (10, 90), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                 try:
-                    cv2.imshow(trackbar_window, trackbar_img)
-                except:
-                    pass
+                    if trackbar_img is not None and hasattr(trackbar_img, 'shape') and trackbar_img.size > 0:
+                        cv2.imshow(trackbar_window, trackbar_img)
+                except Exception as e:
+                    if self.debug_mode:
+                        print(f"{self.name}: trackbar imshow error: {e}")
                 
                 # Show radar map
                 try:
-                    cv2.imshow(radar_window, radar_img)
-                except:
-                    pass
+                    if radar_img is not None and hasattr(radar_img, 'shape') and radar_img.size > 0:
+                        cv2.imshow(radar_window, radar_img)
+                except Exception as e:
+                    if self.debug_mode:
+                        print(f"{self.name}: radar imshow error: {e}")
                 
                 # Check for quit key or save key
                 key = cv2.waitKey(1) & 0xFF
