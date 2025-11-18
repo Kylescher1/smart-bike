@@ -835,6 +835,10 @@ class VISION:
         self.ema_alpha = getattr(self, 'ema_alpha', 0.3)
         self.roi_expansion = getattr(self, 'roi_expansion', 10)
         
+        # Custom block matcher parameters
+        self.block_match_circle_radius = getattr(self, 'block_match_circle_radius', 15)
+        self.block_match_search_range = getattr(self, 'block_match_search_range', 200)
+        
         # Q matrix
         self.Q = getattr(self, 'Q', None)
         
@@ -1403,7 +1407,8 @@ class VISION:
         """
         
         def custom_block_matching(left_img: np.ndarray, right_img: np.ndarray, 
-                                  bbox: List[int], circle_radius: int = 15) -> Tuple[Optional[float], Optional[Dict]]:
+                                  bbox: List[int], circle_radius: int = 15, 
+                                  search_range_max: int = 200) -> Tuple[Optional[float], Optional[Dict]]:
             """
             Custom block matching algorithm for depth estimation.
             
@@ -1488,7 +1493,7 @@ class VISION:
             
             # Search range: objects in right image appear shifted left (negative disparity)
             # Search from center_x to left (negative direction)
-            search_range = min(200, center_x - actual_radius)  # Limit search range
+            search_range = min(search_range_max, center_x - actual_radius)  # Limit search range
             if search_range < 10:
                 return None, None
             
@@ -1666,6 +1671,19 @@ class VISION:
         cv2.createTrackbar('FOV H (deg)', trackbar_window, fov_h_val, 180, update_fov_h)
         cv2.createTrackbar('FOV V (deg)', trackbar_window, fov_v_val, 180, update_fov_v)
         
+        # Create trackbars for custom block matcher parameters
+        block_match_radius_val = getattr(self, 'block_match_circle_radius', 15)
+        block_match_search_val = getattr(self, 'block_match_search_range', 200)
+        
+        def update_block_radius(v):
+            self.block_match_circle_radius = v
+        
+        def update_block_search(v):
+            self.block_match_search_range = v
+        
+        cv2.createTrackbar('Block Radius', trackbar_window, block_match_radius_val, 50, update_block_radius)
+        cv2.createTrackbar('Search Range', trackbar_window, block_match_search_val, 500, update_block_search)
+        
         # Pre-allocate reusable buffers to avoid memory allocation every frame
         radar_size = 400
         radar_img = np.zeros((radar_size, radar_size, 3), dtype=np.uint8)
@@ -1716,6 +1734,9 @@ class VISION:
                     else:
                         detections = []
                 # Don't call YOLO again - saves memory and CPU
+                
+                # Store disparity values computed in debug mode for radar visualization
+                debug_disparity_map = {}  # track_id -> disparity
                 
                 # Memory check (periodic)
                 if self.memory_debug:
@@ -1835,7 +1856,14 @@ class VISION:
                                 continue
                             
                             # Use custom block matching instead of SGBM
-                            disparity_value, vis_data = custom_block_matching(orig_left, orig_right, bbox_int, circle_radius=15)
+                            # Use instance variables for parameters
+                            circle_radius = getattr(self, 'block_match_circle_radius', 15)
+                            search_range_max = getattr(self, 'block_match_search_range', 200)
+                            disparity_value, vis_data = custom_block_matching(
+                                orig_left, orig_right, bbox_int, 
+                                circle_radius=circle_radius,
+                                search_range_max=search_range_max
+                            )
                             
                             if disparity_value is not None and disparity_value > 0:
                                 # Calculate depth from disparity
@@ -1860,7 +1888,8 @@ class VISION:
                                         right_img_vis = orig_right.copy()
                                     
                                     # Draw search area (where we searched)
-                                    search_start_x = max(0, vis_center_x - 200)  # Approximate search range
+                                    search_range_vis = getattr(self, 'block_match_search_range', 200)
+                                    search_start_x = max(0, vis_center_x - search_range_vis)
                                     search_end_x = vis_center_x
                                     cv2.rectangle(right_img_vis, 
                                                  (search_start_x, max(0, vis_center_y - radius - 50)),
@@ -1995,6 +2024,11 @@ class VISION:
                                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
                                     cv2.putText(display_frame, depth_text, (text_x, text_y + 20), 
                                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                                
+                                # Store disparity for radar visualization
+                                track_id = det.get('track_id')
+                                if track_id is not None:
+                                    debug_disparity_map[track_id] = disparity_value
                         except Exception as e:
                             if self.debug_mode:
                                 print(f"{self.name}: Error computing ROI disparity: {e}")
@@ -2178,15 +2212,15 @@ class VISION:
                 # Create radar map visualization (reuse buffer)
                 radar_img.fill(0)  # Clear previous frame
                 center_x, center_y = radar_size // 2, radar_size // 2
-                max_range = 10.0  # Maximum depth in meters to display
+                max_disparity = 200.0  # Maximum disparity in pixels to display
                 
                 # Draw radar grid (concentric circles and angle lines)
                 for r in range(1, 6):  # 5 range circles
                     radius = int((r / 5.0) * (radar_size // 2 - 20))
                     cv2.circle(radar_img, (center_x, center_y), radius, (50, 50, 50), 1)
-                    # Draw range labels
-                    range_text = f"{r * max_range / 5:.1f}m"
-                    cv2.putText(radar_img, range_text, (center_x + radius - 30, center_y - radius + 15),
+                    # Draw disparity labels
+                    disparity_text = f"{r * max_disparity / 5:.0f}px"
+                    cv2.putText(radar_img, disparity_text, (center_x + radius - 30, center_y - radius + 15),
                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
                 
                 # Draw angle lines (0°, 90°, 180°, 270°)
@@ -2204,25 +2238,40 @@ class VISION:
                 # Draw center point (camera position)
                 cv2.circle(radar_img, (center_x, center_y), 5, (0, 255, 255), -1)
                 
-                # Plot objects on radar map
+                # Plot objects on radar map using disparity
                 if objects:
                     for obj in objects:
-                        depth = obj.get('depth', 0.0)
+                        # Get disparity if available, otherwise calculate from depth
+                        disparity = obj.get('disparity', None)
+                        if disparity is None:
+                            # Try to get from debug disparity map first (from custom block matching)
+                            obj_id = obj.get('id', -1)
+                            if obj_id in debug_disparity_map:
+                                disparity = debug_disparity_map[obj_id]
+                            else:
+                                # Calculate disparity from depth if available
+                                depth = obj.get('depth', 0.0)
+                                if depth > 0 and self.focal_length_px > 0 and self.baseline > 0:
+                                    disparity = (self.focal_length_px * self.baseline) / depth
+                                else:
+                                    continue  # Skip if no valid disparity or depth
+                        
                         theta = obj.get('theta', 0.0)  # Horizontal angle in degrees
                         obj_type = obj.get('type', 'unknown')
                         obj_id = obj.get('id', -1)
                         confidence = obj.get('confidence', 0.0)
                         
-                        if depth > 0 and depth <= max_range:
-                            # Convert polar coordinates (theta, depth) to cartesian (x, y)
+                        if disparity > 0 and disparity <= max_disparity:
+                            # Convert polar coordinates (theta, disparity) to cartesian (x, y)
                             # Note: theta is horizontal angle, positive = right, negative = left
                             # In radar view: 0° = right, 90° = down, 180° = left, 270° = up
                             # Camera view: theta=0 is center, positive = right, negative = left
                             # Convert camera theta to radar angle (camera right = radar 0°)
                             radar_angle_rad = np.radians(theta)
                             
-                            # Scale depth to radar size
-                            radius = int((depth / max_range) * (radar_size // 2 - 20))
+                            # Scale disparity to radar size (larger disparity = closer = larger radius)
+                            # Invert so closer objects (higher disparity) are further out
+                            radius = int((disparity / max_disparity) * (radar_size // 2 - 20))
                             
                             # Calculate position
                             obj_x = int(center_x + radius * np.cos(radar_angle_rad))
@@ -2254,13 +2303,13 @@ class VISION:
                             cv2.putText(radar_img, label, (obj_x + 8, obj_y - 8),
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
                             
-                            # Draw depth text below
-                            depth_text = f"{depth:.1f}m"
-                            cv2.putText(radar_img, depth_text, (obj_x - 15, obj_y + 20),
+                            # Draw disparity text below
+                            disparity_text = f"{disparity:.1f}px"
+                            cv2.putText(radar_img, disparity_text, (obj_x - 20, obj_y + 20),
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
                 
                 # Add title
-                cv2.putText(radar_img, "Radar Map (Top View)", (10, 25),
+                cv2.putText(radar_img, "Radar Map (Disparity)", (10, 25),
                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                 cv2.putText(radar_img, f"Objects: {len(objects)}", (10, radar_size - 10),
                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
