@@ -579,8 +579,8 @@ class VISION:
         # Q matrix
         self.Q = getattr(self, 'Q', None)
         
-        # Buffer configuration
-        self.buffer_size = getattr(self, 'buffer_size', 10)
+        # Buffer configuration (reduced for memory efficiency)
+        self.buffer_size = getattr(self, 'buffer_size', 3)
         
         # Initialize components
         self.camera: Optional[VisionCamera] = None
@@ -610,7 +610,8 @@ class VISION:
         
         # Console logging state
         self.last_print_time = 0.0
-        self.print_interval = 0.5  # Print every 0.5 seconds
+        self.print_interval = 2.0  # Print every 2 seconds (reduced frequency)
+        self.console_logging = True  # Can be disabled to save memory
     
     @property
     def left_camera(self) -> Optional[Camera]:
@@ -777,11 +778,11 @@ class VISION:
                         }
                         objects.append(obj)
                 
-                # Create buffer entry
+                # Create buffer entry (minimal data to save memory)
                 buffer_entry = {
                     'timestamp': time.time(),
                     'objects': objects,
-                    'raw_yolo': detections,  # Optional debug info
+                    # Don't store raw_yolo in buffer to save memory - only available in debug mode
                 }
                 
                 # Update buffer (thread-safe)
@@ -1045,6 +1046,7 @@ class VISION:
             try:
                 cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
                 cv2.namedWindow(trackbar_window, cv2.WINDOW_AUTOSIZE)
+                cv2.namedWindow(radar_window, cv2.WINDOW_AUTOSIZE)
             except Exception as e2:
                 print(f"{self.name}: Failed to create window: {e2}")
                 print(f"{self.name}: Visual debug mode may not work properly")
@@ -1122,6 +1124,12 @@ class VISION:
         cv2.createTrackbar('EMA Alpha (x100)', trackbar_window, ema_val, 100, update_ema)
         cv2.createTrackbar('ROI Expand', trackbar_window, roi_exp_val, 50, update_roi)
         
+        # Pre-allocate reusable buffers to avoid memory allocation every frame
+        radar_size = 400
+        radar_img = np.zeros((radar_size, radar_size, 3), dtype=np.uint8)
+        trackbar_img = np.zeros((400, 300, 3), dtype=np.uint8)
+        depth_overlay_buffer = None  # Will be allocated when needed
+        
         try:
             while True:
                 # Get latest frames and data
@@ -1134,21 +1142,54 @@ class VISION:
                     continue
                 
                 # Get detections and objects
-                detections = latest.get('raw_yolo', [])
+                # Note: raw_yolo not stored in buffer to save memory, get from latest read if available
+                detections = []  # Will be populated from YOLO if needed
                 objects = latest.get('objects', [])
                 
-                # Start with left frame
-                display_frame = left_frame.copy()
+                # Get detections from YOLO directly if available (for visualization only)
+                if self.yolo and left_frame is not None:
+                    try:
+                        detections = self.yolo.detect(left_frame)
+                    except:
+                        detections = []
                 
-                # Initialize depth overlay (will only be filled for detected objects)
+                # Print to console (rate limited, simplified output)
+                if self.console_logging:
+                    current_time = time.time()
+                    if current_time - self.last_print_time >= self.print_interval:
+                        self.last_print_time = current_time
+                        if detections:
+                            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Detections: {len(detections)}")
+                            for i, det in enumerate(detections[:5]):  # Limit to 5 detections
+                                class_name = det.get('class_name', 'unknown')
+                                score = det.get('score', 0.0)
+                                track_id = det.get('track_id')
+                                print(f"  [{i}] {class_name} conf:{score:.2f} ID:{track_id}")
+                        
+                        if objects:
+                            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Objects: {len(objects)}")
+                            for obj in objects[:5]:  # Limit to 5 objects
+                                obj_id = obj.get('id', -1)
+                                obj_type = obj.get('type', 'unknown')
+                                depth = obj.get('depth', 0.0)
+                                theta = obj.get('theta', 0.0)
+                                print(f"  ID:{obj_id} {obj_type} depth:{depth:.2f}m θ:{theta:.1f}°")
+                
+                # Start with left frame (use view if possible, but need copy for drawing)
                 h, w = left_frame.shape[:2]
+                display_frame = left_frame.copy()  # Need copy for drawing operations
+                
+                # Initialize depth overlay (reuse buffer if size matches)
                 depth_overlay = None
+                if depth_overlay_buffer is None or depth_overlay_buffer.shape != (h, w):
+                    depth_overlay_buffer = np.zeros((h, w), dtype=np.float32)
                 
                 # Only compute ROI-based disparity for detected objects (not full frame)
                 # This matches production behavior - SGBM only processes cropped regions
                 if detections and right_frame is not None and self.depth is not None and self.depth.stereo is not None:
-                    # Create a depth overlay map (initially empty)
-                    depth_overlay = np.zeros((h, w), dtype=np.float32)
+                    # Reuse depth overlay buffer (clear it first)
+                    depth_overlay_buffer.fill(0)
+                    depth_overlay = depth_overlay_buffer
                     
                     # Compute ROI-based disparity for each detected object
                     for det in detections:
@@ -1281,11 +1322,101 @@ class VISION:
                 if self.sgbm_needs_reinit and self.depth is not None:
                     self._reinit_sgbm()
                 
+                # Create radar map visualization (reuse buffer)
+                radar_img.fill(0)  # Clear previous frame
+                center_x, center_y = radar_size // 2, radar_size // 2
+                max_range = 10.0  # Maximum depth in meters to display
+                
+                # Draw radar grid (concentric circles and angle lines)
+                for r in range(1, 6):  # 5 range circles
+                    radius = int((r / 5.0) * (radar_size // 2 - 20))
+                    cv2.circle(radar_img, (center_x, center_y), radius, (50, 50, 50), 1)
+                    # Draw range labels
+                    range_text = f"{r * max_range / 5:.1f}m"
+                    cv2.putText(radar_img, range_text, (center_x + radius - 30, center_y - radius + 15),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+                
+                # Draw angle lines (0°, 90°, 180°, 270°)
+                for angle_deg in [0, 90, 180, 270]:
+                    angle_rad = np.radians(angle_deg)
+                    end_x = int(center_x + (radar_size // 2 - 10) * np.cos(angle_rad))
+                    end_y = int(center_y + (radar_size // 2 - 10) * np.sin(angle_rad))
+                    cv2.line(radar_img, (center_x, center_y), (end_x, end_y), (50, 50, 50), 1)
+                    # Draw angle labels
+                    label_x = int(center_x + (radar_size // 2 - 5) * np.cos(angle_rad))
+                    label_y = int(center_y + (radar_size // 2 - 5) * np.sin(angle_rad))
+                    cv2.putText(radar_img, f"{angle_deg}°", (label_x - 10, label_y + 5),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+                
+                # Draw center point (camera position)
+                cv2.circle(radar_img, (center_x, center_y), 5, (0, 255, 255), -1)
+                
+                # Plot objects on radar map
+                if objects:
+                    for obj in objects:
+                        depth = obj.get('depth', 0.0)
+                        theta = obj.get('theta', 0.0)  # Horizontal angle in degrees
+                        obj_type = obj.get('type', 'unknown')
+                        obj_id = obj.get('id', -1)
+                        confidence = obj.get('confidence', 0.0)
+                        
+                        if depth > 0 and depth <= max_range:
+                            # Convert polar coordinates (theta, depth) to cartesian (x, y)
+                            # Note: theta is horizontal angle, positive = right, negative = left
+                            # In radar view: 0° = right, 90° = down, 180° = left, 270° = up
+                            # Camera view: theta=0 is center, positive = right, negative = left
+                            # Convert camera theta to radar angle (camera right = radar 0°)
+                            radar_angle_rad = np.radians(theta)
+                            
+                            # Scale depth to radar size
+                            radius = int((depth / max_range) * (radar_size // 2 - 20))
+                            
+                            # Calculate position
+                            obj_x = int(center_x + radius * np.cos(radar_angle_rad))
+                            obj_y = int(center_y + radius * np.sin(radar_angle_rad))
+                            
+                            # Color based on object type (simple hash)
+                            type_hash = hash(obj_type) % 6
+                            colors = [
+                                (0, 255, 0),    # Green
+                                (255, 0, 0),    # Blue
+                                (0, 0, 255),    # Red
+                                (255, 255, 0),  # Cyan
+                                (255, 0, 255),  # Magenta
+                                (0, 255, 255),  # Yellow
+                            ]
+                            color = colors[abs(type_hash)]
+                            
+                            # Draw object as circle
+                            cv2.circle(radar_img, (obj_x, obj_y), 6, color, -1)
+                            cv2.circle(radar_img, (obj_x, obj_y), 6, (255, 255, 255), 1)
+                            
+                            # Draw line from center to object
+                            cv2.line(radar_img, (center_x, center_y), (obj_x, obj_y), color, 1)
+                            
+                            # Draw label
+                            label = f"{obj_type[:3]}"
+                            if obj_id >= 0:
+                                label += f":{obj_id}"
+                            cv2.putText(radar_img, label, (obj_x + 8, obj_y - 8),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                            
+                            # Draw depth text below
+                            depth_text = f"{depth:.1f}m"
+                            cv2.putText(radar_img, depth_text, (obj_x - 15, obj_y + 20),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+                
+                # Add title
+                cv2.putText(radar_img, "Radar Map (Top View)", (10, 25),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.putText(radar_img, f"Objects: {len(objects)}", (10, radar_size - 10),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                
                 # Display the frame
                 cv2.imshow(window_name, display_frame)
                 
-                # Show trackbar window (small dummy image)
-                trackbar_img = np.zeros((400, 300, 3), dtype=np.uint8)
+                # Show trackbar window (reuse buffer)
+                trackbar_img.fill(0)  # Clear previous frame
                 cv2.putText(trackbar_img, "Parameter Tuning", (10, 30), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 cv2.putText(trackbar_img, "Press 's' to save", (10, 60), 
@@ -1293,6 +1424,9 @@ class VISION:
                 cv2.putText(trackbar_img, "Press 'q' to quit", (10, 90), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                 cv2.imshow(trackbar_window, trackbar_img)
+                
+                # Show radar map
+                cv2.imshow(radar_window, radar_img)
                 
                 # Check for quit key or save key
                 key = cv2.waitKey(1) & 0xFF
@@ -1312,6 +1446,7 @@ class VISION:
         finally:
             cv2.destroyWindow(window_name)
             cv2.destroyWindow(trackbar_window)
+            cv2.destroyWindow(radar_window)
             print(f"{self.name}: Visual debug mode ended")
     
     def __repr__(self):
