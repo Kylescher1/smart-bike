@@ -1043,16 +1043,16 @@ class VISION:
         
         # Estimate buffer size (separate lock to avoid nested locks)
         with self.buffer_lock:
-                buffer_size_mb = sum(
-                    sys.getsizeof(entry) + sum(sys.getsizeof(obj) for obj in entry.get('objects', []))
-                    for entry in self.data_buffer
-                ) / 1024 / 1024
-            
-            return {
-                'estimated_mb': total_size + buffer_size_mb,
-                'frames_mb': total_size,
-                'buffer_mb': buffer_size_mb,
-            }
+            buffer_size_mb = sum(
+                sys.getsizeof(entry) + sum(sys.getsizeof(obj) for obj in entry.get('objects', []))
+                for entry in self.data_buffer
+            ) / 1024 / 1024
+        
+        return {
+            'estimated_mb': total_size + buffer_size_mb,
+            'frames_mb': total_size,
+            'buffer_mb': buffer_size_mb,
+        }
     
     def _print_memory_stats(self, context: str = ""):
         """Print memory statistics."""
