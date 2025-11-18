@@ -297,11 +297,8 @@ def nms(boxes, scores, iou_threshold=0.45):
         w = np.maximum(0.0, xx2 - xx1)
         h = np.maximum(0.0, yy2 - yy1)
         inter = w * h
-        # Calculate IoU: intersection / (area1 + area2 - intersection)
-        area1 = (boxes[i, 2] - boxes[i, 0]) * (boxes[i, 3] - boxes[i, 1])
-        area2 = (boxes[order[1:], 2] - boxes[order[1:], 0]) * (boxes[order[1:], 3] - boxes[order[1:], 1])
-        union = area1 + area2 - inter
-        iou = inter / (union + 1e-6)  # Add small epsilon to avoid division by zero
+        iou = inter / (boxes[i, 2] - boxes[i, 0]) * (boxes[i, 3] - boxes[i, 1]) + \
+              (boxes[order[1:], 2] - boxes[order[1:], 0]) * (boxes[order[1:], 3] - boxes[order[1:], 1]) - inter
         inds = np.where(iou <= iou_threshold)[0]
         order = order[inds + 1]
     return np.array(keep)
