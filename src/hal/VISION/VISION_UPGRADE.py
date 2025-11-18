@@ -247,71 +247,131 @@ def process_seg_output(output, detections, img_shape=(640, 640)):
 
 
 # ============================================================================
-# Camera Class
+# Streaming Camera Class
 # ============================================================================
 
 class VisionCamera:
     """
-    Handles capture from left and right cameras.
-    Applies rectification and undistortion using calibration data.
+    Streaming camera that continuously captures frames in background thread.
+    Feeds video stream directly to YOLO without blocking.
+    Only uses left camera for YOLO (right camera optional for stereo/depth).
     """
     
-    def __init__(self, left_config: Dict, right_config: Dict):
+    def __init__(self, left_config: Dict, right_config: Optional[Dict] = None):
         """
-        Initialize camera system.
+        Initialize streaming camera system.
         
         Args:
             left_config: Configuration dict for left camera with keys:
                 - port: Camera port/index
-                - map_x: Rectification map X
-                - map_y: Rectification map Y
-            right_config: Configuration dict for right camera (same structure)
+                - map_x: Rectification map X (optional)
+                - map_y: Rectification map Y (optional)
+            right_config: Optional right camera config (for stereo/depth, not used for YOLO)
         """
         self.left_config = left_config
         self.right_config = right_config
         
+        # Camera objects
         self.left_camera: Optional[Camera] = None
         self.right_camera: Optional[Camera] = None
         
-        # Extract calibration maps (optional - needed for rectification, not for calibration)
+        # Extract calibration maps (optional)
         self.left_map_x = left_config.get('map_x')
         self.left_map_y = left_config.get('map_y')
-        self.right_map_x = right_config.get('map_x')
-        self.right_map_y = right_config.get('map_y')
+        self.right_map_x = right_config.get('map_x') if right_config else None
+        self.right_map_y = right_config.get('map_y') if right_config else None
         
-        # Check if maps are available (for calibration mode, maps may not exist yet)
+        # Check if maps are available
         self.has_maps = (
-            self.left_map_x is not None and self.left_map_y is not None and
-            self.right_map_x is not None and self.right_map_y is not None
+            self.left_map_x is not None and self.left_map_y is not None
         )
         
-        if not self.has_maps:
-            print("⚠️ Calibration maps not provided - will return raw frames (calibration mode)")
+        # Streaming state
+        self.streaming = False
+        self.stream_thread: Optional[threading.Thread] = None
+        self.stop_event = threading.Event()
+        
+        # Latest frame buffers (thread-safe)
+        self.latest_left_frame: Optional[np.ndarray] = None
+        self.latest_right_frame: Optional[np.ndarray] = None
+        self.frame_lock = threading.Lock()
+        self.frame_ready_event = threading.Event()
+        
+        # Pre-allocated remap buffers (reused for performance)
+        self.left_map_x_scaled = None
+        self.left_map_y_scaled = None
+        self.right_map_x_scaled = None
+        self.right_map_y_scaled = None
+        self.map_lock = threading.Lock()
     
     def start(self):
-        """Open cameras."""
-        if self.left_camera is not None:
+        """Start streaming cameras in background thread."""
+        if self.streaming:
             return
         
+        # Open left camera (required for YOLO)
         self.left_camera = Camera(self.left_config['port'], CAMERA_CONFIG)
-        self.right_camera = Camera(self.right_config['port'], CAMERA_CONFIG)
-        
         try:
             self.left_camera.open()
             print(f"✅ Left camera opened on port {self.left_config['port']}")
         except Exception as e:
             raise RuntimeError(f"Failed to open left camera: {e}")
         
-        try:
-            self.right_camera.open()
-            print(f"✅ Right camera opened on port {self.right_config['port']}")
-        except Exception as e:
-            if self.left_camera:
-                self.left_camera.close()
-            raise RuntimeError(f"Failed to open right camera: {e}")
+        # Open right camera (optional, for stereo/depth)
+        if self.right_config:
+            self.right_camera = Camera(self.right_config['port'], CAMERA_CONFIG)
+            try:
+                self.right_camera.open()
+                print(f"✅ Right camera opened on port {self.right_config['port']}")
+            except Exception as e:
+                print(f"⚠️ Failed to open right camera: {e} (continuing with left only)")
+                self.right_camera = None
+        
+        # Pre-scale maps if available (one-time setup for performance)
+        if self.has_maps and self.left_camera:
+            # Get frame size from camera
+            test_frame = self.left_camera.read_frame()
+            if test_frame is not None:
+                h_raw, w_raw = test_frame.shape[:2]
+                h_map, w_map = self.left_map_x.shape[:2]
+                
+                if (h_raw, w_raw) != (h_map, w_map):
+                    # Scale maps once, reuse for all frames
+                    scale_x = w_raw / w_map
+                    scale_y = h_raw / h_map
+                    self.left_map_x_scaled = cv2.resize(self.left_map_x, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_x
+                    self.left_map_y_scaled = cv2.resize(self.left_map_y, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_y
+                else:
+                    self.left_map_x_scaled = self.left_map_x
+                    self.left_map_y_scaled = self.left_map_y
+                
+                # Scale right maps if right camera available
+                if self.right_camera and self.right_map_x is not None:
+                    if (h_raw, w_raw) != (h_map, w_map):
+                        self.right_map_x_scaled = cv2.resize(self.right_map_x, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_x
+                        self.right_map_y_scaled = cv2.resize(self.right_map_y, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_y
+                    else:
+                        self.right_map_x_scaled = self.right_map_x
+                        self.right_map_y_scaled = self.right_map_y
+        
+        # Start streaming thread
+        self.stop_event.clear()
+        self.streaming = True
+        self.stream_thread = threading.Thread(target=self._stream_loop, daemon=True)
+        self.stream_thread.start()
+        print("✅ Camera streaming started")
     
     def stop(self):
-        """Close cameras."""
+        """Stop streaming and close cameras."""
+        if not self.streaming:
+            return
+        
+        self.streaming = False
+        self.stop_event.set()
+        
+        if self.stream_thread and self.stream_thread.is_alive():
+            self.stream_thread.join(timeout=2.0)
+        
         if self.left_camera:
             self.left_camera.close()
             self.left_camera = None
@@ -319,102 +379,92 @@ class VisionCamera:
         if self.right_camera:
             self.right_camera.close()
             self.right_camera = None
+        
+        with self.frame_lock:
+            self.latest_left_frame = None
+            self.latest_right_frame = None
     
-    def read_frames(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    def _stream_loop(self):
+        """Background thread that continuously captures frames."""
+        while not self.stop_event.is_set():
+            try:
+                # Read left frame (for YOLO)
+                if self.left_camera:
+                    left_raw = self.left_camera.read_frame()
+                    if left_raw is not None:
+                        # Apply rectification if maps available
+                        if self.has_maps and self.left_map_x_scaled is not None:
+                            with self.map_lock:
+                                left_rect = cv2.remap(left_raw, self.left_map_x_scaled, self.left_map_y_scaled, cv2.INTER_LINEAR)
+                        else:
+                            left_rect = left_raw
+                        
+                        # Update latest frame (thread-safe)
+                        with self.frame_lock:
+                            self.latest_left_frame = left_rect.copy()
+                        self.frame_ready_event.set()
+                
+                # Read right frame (optional, for stereo/depth)
+                if self.right_camera:
+                    right_raw = self.right_camera.read_frame()
+                    if right_raw is not None:
+                        # Apply rectification if maps available
+                        if self.has_maps and self.right_map_x_scaled is not None:
+                            with self.map_lock:
+                                right_rect = cv2.remap(right_raw, self.right_map_x_scaled, self.right_map_y_scaled, cv2.INTER_LINEAR)
+                        else:
+                            right_rect = right_raw
+                        
+                        # Update latest frame (thread-safe)
+                        with self.frame_lock:
+                            self.latest_right_frame = right_rect.copy()
+                
+                # Small sleep to prevent CPU spinning (camera buffer handles timing)
+                time.sleep(0.001)  # 1ms sleep
+                
+            except Exception as e:
+                if self.streaming:  # Only print if still supposed to be streaming
+                    print(f"⚠️ Camera stream error: {e}")
+                time.sleep(0.01)
+    
+    def get_latest_frame(self) -> Optional[np.ndarray]:
         """
-        Read and rectify frames from both cameras.
+        Get latest left frame (for YOLO).
+        Non-blocking - returns immediately with latest frame or None.
         
         Returns:
-            Tuple of (left_rectified, right_rectified) frames, or raw frames if maps not available, or (None, None) on error
+            Latest left frame (rectified if maps available), or None if not ready
         """
-        if self.left_camera is None or self.right_camera is None:
-            return None, None
+        with self.frame_lock:
+            return self.latest_left_frame.copy() if self.latest_left_frame is not None else None
+    
+    def get_latest_frames(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        Get latest frames from both cameras.
+        Non-blocking - returns immediately with latest frames or None.
         
-        # Initialize timing stats if not exists
-        if not hasattr(self, '_capture_timing_stats'):
-            self._capture_timing_stats = {
-                'left_read': [],
-                'right_read': [],
-                'left_remap': [],
-                'right_remap': [],
-                'total': []
-            }
-            self._capture_timing_count = 0
+        Returns:
+            Tuple of (left_frame, right_frame), or (None, None) if not ready
+        """
+        with self.frame_lock:
+            left = self.latest_left_frame.copy() if self.latest_left_frame is not None else None
+            right = self.latest_right_frame.copy() if self.latest_right_frame is not None else None
+            return left, right
+    
+    def wait_for_frame(self, timeout: float = 1.0) -> Optional[np.ndarray]:
+        """
+        Wait for next frame (blocking).
         
-        total_start = time.time()
+        Args:
+            timeout: Maximum time to wait in seconds
         
-        # Read raw frames
-        left_read_start = time.time()
-        left_raw = self.left_camera.read_frame()
-        left_read_time = (time.time() - left_read_start) * 1000  # ms
-        
-        right_read_start = time.time()
-        right_raw = self.right_camera.read_frame()
-        right_read_time = (time.time() - right_read_start) * 1000  # ms
-        
-        if left_raw is None or right_raw is None:
-            return None, None
-        
-        # Apply rectification only if maps are available
-        if self.has_maps:
-            left_remap_start = time.time()
-            
-            # Scale maps if input resolution doesn't match map resolution
-            h_raw, w_raw = left_raw.shape[:2]
-            h_map, w_map = self.left_map_x.shape[:2]
-            
-            if (h_raw, w_raw) != (h_map, w_map):
-                # Scale maps to match input resolution
-                scale_x = w_raw / w_map
-                scale_y = h_raw / h_map
-                left_map_x_scaled = cv2.resize(self.left_map_x, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_x
-                left_map_y_scaled = cv2.resize(self.left_map_y, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_y
-                right_map_x_scaled = cv2.resize(self.right_map_x, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_x
-                right_map_y_scaled = cv2.resize(self.right_map_y, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_y
-            else:
-                # Maps already match resolution
-                left_map_x_scaled = self.left_map_x
-                left_map_y_scaled = self.left_map_y
-                right_map_x_scaled = self.right_map_x
-                right_map_y_scaled = self.right_map_y
-            
-            left_rect = cv2.remap(left_raw, left_map_x_scaled, left_map_y_scaled, cv2.INTER_LINEAR)
-            left_remap_time = (time.time() - left_remap_start) * 1000  # ms
-            
-            right_remap_start = time.time()
-            right_rect = cv2.remap(right_raw, right_map_x_scaled, right_map_y_scaled, cv2.INTER_LINEAR)
-            right_remap_time = (time.time() - right_remap_start) * 1000  # ms
-            
-            total_time = (time.time() - total_start) * 1000  # ms
-            
-            # Store timing stats
-            self._capture_timing_stats['left_read'].append(left_read_time)
-            self._capture_timing_stats['right_read'].append(right_read_time)
-            self._capture_timing_stats['left_remap'].append(left_remap_time)
-            self._capture_timing_stats['right_remap'].append(right_remap_time)
-            self._capture_timing_stats['total'].append(total_time)
-            self._capture_timing_count += 1
-            
-            # Print timing summary every 60 frames
-            if self._capture_timing_count % 60 == 0:
-                avg_left_read = np.mean(self._capture_timing_stats['left_read'][-60:])
-                avg_right_read = np.mean(self._capture_timing_stats['right_read'][-60:])
-                avg_left_remap = np.mean(self._capture_timing_stats['left_remap'][-60:])
-                avg_right_remap = np.mean(self._capture_timing_stats['right_remap'][-60:])
-                avg_total = np.mean(self._capture_timing_stats['total'][-60:])
-                
-                print(f"[CAPTURE TIMING] Frame {self._capture_timing_count}: "
-                      f"LeftRead={avg_left_read:.1f}ms | "
-                      f"RightRead={avg_right_read:.1f}ms | "
-                      f"LeftRemap={avg_left_remap:.1f}ms | "
-                      f"RightRemap={avg_right_remap:.1f}ms | "
-                      f"Total={avg_total:.1f}ms")
-            
-            return left_rect, right_rect
-        else:
-            # Return raw frames for calibration
-            total_time = (time.time() - total_start) * 1000  # ms
-            return left_raw, right_raw
+        Returns:
+            Latest left frame, or None if timeout
+        """
+        if self.frame_ready_event.wait(timeout=timeout):
+            self.frame_ready_event.clear()
+            return self.get_latest_frame()
+        return None
 
 
 # ============================================================================
@@ -1036,15 +1086,14 @@ class VISION:
         print(f"{self.name}: Vision system stopped")
     
     def _data_collector(self):
-        """Background thread to continuously process frames."""
+        """Background thread to continuously process frames from streaming camera."""
         print(f"{self.name}: Data collector started.")
         
         object_id_counter = 0  # Incremental ID for objects
         
         # Initialize timing stats
         timing_stats = {
-            'capture': [],
-            'frame_copy': [],
+            'frame_get': [],
             'yolo_detect': [],
             'angle_compute': [],
             'buffer_update': [],
@@ -1056,26 +1105,23 @@ class VISION:
             try:
                 loop_start = time.time()
                 
-                # Read frames
-                capture_start = time.time()
-                left_rect, right_rect = self.camera.read_frames()
-                capture_time = (time.time() - capture_start) * 1000  # ms
+                # Get latest frame from streaming camera (non-blocking, already captured in background)
+                frame_get_start = time.time()
+                left_rect = self.camera.get_latest_frame()
+                frame_get_time = (time.time() - frame_get_start) * 1000  # ms
                 
-                if left_rect is None or right_rect is None:
-                    time.sleep(0.01)
+                if left_rect is None:
+                    time.sleep(0.001)  # Very short sleep if no frame ready
                     continue
                 
-                # Store for debug (limit frame size to prevent memory issues)
-                # Thread-safe frame storage with lock
-                frame_copy_start = time.time()
+                # Store for debug (thread-safe frame storage)
                 with self.frame_lock:
-                    # At 640x480, frames are small enough to store directly
-                    # No need to resize - just copy
                     self.last_left_frame = left_rect.copy()
-                    self.last_right_frame = right_rect.copy()
-                frame_copy_time = (time.time() - frame_copy_start) * 1000  # ms
+                    # Get right frame if available (for debug visualization)
+                    _, right_rect = self.camera.get_latest_frames()
+                    self.last_right_frame = right_rect.copy() if right_rect is not None else None
                 
-                # Run YOLO detection on left frame
+                # Run YOLO detection on left frame (streaming - no blocking)
                 yolo_start = time.time()
                 detections = self.yolo.detect(left_rect)
                 yolo_time = (time.time() - yolo_start) * 1000  # ms
@@ -1147,8 +1193,7 @@ class VISION:
                 total_loop_time = (time.time() - loop_start) * 1000  # ms
                 
                 # Store timing stats
-                timing_stats['capture'].append(capture_time)
-                timing_stats['frame_copy'].append(frame_copy_time)
+                timing_stats['frame_get'].append(frame_get_time)
                 timing_stats['yolo_detect'].append(yolo_time)
                 timing_stats['angle_compute'].append(angle_total_time)
                 timing_stats['buffer_update'].append(buffer_time)
@@ -1157,16 +1202,14 @@ class VISION:
                 
                 # Print timing summary every 60 frames
                 if frame_count % 60 == 0:
-                    avg_capture = np.mean(timing_stats['capture'][-60:])
-                    avg_frame_copy = np.mean(timing_stats['frame_copy'][-60:])
+                    avg_frame_get = np.mean(timing_stats['frame_get'][-60:])
                     avg_yolo = np.mean(timing_stats['yolo_detect'][-60:])
                     avg_angle = np.mean(timing_stats['angle_compute'][-60:])
                     avg_buffer = np.mean(timing_stats['buffer_update'][-60:])
                     avg_total = np.mean(timing_stats['total_loop'][-60:])
                     
                     print(f"[VISION TIMING] Frame {frame_count}: "
-                          f"Capture={avg_capture:.1f}ms | "
-                          f"FrameCopy={avg_frame_copy:.1f}ms | "
+                          f"FrameGet={avg_frame_get:.1f}ms | "
                           f"YOLO={avg_yolo:.1f}ms | "
                           f"Angle={avg_angle:.1f}ms | "
                           f"Buffer={avg_buffer:.1f}ms | "
