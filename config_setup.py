@@ -27,20 +27,20 @@ print("Writing config file as")
 config = {
     "horizontal_lidar":
         {
-            "port": "COM13",
+            "port": "COM6",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
             # "orientation": np.quaternion(0.7071, 0, 0, -0.7071),#w,x,y,z
-            "orientation": np.quaternion(0, 1, 0, 0),#w,x,y,z
-            "sensor_location":np.array([0.3048, 0, 0]),#x,y,z
+            "orientation": np.quaternion(np.cos(-np.pi/2), 0, 0, np.sin(-np.pi/2)),#w,x,y,z
+            "sensor_location":np.array([0, 0, 0]),#x,y,z
             "who_to_run": "src.hal.SpinningLidar.SpinningLidar",
          },
     "ground_lidar":
         {
-            "port": "COM6",
+            "port": "COM13",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
-            "orientation": np.quaternion(0, 1, 0, 0),#w,x,y,z
+            "orientation": np.quaternion(np.cos(np.pi/2), 0, 0, np.sin(np.pi/2))*np.quaternion(np.cos(np.pi/2),  np.sin(np.pi/2), 0, 0),#w,x,y,z
             "sensor_location":np.array([0, 0, 0]),#x,y,z
             "who_to_run": "src.hal.SpinningLidar.SpinningLidar",
          },
@@ -148,6 +148,9 @@ config = {
             # Calibration placeholders (shared between cameras)
             "imageSize": None,  # Set by calibration
             "Q": None,  # Set by calibration
+            "Yolo":{
+                "seting1"
+            }
         },
 }
 config = {
