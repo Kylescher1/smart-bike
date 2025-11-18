@@ -597,6 +597,7 @@ class VISION:
         self.stop_event = threading.Event()
         self.data_buffer = deque(maxlen=self.buffer_size)
         self.buffer_lock = threading.Lock()
+        self.frame_lock = threading.Lock()  # Lock for frame access (prevents segfaults)
         
         # Debug state
         self.last_left_frame: Optional[np.ndarray] = None
@@ -736,23 +737,25 @@ class VISION:
                     continue
                 
                 # Store for debug (limit frame size to prevent memory issues)
-                # Only store references, not full copies if frames are very large
-                if left_rect.shape[0] * left_rect.shape[1] <= 1920 * 1200:
-                    self.last_left_frame = left_rect.copy()
-                    self.last_right_frame = right_rect.copy()
-                else:
-                    # Resize before storing
-                    scale = min(1920 / left_rect.shape[1], 1200 / left_rect.shape[0])
-                    new_w, new_h = int(left_rect.shape[1] * scale), int(left_rect.shape[0] * scale)
-                    self.last_left_frame = cv2.resize(left_rect, (new_w, new_h))
-                    self.last_right_frame = cv2.resize(right_rect, (new_w, new_h))
+                # Thread-safe frame storage with lock
+                with self.frame_lock:
+                    if left_rect.shape[0] * left_rect.shape[1] <= 1920 * 1200:
+                        self.last_left_frame = left_rect.copy()
+                        self.last_right_frame = right_rect.copy()
+                    else:
+                        # Resize before storing
+                        scale = min(1920 / left_rect.shape[1], 1200 / left_rect.shape[0])
+                        new_w, new_h = int(left_rect.shape[1] * scale), int(left_rect.shape[0] * scale)
+                        self.last_left_frame = cv2.resize(left_rect, (new_w, new_h))
+                        self.last_right_frame = cv2.resize(right_rect, (new_w, new_h))
                 
                 # Run YOLO detection on left frame
                 detections = self.yolo.detect(left_rect)
                 
-                # Cache detections for debug_visual to avoid double YOLO call
-                self.last_detections_cache = detections
-                self.last_detections_time = time.time()
+                # Cache detections for debug_visual to avoid double YOLO call (thread-safe)
+                with self.frame_lock:  # Reuse frame_lock for detection cache
+                    self.last_detections_cache = detections.copy() if detections else []
+                    self.last_detections_time = time.time()
                 
                 # Only compute depth if there are detections (ROI-based, not full frame)
                 # Process each detection: compute depth and angles
@@ -890,21 +893,25 @@ class VISION:
         latest = self.read()
         num_objects = len(latest.get('objects', []))
         
-        # Create YOLO visualization if available
+        # Create YOLO visualization if available (thread-safe)
         yolo_viz = None
-        if self.last_left_frame is not None and latest.get('raw_yolo'):
+        with self.frame_lock:
+            last_left = self.last_left_frame.copy() if self.last_left_frame is not None else None
+            last_right = self.last_right_frame.copy() if self.last_right_frame is not None else None
+        
+        if last_left is not None and latest.get('raw_yolo'):
             try:
-                yolo_viz = self.last_left_frame.copy()
+                yolo_viz = last_left.copy()
                 if draw_detections is not None:
                     yolo_viz = draw_detections(yolo_viz, latest['raw_yolo'], 
                                              tracker=self.yolo.tracker if self.yolo else None)
             except Exception as e:
                 errors.append(f"YOLO visualization error: {e}")
-                yolo_viz = self.last_left_frame.copy() if self.last_left_frame is not None else None
+                yolo_viz = last_left.copy() if last_left is not None else None
         
         return {
-            'last_left_image': self.last_left_frame.copy() if self.last_left_frame is not None else None,
-            'last_right_image': self.last_right_frame.copy() if self.last_right_frame is not None else None,
+            'last_left_image': last_left,
+            'last_right_image': last_right,
             'disparity_map': self.last_disparity.copy() if self.last_disparity is not None else None,
             'yolo_visualization': yolo_viz,
             'fps': self.current_fps,
@@ -1027,14 +1034,15 @@ class VISION:
             # Fallback: estimate from numpy arrays and objects
             total_size = 0
             
-            # Estimate frame sizes
+        # Estimate frame sizes (thread-safe)
+        with self.frame_lock:
             if self.last_left_frame is not None:
                 total_size += self.last_left_frame.nbytes / 1024 / 1024
             if self.last_right_frame is not None:
                 total_size += self.last_right_frame.nbytes / 1024 / 1024
-            
-            # Estimate buffer size
-            with self.buffer_lock:
+        
+        # Estimate buffer size (separate lock to avoid nested locks)
+        with self.buffer_lock:
                 buffer_size_mb = sum(
                     sys.getsizeof(entry) + sum(sys.getsizeof(obj) for obj in entry.get('objects', []))
                     for entry in self.data_buffer
@@ -1060,12 +1068,13 @@ class VISION:
                   f"Frames: {mem_info.get('frames_mb', 0):.1f}MB, "
                   f"Buffer: {mem_info.get('buffer_mb', 0):.1f}MB")
         
-        # Print numpy array sizes
+        # Print numpy array sizes (thread-safe)
         frame_sizes = []
-        if self.last_left_frame is not None:
-            frame_sizes.append(f"left: {self.last_left_frame.shape} {self.last_left_frame.nbytes/1024/1024:.1f}MB")
-        if self.last_right_frame is not None:
-            frame_sizes.append(f"right: {self.last_right_frame.shape} {self.last_right_frame.nbytes/1024/1024:.1f}MB")
+        with self.frame_lock:
+            if self.last_left_frame is not None:
+                frame_sizes.append(f"left: {self.last_left_frame.shape} {self.last_left_frame.nbytes/1024/1024:.1f}MB")
+            if self.last_right_frame is not None:
+                frame_sizes.append(f"right: {self.last_right_frame.shape} {self.last_right_frame.nbytes/1024/1024:.1f}MB")
         if frame_sizes:
             print(f"{self.name}: MEM[{context}] Frames: {', '.join(frame_sizes)}")
         
@@ -1245,12 +1254,25 @@ class VISION:
         
         try:
             while True:
-                # Get latest frames and data
-                left_frame = self.last_left_frame
-                right_frame = self.last_right_frame
+                # Get latest frames and data (thread-safe copy)
+                with self.frame_lock:
+                    if self.last_left_frame is not None:
+                        left_frame = self.last_left_frame.copy()  # Copy immediately to avoid race condition
+                    else:
+                        left_frame = None
+                    if self.last_right_frame is not None:
+                        right_frame = self.last_right_frame.copy()  # Copy immediately to avoid race condition
+                    else:
+                        right_frame = None
+                
                 latest = self.read()
                 
                 if left_frame is None:
+                    time.sleep(0.01)
+                    continue
+                
+                # Validate frame shape to prevent segfaults
+                if not hasattr(left_frame, 'shape') or len(left_frame.shape) < 2:
                     time.sleep(0.01)
                     continue
                 
@@ -1261,10 +1283,14 @@ class VISION:
                 
                 # Use cached detections if recent (within 1.0 seconds), otherwise skip to save memory
                 # Increased timeout to prevent flickering when data collector is slow
+                # Thread-safe access to detection cache
                 current_time = time.time()
-                if hasattr(self, 'last_detections_cache') and \
-                   (current_time - self.last_detections_time) < 1.0:
-                    detections = self.last_detections_cache
+                with self.frame_lock:  # Reuse frame_lock for detection cache
+                    if hasattr(self, 'last_detections_cache') and \
+                       (current_time - self.last_detections_time) < 1.0:
+                        detections = self.last_detections_cache.copy() if self.last_detections_cache else []
+                    else:
+                        detections = []
                 # Don't call YOLO again - saves memory and CPU
                 
                 # Memory check (periodic)
@@ -1337,8 +1363,16 @@ class VISION:
                     orig_h, orig_w = left_frame.shape[:2] if hasattr(left_frame, 'shape') else (h, w)
                     if display_scale != 1.0:
                         # Need to use original frames for depth, not resized
-                        orig_left = self.last_left_frame
-                        orig_right = self.last_right_frame
+                        # Thread-safe access with lock
+                        with self.frame_lock:
+                            if self.last_left_frame is not None and self.last_right_frame is not None:
+                                orig_left = self.last_left_frame.copy()  # Copy to avoid race condition
+                                orig_right = self.last_right_frame.copy()
+                            else:
+                                orig_left = None
+                                orig_right = None
+                        if orig_left is None or orig_right is None:
+                            continue  # Skip if frames not available
                     else:
                         orig_left = left_frame
                         orig_right = right_frame
@@ -1355,10 +1389,26 @@ class VISION:
                         
                         # Compute disparity only for this object's ROI (cropped region)
                         try:
-                            if orig_left is not None and orig_right is not None:
-                                roi_disparity = self.depth.compute_roi_disparity(orig_left, orig_right, bbox_int)
-                            else:
+                            # Validate frames before processing
+                            if orig_left is None or orig_right is None:
                                 continue
+                            if not hasattr(orig_left, 'shape') or not hasattr(orig_right, 'shape'):
+                                continue
+                            if len(orig_left.shape) < 2 or len(orig_right.shape) < 2:
+                                continue
+                            
+                            # Validate bbox coordinates (allow some margin for roi_expansion)
+                            h_orig, w_orig = orig_left.shape[:2]
+                            margin = self.depth.roi_expansion + 10  # Allow some margin
+                            if x1 < -margin or y1 < -margin or x2 > w_orig + margin or y2 > h_orig + margin:
+                                continue
+                            if x2 <= x1 or y2 <= y1:
+                                continue
+                            # Ensure bbox has reasonable size
+                            if (x2 - x1) < 5 or (y2 - y1) < 5:
+                                continue
+                            
+                            roi_disparity = self.depth.compute_roi_disparity(orig_left, orig_right, bbox_int)
                             if roi_disparity is not None and roi_disparity.size > 0:
                                 # Expand ROI coordinates (accounting for roi_expansion)
                                 # Use original frame dimensions
