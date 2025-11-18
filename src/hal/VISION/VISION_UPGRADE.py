@@ -1259,10 +1259,11 @@ class VISION:
                 objects = latest.get('objects', [])
                 detections = []
                 
-                # Use cached detections if recent (within 0.1 seconds), otherwise skip to save memory
+                # Use cached detections if recent (within 1.0 seconds), otherwise skip to save memory
+                # Increased timeout to prevent flickering when data collector is slow
                 current_time = time.time()
                 if hasattr(self, 'last_detections_cache') and \
-                   (current_time - self.last_detections_time) < 0.1:
+                   (current_time - self.last_detections_time) < 1.0:
                     detections = self.last_detections_cache
                 # Don't call YOLO again - saves memory and CPU
                 
@@ -1327,7 +1328,8 @@ class VISION:
                 # Limit to max 3 detections to prevent memory issues
                 max_detections_for_depth = 3
                 if detections and right_frame is not None and self.depth is not None and self.depth.stereo is not None:
-                    # Reuse depth overlay buffer (clear it first)
+                    # Reuse depth overlay buffer (clear it first only if we have new detections)
+                    # This prevents flickering when detections temporarily disappear
                     depth_overlay_buffer.fill(0)
                     depth_overlay = depth_overlay_buffer
                     
@@ -1394,40 +1396,78 @@ class VISION:
                         except Exception as e:
                             if self.debug_mode:
                                 print(f"{self.name}: Error computing ROI disparity: {e}")
-                    
-                    # Overlay depth visualization only in ROI regions
-                    if np.any(depth_overlay > 0):
-                        # Normalize depth map for visualization
-                        valid_mask = depth_overlay > 0
-                        if np.any(valid_mask):
-                            # Reuse buffers
-                            if not hasattr(self, '_depth_normalized_buffer') or \
-                               self._depth_normalized_buffer.shape != depth_overlay.shape:
-                                self._depth_normalized_buffer = np.zeros_like(depth_overlay, dtype=np.uint8)
-                            depth_normalized = self._depth_normalized_buffer
-                            depth_normalized.fill(0)
-                            
+                elif depth_overlay_buffer is not None:
+                    # Keep previous overlay if no detections (prevents flickering)
+                    depth_overlay = depth_overlay_buffer
+                else:
+                    depth_overlay = None
+                
+                # Overlay depth visualization only in ROI regions
+                # Only update overlay if we have new detections (prevents flickering)
+                if detections and np.any(depth_overlay > 0):
+                    # Normalize depth map for visualization
+                    valid_mask = depth_overlay > 0
+                    if np.any(valid_mask):
+                        # Reuse buffers
+                        if not hasattr(self, '_depth_normalized_buffer') or \
+                           self._depth_normalized_buffer.shape != depth_overlay.shape:
+                            self._depth_normalized_buffer = np.zeros_like(depth_overlay, dtype=np.uint8)
+                        depth_normalized = self._depth_normalized_buffer
+                        depth_normalized.fill(0)
+                        
+                        min_depth = depth_overlay[valid_mask].min()
+                        max_depth = depth_overlay[valid_mask].max()
+                        if max_depth > min_depth:
+                            depth_normalized[valid_mask] = ((depth_overlay[valid_mask] - min_depth) / 
+                                                             (max_depth - min_depth) * 255).astype(np.uint8)
+                        
+                        depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
+                        
+                        # Blend only in ROI regions (50/50 blend)
+                        # Reuse mask buffer
+                        if not hasattr(self, '_mask_3d_buffer') or \
+                           self._mask_3d_buffer.shape[:2] != valid_mask.shape:
+                            self._mask_3d_buffer = np.stack([valid_mask] * 3, axis=2)
+                        else:
+                            # Update mask buffer
+                            for i in range(3):
+                                self._mask_3d_buffer[:, :, i] = valid_mask
+                        mask_3d = self._mask_3d_buffer
+                        
+                        display_frame[mask_3d] = (display_frame[mask_3d] * 0.5 + 
+                                                  depth_colored[mask_3d] * 0.5).astype(np.uint8)
+                elif depth_overlay is not None and np.any(depth_overlay > 0):
+                    # Keep previous overlay visible even if no new detections (smooth transition)
+                    valid_mask = depth_overlay > 0
+                    if np.any(valid_mask):
+                        # Reuse buffers
+                        if not hasattr(self, '_depth_normalized_buffer') or \
+                           self._depth_normalized_buffer.shape != depth_overlay.shape:
+                            self._depth_normalized_buffer = np.zeros_like(depth_overlay, dtype=np.uint8)
+                        depth_normalized = self._depth_normalized_buffer
+                        
+                        # Only update if buffer exists and is valid
+                        if depth_normalized.shape == depth_overlay.shape:
                             min_depth = depth_overlay[valid_mask].min()
                             max_depth = depth_overlay[valid_mask].max()
                             if max_depth > min_depth:
                                 depth_normalized[valid_mask] = ((depth_overlay[valid_mask] - min_depth) / 
                                                                  (max_depth - min_depth) * 255).astype(np.uint8)
-                            
-                            depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
-                            
-                            # Blend only in ROI regions (50/50 blend)
-                            # Reuse mask buffer
-                            if not hasattr(self, '_mask_3d_buffer') or \
-                               self._mask_3d_buffer.shape[:2] != valid_mask.shape:
-                                self._mask_3d_buffer = np.stack([valid_mask] * 3, axis=2)
-                            else:
-                                # Update mask buffer
-                                for i in range(3):
-                                    self._mask_3d_buffer[:, :, i] = valid_mask
-                            mask_3d = self._mask_3d_buffer
-                            
-                            display_frame[mask_3d] = (display_frame[mask_3d] * 0.5 + 
-                                                      depth_colored[mask_3d] * 0.5).astype(np.uint8)
+                                
+                                depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
+                                
+                                # Blend with reduced opacity for stale overlays (fade effect)
+                                if not hasattr(self, '_mask_3d_buffer') or \
+                                   self._mask_3d_buffer.shape[:2] != valid_mask.shape:
+                                    self._mask_3d_buffer = np.stack([valid_mask] * 3, axis=2)
+                                else:
+                                    for i in range(3):
+                                        self._mask_3d_buffer[:, :, i] = valid_mask
+                                mask_3d = self._mask_3d_buffer
+                                
+                                # Reduced opacity (30% instead of 50%) for stale overlays
+                                display_frame[mask_3d] = (display_frame[mask_3d] * 0.7 + 
+                                                          depth_colored[mask_3d] * 0.3).astype(np.uint8)
                 
                 # Create mapping from detection index to object depth
                 depth_by_detection = {}
@@ -1642,7 +1682,9 @@ class VISION:
                 if frame_count % 30 == 0:  # Every 30 frames
                     gc.collect()
                 
-                time.sleep(0.02)  # Slightly longer delay to reduce CPU/memory pressure
+                # Adaptive sleep: shorter delay for smoother display
+                # Only sleep if we're rendering faster than the data collector updates
+                time.sleep(0.01)  # Reduced delay for smoother frame rate
                 
         except KeyboardInterrupt:
             print(f"\n{self.name}: Visual debug mode interrupted by user")
