@@ -26,6 +26,12 @@ from pathlib import Path
 import dill
 import sys
 import gc
+import os
+
+# Disable OpenCV threading to prevent segfaults in multi-threaded environments
+# OpenCV's threading can cause crashes when used from multiple Python threads
+os.environ['OPENCV_FOR_THREADS_NUM'] = '1'
+cv2.setNumThreads(1)  # Force single-threaded OpenCV
 
 from ..cam.Camera import Camera, CAMERA_CONFIG
 
@@ -535,24 +541,27 @@ class VisionDepth:
                 if not right_roi.flags['C_CONTIGUOUS']:
                     right_roi = np.ascontiguousarray(right_roi)
                 
-                # Validate shape before cvtColor
-                if len(left_roi.shape) == 3:
-                    if left_roi.shape[2] != 3:  # Must be BGR
+                # Validate shape before cvtColor - use lock for thread safety
+                # Note: opencv_lock is passed from VISION class or created here
+                opencv_lock = getattr(self, 'opencv_lock', threading.Lock())
+                with opencv_lock:
+                    if len(left_roi.shape) == 3:
+                        if left_roi.shape[2] != 3:  # Must be BGR
+                            return None
+                        gray_left = cv2.cvtColor(left_roi, cv2.COLOR_BGR2GRAY)
+                    elif len(left_roi.shape) == 2:
+                        gray_left = left_roi.copy()
+                    else:
                         return None
-                    gray_left = cv2.cvtColor(left_roi, cv2.COLOR_BGR2GRAY)
-                elif len(left_roi.shape) == 2:
-                    gray_left = left_roi.copy()
-                else:
-                    return None
-                
-                if len(right_roi.shape) == 3:
-                    if right_roi.shape[2] != 3:  # Must be BGR
+                    
+                    if len(right_roi.shape) == 3:
+                        if right_roi.shape[2] != 3:  # Must be BGR
+                            return None
+                        gray_right = cv2.cvtColor(right_roi, cv2.COLOR_BGR2GRAY)
+                    elif len(right_roi.shape) == 2:
+                        gray_right = right_roi.copy()
+                    else:
                         return None
-                    gray_right = cv2.cvtColor(right_roi, cv2.COLOR_BGR2GRAY)
-                elif len(right_roi.shape) == 2:
-                    gray_right = right_roi.copy()
-                else:
-                    return None
                 
                 # Final validation
                 if gray_left is None or gray_right is None:
@@ -586,8 +595,9 @@ class VisionDepth:
                 if not gray_right.flags['C_CONTIGUOUS']:
                     gray_right = np.ascontiguousarray(gray_right)
                 
-                # Call stereo.compute with validated inputs
-                disparity = self.stereo.compute(gray_left, gray_right)
+                # Call stereo.compute with validated inputs - use lock for thread safety
+                with self.opencv_lock:
+                    disparity = self.stereo.compute(gray_left, gray_right)
                 if disparity is None:
                     return None
                 if not isinstance(disparity, np.ndarray):
@@ -754,6 +764,7 @@ class VISION:
         self.data_buffer = deque(maxlen=self.buffer_size)
         self.buffer_lock = threading.Lock()
         self.frame_lock = threading.Lock()  # Lock for frame access (prevents segfaults)
+        self.opencv_lock = threading.Lock()  # Lock for ALL OpenCV operations (prevents segfaults)
         
         # Debug state
         self.last_left_frame: Optional[np.ndarray] = None
@@ -837,6 +848,8 @@ class VISION:
                 ema_alpha=self.ema_alpha,
                 roi_expansion=self.roi_expansion
             )
+            # Pass OpenCV lock to depth processor for thread safety
+            self.depth.opencv_lock = self.opencv_lock
             self.depth.start()
         else:
             self.depth = None
@@ -1612,7 +1625,9 @@ class VISION:
                                                 if not roi_depth_map.flags['C_CONTIGUOUS']:
                                                     roi_depth_map = np.ascontiguousarray(roi_depth_map)
                                                 
-                                                roi_depth_display = cv2.resize(roi_depth_map, target_size)
+                                                # Use lock for thread-safe OpenCV resize
+                                                with self.opencv_lock:
+                                                    roi_depth_display = cv2.resize(roi_depth_map, target_size)
                                                 if roi_depth_display is None:
                                                     continue
                                                 if roi_depth_display.shape[:2] == (disp_roi_y2 - disp_roi_y1, disp_roi_x2 - disp_roi_x1):
@@ -1659,7 +1674,9 @@ class VISION:
                             depth_normalized = depth_normalized.astype(np.uint8)
                         if not depth_normalized.flags['C_CONTIGUOUS']:
                             depth_normalized = np.ascontiguousarray(depth_normalized)
-                        depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
+                        # Use lock for thread-safe OpenCV applyColorMap
+                        with self.opencv_lock:
+                            depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
                         if depth_colored is None:
                             continue
                         
@@ -1702,7 +1719,9 @@ class VISION:
                                     depth_normalized = depth_normalized.astype(np.uint8)
                                 if not depth_normalized.flags['C_CONTIGUOUS']:
                                     depth_normalized = np.ascontiguousarray(depth_normalized)
-                                depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
+                                # Use lock for thread-safe OpenCV applyColorMap
+                                with self.opencv_lock:
+                                    depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
                                 if depth_colored is None:
                                     continue
                                 
@@ -1892,7 +1911,9 @@ class VISION:
                 try:
                     if display_frame is not None and hasattr(display_frame, 'shape') and len(display_frame.shape) >= 2:
                         if display_frame.size > 0:
-                            cv2.imshow(window_name, display_frame)
+                            # Use lock for thread-safe OpenCV imshow
+                            with self.opencv_lock:
+                                cv2.imshow(window_name, display_frame)
                 except Exception as e:
                     if self.debug_mode:
                         print(f"{self.name}: imshow error: {e}")
@@ -1907,7 +1928,9 @@ class VISION:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                 try:
                     if trackbar_img is not None and hasattr(trackbar_img, 'shape') and trackbar_img.size > 0:
-                        cv2.imshow(trackbar_window, trackbar_img)
+                        # Use lock for thread-safe OpenCV imshow
+                        with self.opencv_lock:
+                            cv2.imshow(trackbar_window, trackbar_img)
                 except Exception as e:
                     if self.debug_mode:
                         print(f"{self.name}: trackbar imshow error: {e}")
@@ -1915,7 +1938,9 @@ class VISION:
                 # Show radar map
                 try:
                     if radar_img is not None and hasattr(radar_img, 'shape') and radar_img.size > 0:
-                        cv2.imshow(radar_window, radar_img)
+                        # Use lock for thread-safe OpenCV imshow
+                        with self.opencv_lock:
+                            cv2.imshow(radar_window, radar_img)
                 except Exception as e:
                     if self.debug_mode:
                         print(f"{self.name}: radar imshow error: {e}")
