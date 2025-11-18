@@ -1355,6 +1355,126 @@ class VISION:
             total_objects = sum(len(entry.get('objects', [])) for entry in self.data_buffer)
             print(f"{self.name}: MEM[{context}] Buffer: {buffer_len} entries, {total_objects} objects")
     
+    def debug_visual(self):
+        """
+        Simple visual debug mode showing YOLO detections.
+        Press 'q' to quit.
+        """
+        if not self.connected:
+            print(f"{self.name}: Cannot start visual debug mode. Vision system not connected. Call start() first.")
+            return
+        
+        print(f"{self.name}: Starting YOLO visualization mode...")
+        print(f"{self.name}: Press 'q' to exit")
+        
+        window_name = f"{self.name} - YOLO Visualization"
+        
+        try:
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        except Exception as e:
+            print(f"{self.name}: Warning: Window creation issue: {e}")
+            print(f"{self.name}: Visual debug mode may not work properly")
+            return
+        
+        try:
+            while True:
+                # Get latest frame and detections (thread-safe copy)
+                with self.frame_lock:
+                    if self.last_left_frame is not None:
+                        frame = self.last_left_frame.copy()
+                    else:
+                        frame = None
+                    
+                    # Get cached detections if recent
+                    current_time = time.time()
+                    if hasattr(self, 'last_detections_cache') and \
+                       (current_time - self.last_detections_time) < 1.0:
+                        detections = self.last_detections_cache.copy() if self.last_detections_cache else []
+                    else:
+                        detections = []
+                
+                if frame is None:
+                    time.sleep(0.01)
+                    continue
+                
+                # Validate frame shape
+                if not hasattr(frame, 'shape') or len(frame.shape) < 2:
+                    time.sleep(0.01)
+                    continue
+                
+                # Create display frame (copy for drawing)
+                display_frame = frame.copy()
+                h, w = display_frame.shape[:2]
+                
+                # Draw detections
+                for det in detections:
+                    bbox = det.get('bbox', [])
+                    if len(bbox) != 4:
+                        continue
+                    
+                    x1, y1, x2, y2 = [int(coord) for coord in bbox]
+                    
+                    # Draw bounding box
+                    color = (0, 255, 0)  # Green
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+                    
+                    # Prepare label
+                    class_name = det.get('class_name', 'object')
+                    score = det.get('score', 0.0)
+                    track_id = det.get('track_id')
+                    
+                    label = f"{class_name} {score:.2f}"
+                    if track_id is not None:
+                        label += f" ID:{track_id}"
+                    
+                    # Draw label background
+                    (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    cv2.rectangle(display_frame, (x1, y1 - label_h - 5), 
+                                (x1 + label_w, y1), color, -1)
+                    
+                    # Draw label text
+                    cv2.putText(display_frame, label, (x1, y1 - 5), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                
+                # Add metadata overlay
+                fps_text = f"FPS: {self.current_fps:.1f}"
+                cv2.putText(display_frame, fps_text, (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                
+                if detections:
+                    det_text = f"Detections: {len(detections)}"
+                    cv2.putText(display_frame, det_text, (10, 60), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                
+                # Display the frame
+                try:
+                    if display_frame is not None and hasattr(display_frame, 'shape') and len(display_frame.shape) >= 2:
+                        if display_frame.size > 0:
+                            cv2.imshow(window_name, display_frame)
+                except Exception as e:
+                    if self.debug_mode:
+                        print(f"{self.name}: imshow error: {e}")
+                
+                # Check for quit key
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+                
+                time.sleep(0.01)  # Small delay for smoother display
+                
+        except KeyboardInterrupt:
+            print(f"\n{self.name}: Visual debug mode interrupted by user")
+        except Exception as e:
+            print(f"{self.name}: Error in visual debug mode: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            try:
+                cv2.destroyWindow(window_name)
+            except:
+                pass
+            print(f"{self.name}: Visual debug mode ended")
+    
     def __repr__(self):
         return f"<VISION name={self.name}, connected={self.connected}>"
 
