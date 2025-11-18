@@ -582,7 +582,9 @@ class VISION:
         self.Q = getattr(self, 'Q', None)
         
         # Buffer configuration (reduced for memory efficiency)
-        self.buffer_size = getattr(self, 'buffer_size', 3)
+        # Force smaller buffer even if config says otherwise
+        config_buffer_size = getattr(self, 'buffer_size', 2)
+        self.buffer_size = min(config_buffer_size, 2)  # Max 2 entries
         
         # Initialize components
         self.camera: Optional[VisionCamera] = None
@@ -601,6 +603,8 @@ class VISION:
         self.last_right_frame: Optional[np.ndarray] = None
         self.last_disparity: Optional[np.ndarray] = None
         self.last_yolo_frame: Optional[np.ndarray] = None
+        self.last_detections_cache: List[Dict] = []  # Cache last detections to avoid double YOLO call
+        self.last_detections_time: float = 0.0
         self.fps_counter = 0
         self.fps_start_time = time.time()
         self.current_fps = 0.0
@@ -745,6 +749,10 @@ class VISION:
                 
                 # Run YOLO detection on left frame
                 detections = self.yolo.detect(left_rect)
+                
+                # Cache detections for debug_visual to avoid double YOLO call
+                self.last_detections_cache = detections
+                self.last_detections_time = time.time()
                 
                 # Only compute depth if there are detections (ROI-based, not full frame)
                 # Process each detection: compute depth and angles
@@ -1247,18 +1255,16 @@ class VISION:
                     continue
                 
                 # Get detections and objects
-                # Note: raw_yolo not stored in buffer to save memory, get from latest read if available
-                detections = []  # Will be populated from YOLO if needed
+                # Reuse cached detections from data_collector to avoid double YOLO inference
                 objects = latest.get('objects', [])
+                detections = []
                 
-                # Get detections from YOLO directly if available (for visualization only)
-                if self.yolo and left_frame is not None:
-                    try:
-                        detections = self.yolo.detect(left_frame)
-                    except Exception as e:
-                        if self.debug_mode:
-                            print(f"{self.name}: YOLO detection error in debug_visual: {e}")
-                        detections = []
+                # Use cached detections if recent (within 0.1 seconds), otherwise skip to save memory
+                current_time = time.time()
+                if hasattr(self, 'last_detections_cache') and \
+                   (current_time - self.last_detections_time) < 0.1:
+                    detections = self.last_detections_cache
+                # Don't call YOLO again - saves memory and CPU
                 
                 # Memory check (periodic)
                 if self.memory_debug:
@@ -1291,49 +1297,79 @@ class VISION:
                                 theta = obj.get('theta', 0.0)
                                 print(f"  ID:{obj_id} {obj_type} depth:{depth:.2f}m θ:{theta:.1f}°")
                 
-                # Start with left frame (use view if possible, but need copy for drawing)
+                # Start with left frame - use reference, only copy when needed for drawing
                 h, w = left_frame.shape[:2]
-                # Limit frame copy size to prevent memory issues
-                if h * w > 1920 * 1200:  # If frame is very large, resize it
-                    scale = min(1920 / w, 1200 / h)
-                    new_w, new_h = int(w * scale), int(h * scale)
-                    left_frame = cv2.resize(left_frame, (new_w, new_h))
-                    if right_frame is not None:
-                        right_frame = cv2.resize(right_frame, (new_w, new_h))
-                    h, w = new_h, new_w
-                
-                display_frame = left_frame.copy()  # Need copy for drawing operations
+                # Limit frame processing size to prevent memory issues
+                # Resize frames if too large (downscale for display)
+                display_scale = 1.0
+                if h * w > 1280 * 720:  # Downscale if larger than 720p for display
+                    display_scale = min(1280 / w, 720 / h)
+                    new_w, new_h = int(w * display_scale), int(h * display_scale)
+                    # Resize for display only
+                    display_frame = cv2.resize(left_frame, (new_w, new_h))
+                    # Scale detection boxes accordingly
+                    scale_x = new_w / w
+                    scale_y = new_h / h
+                else:
+                    display_frame = left_frame.copy()  # Need copy for drawing operations
+                    scale_x = 1.0
+                    scale_y = 1.0
+                    new_h, new_w = h, w
                 
                 # Initialize depth overlay (reuse buffer if size matches)
+                # Use display size, not original frame size
                 depth_overlay = None
-                if depth_overlay_buffer is None or depth_overlay_buffer.shape != (h, w):
-                    depth_overlay_buffer = np.zeros((h, w), dtype=np.float32)
+                if depth_overlay_buffer is None or depth_overlay_buffer.shape != (new_h, new_w):
+                    depth_overlay_buffer = np.zeros((new_h, new_w), dtype=np.float32)
                 
                 # Only compute ROI-based disparity for detected objects (not full frame)
                 # This matches production behavior - SGBM only processes cropped regions
+                # Limit to max 3 detections to prevent memory issues
+                max_detections_for_depth = 3
                 if detections and right_frame is not None and self.depth is not None and self.depth.stereo is not None:
                     # Reuse depth overlay buffer (clear it first)
                     depth_overlay_buffer.fill(0)
                     depth_overlay = depth_overlay_buffer
                     
-                    # Compute ROI-based disparity for each detected object
-                    for det in detections:
+                    # Use original frame size for depth computation (not resized display)
+                    orig_h, orig_w = left_frame.shape[:2] if hasattr(left_frame, 'shape') else (h, w)
+                    if display_scale != 1.0:
+                        # Need to use original frames for depth, not resized
+                        orig_left = self.last_left_frame
+                        orig_right = self.last_right_frame
+                    else:
+                        orig_left = left_frame
+                        orig_right = right_frame
+                    
+                    # Compute ROI-based disparity for each detected object (limited)
+                    for det in detections[:max_detections_for_depth]:
                         bbox = det.get('bbox', [])
                         if len(bbox) != 4:
                             continue
                         
+                        # Use original bbox coordinates (not scaled)
                         bbox_int = [int(coord) for coord in bbox]
                         x1, y1, x2, y2 = bbox_int
                         
                         # Compute disparity only for this object's ROI (cropped region)
                         try:
-                            roi_disparity = self.depth.compute_roi_disparity(left_frame, right_frame, bbox_int)
+                            if orig_left is not None and orig_right is not None:
+                                roi_disparity = self.depth.compute_roi_disparity(orig_left, orig_right, bbox_int)
+                            else:
+                                continue
                             if roi_disparity is not None and roi_disparity.size > 0:
                                 # Expand ROI coordinates (accounting for roi_expansion)
+                                # Use original frame dimensions
                                 roi_x1 = max(0, x1 - self.depth.roi_expansion)
                                 roi_y1 = max(0, y1 - self.depth.roi_expansion)
-                                roi_x2 = min(w, x2 + self.depth.roi_expansion)
-                                roi_y2 = min(h, y2 + self.depth.roi_expansion)
+                                roi_x2 = min(orig_w, x2 + self.depth.roi_expansion)
+                                roi_y2 = min(orig_h, y2 + self.depth.roi_expansion)
+                                
+                                # Scale ROI coordinates for display overlay
+                                disp_roi_x1 = int(roi_x1 * scale_x)
+                                disp_roi_y1 = int(roi_y1 * scale_y)
+                                disp_roi_x2 = int(roi_x2 * scale_x)
+                                disp_roi_y2 = int(roi_y2 * scale_y)
                                 
                                 # Convert ROI disparity to depth map
                                 roi_h, roi_w = roi_disparity.shape[:2]
@@ -1349,18 +1385,12 @@ class VISION:
                                 if np.any(valid_mask) and self.focal_length_px > 0 and self.baseline > 0:
                                     roi_depth_map[valid_mask] = (self.focal_length_px * self.baseline) / roi_disparity[valid_mask]
                                 
-                                # Place ROI depth map into full frame overlay
-                                if roi_y2 > roi_y1 and roi_x2 > roi_x1:
-                                    # Resize ROI depth map to match ROI size if needed
-                                    if roi_depth_map.shape != (roi_y2 - roi_y1, roi_x2 - roi_x1):
-                                        # Use temporary buffer for resize
-                                        if not hasattr(self, '_roi_resize_buffer') or \
-                                           self._roi_resize_buffer.shape != (roi_y2 - roi_y1, roi_x2 - roi_x1):
-                                            self._roi_resize_buffer = np.zeros((roi_y2 - roi_y1, roi_x2 - roi_x1), dtype=np.float32)
-                                        temp_buffer = cv2.resize(roi_depth_map, (roi_x2 - roi_x1, roi_y2 - roi_y1))
-                                        depth_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = temp_buffer
-                                    else:
-                                        depth_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = roi_depth_map
+                                # Place ROI depth map into display overlay (scaled)
+                                if disp_roi_y2 > disp_roi_y1 and disp_roi_x2 > disp_roi_x1:
+                                    # Resize depth map to display size
+                                    roi_depth_display = cv2.resize(roi_depth_map, (disp_roi_x2 - disp_roi_x1, disp_roi_y2 - disp_roi_y1))
+                                    depth_overlay[disp_roi_y1:disp_roi_y2, disp_roi_x1:disp_roi_x2] = roi_depth_display
+                                    del roi_depth_display  # Cleanup immediately
                         except Exception as e:
                             if self.debug_mode:
                                 print(f"{self.name}: Error computing ROI disparity: {e}")
@@ -1413,13 +1443,17 @@ class VISION:
                                 depth_by_detection[i] = obj_depth
                                 break
                 
-                # Draw detections
-                for i, det in enumerate(detections):
+                # Draw detections (scale bbox if frame was resized)
+                for i, det in enumerate(detections[:10]):  # Limit to 10 detections for display
                     bbox = det.get('bbox', [])
                     if len(bbox) != 4:
                         continue
                     
-                    x1, y1, x2, y2 = [int(coord) for coord in bbox]
+                    # Scale bbox coordinates if display was resized
+                    x1 = int(bbox[0] * scale_x)
+                    y1 = int(bbox[1] * scale_y)
+                    x2 = int(bbox[2] * scale_x)
+                    y2 = int(bbox[3] * scale_y)
                     
                     # Get depth for this detection (from objects list which uses ROI-based computation)
                     depth_value = depth_by_detection.get(i, 0)
@@ -1563,8 +1597,12 @@ class VISION:
                 cv2.putText(radar_img, f"Objects: {len(objects)}", (10, radar_size - 10),
                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                 
-                # Display the frame
-                cv2.imshow(window_name, display_frame)
+                # Display the frame (limit update rate to reduce memory pressure)
+                try:
+                    cv2.imshow(window_name, display_frame)
+                except Exception as e:
+                    if self.debug_mode:
+                        print(f"{self.name}: imshow error: {e}")
                 
                 # Show trackbar window (reuse buffer)
                 trackbar_img.fill(0)  # Clear previous frame
@@ -1574,10 +1612,16 @@ class VISION:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                 cv2.putText(trackbar_img, "Press 'q' to quit", (10, 90), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-                cv2.imshow(trackbar_window, trackbar_img)
+                try:
+                    cv2.imshow(trackbar_window, trackbar_img)
+                except:
+                    pass
                 
                 # Show radar map
-                cv2.imshow(radar_window, radar_img)
+                try:
+                    cv2.imshow(radar_window, radar_img)
+                except:
+                    pass
                 
                 # Check for quit key or save key
                 key = cv2.waitKey(1) & 0xFF
@@ -1586,7 +1630,19 @@ class VISION:
                 elif key == ord('s') or key == ord('S'):
                     self._save_config()
                 
-                time.sleep(0.01)  # Small delay to prevent excessive CPU usage
+                # Cleanup temporary variables
+                del display_frame
+                if depth_overlay is not None:
+                    del depth_overlay
+                
+                # Periodic garbage collection
+                frame_count = getattr(self, '_debug_frame_count', 0)
+                frame_count += 1
+                self._debug_frame_count = frame_count
+                if frame_count % 30 == 0:  # Every 30 frames
+                    gc.collect()
+                
+                time.sleep(0.02)  # Slightly longer delay to reduce CPU/memory pressure
                 
         except KeyboardInterrupt:
             print(f"\n{self.name}: Visual debug mode interrupted by user")
