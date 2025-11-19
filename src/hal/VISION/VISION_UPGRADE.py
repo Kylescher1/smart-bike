@@ -852,6 +852,35 @@ class VISION:
         if not self.right_config:
             raise ValueError("Right camera config is required")
         
+        # Known average object sizes in meters (for depth estimation)
+        # Using typical sizes for common objects
+        self.known_object_sizes = {
+            'person': 1.7,          # Average person height
+            'bicycle': 1.5,         # Average bicycle length
+            'car': 4.5,             # Average car length
+            'motorcycle': 2.0,      # Average motorcycle length
+            'bus': 12.0,            # Average bus length
+            'truck': 8.0,           # Average truck length
+            'train': 20.0,          # Average train car length
+            'boat': 6.0,            # Average small boat length
+            'airplane': 30.0,       # Average small plane length
+            'bird': 0.3,            # Average bird size
+            'cat': 0.5,             # Average cat size
+            'dog': 0.6,             # Average dog size
+            'horse': 2.0,           # Average horse height
+            'sheep': 1.0,           # Average sheep size
+            'cow': 1.5,             # Average cow size
+            'elephant': 3.0,        # Average elephant height
+            'bear': 2.0,            # Average bear height
+            'zebra': 2.0,           # Average zebra height
+            'giraffe': 5.0,        # Average giraffe height
+            'default': 1.0          # Default size for unknown objects
+        }
+        
+        # Focal length for depth calculation (pixels)
+        # Can be configured, defaults to typical value
+        self.focal_length_px = kwargs.get('focal_length_px', 800.0)
+        
         # Buffer configuration (reduced for memory efficiency)
         # Force smaller buffer even if config says otherwise
         config_buffer_size = getattr(self, 'buffer_size', 2)
@@ -1133,6 +1162,23 @@ class VISION:
                         alpha = ((center_y - h / 2.0) / h) * fov_v  # vertical angle
                         angle_total_time += (time.time() - angle_start) * 1000  # ms
                         
+                        # Estimate depth based on apparent size vs known size
+                        obj_width_px = x2 - x1
+                        obj_height_px = y2 - y1
+                        obj_size_px = max(obj_width_px, obj_height_px)  # Use larger dimension
+                        
+                        obj_type = str(det['class_name'])
+                        known_size = self.known_object_sizes.get(obj_type, self.known_object_sizes['default'])
+                        
+                        # Depth = (known_size * focal_length) / apparent_size_pixels
+                        # This is a simplified model assuming object is perpendicular to camera
+                        if obj_size_px > 0:
+                            depth = (known_size * self.focal_length_px) / obj_size_px
+                            # Clamp depth to reasonable range (0.5m to 100m)
+                            depth = max(0.5, min(100.0, depth))
+                        else:
+                            depth = 0.0
+                        
                         # Use track_id as object ID, or assign new ID
                         track_id = det.get('track_id', None)
                         obj_id = track_id if track_id is not None else object_id_counter
@@ -1148,7 +1194,8 @@ class VISION:
                             'confidence': float(det['score']),
                             'id': int(obj_id),
                             'type': str(det['class_name']),
-                            'camera': 'left'
+                            'camera': 'left',
+                            'depth': float(depth)
                         }
                         objects.append(obj)
                 
@@ -1176,6 +1223,23 @@ class VISION:
                         alpha = ((center_y - h / 2.0) / h) * fov_v  # vertical angle
                         angle_total_time += (time.time() - angle_start) * 1000  # ms
                         
+                        # Estimate depth based on apparent size vs known size
+                        obj_width_px = x2 - x1
+                        obj_height_px = y2 - y1
+                        obj_size_px = max(obj_width_px, obj_height_px)  # Use larger dimension
+                        
+                        obj_type = str(det['class_name'])
+                        known_size = self.known_object_sizes.get(obj_type, self.known_object_sizes['default'])
+                        
+                        # Depth = (known_size * focal_length) / apparent_size_pixels
+                        # This is a simplified model assuming object is perpendicular to camera
+                        if obj_size_px > 0:
+                            depth = (known_size * self.focal_length_px) / obj_size_px
+                            # Clamp depth to reasonable range (0.5m to 100m)
+                            depth = max(0.5, min(100.0, depth))
+                        else:
+                            depth = 0.0
+                        
                         # Use track_id as object ID, or assign new ID
                         track_id = det.get('track_id', None)
                         obj_id = track_id if track_id is not None else object_id_counter
@@ -1191,7 +1255,8 @@ class VISION:
                             'confidence': float(det['score']),
                             'id': int(obj_id),
                             'type': str(det['class_name']),
-                            'camera': 'right'
+                            'camera': 'right',
+                            'depth': float(depth)
                         }
                         objects.append(obj)
                 
@@ -1323,14 +1388,15 @@ class VISION:
         
         Returns:
             List of dicts, each containing:
-                'theta': float,      # horizontal angle from center
-                'alpha': float,      # vertical angle from center
-                'w': int,            # bounding box width
-                'h': int,            # bounding box height
-                'confidence': float, # YOLO confidence
+                'theta': float,      # horizontal angle from center (degrees)
+                'alpha': float,      # vertical angle from center (degrees)
+                'w': int,            # bounding box width (pixels)
+                'h': int,            # bounding box height (pixels)
+                'confidence': float, # YOLO confidence (0.0-1.0)
                 'ID': int,           # unique object ID
                 'name': str,         # class label
-                'time': float        # timestamp
+                'time': float,       # timestamp
+                'depth': float      # estimated depth in meters (based on apparent size)
         """
         with self.buffer_lock:
             if len(self.data_buffer) > 0:
@@ -1352,7 +1418,8 @@ class VISION:
                 'confidence': obj.get('confidence', 0.0),
                 'ID': obj.get('id', 0),
                 'name': obj.get('type', 'unknown'),
-                'time': timestamp
+                'time': timestamp,
+                'depth': obj.get('depth', 0.0)  # Depth in meters (estimated from apparent size)
             }
             formatted_objects.append(formatted_obj)
         

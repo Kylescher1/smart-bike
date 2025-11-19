@@ -36,6 +36,7 @@ class RadarView:
         # Window names
         self.window_top_down = "Radar - Top Down View"
         self.window_front = "Radar - Front View"
+        self.window_3d = "Radar - 3D Depth View"
         
         # Colors for different object types
         self.color_map = {
@@ -288,6 +289,117 @@ class RadarView:
         
         return canvas
     
+    def draw_3d_depth_view(self, objects: List[Dict], max_depth: float = 50.0) -> np.ndarray:
+        """
+        Draw 3D depth view showing objects with depth information.
+        Top-down view with depth as distance from center.
+        
+        Args:
+            objects: List of object dictionaries with 'theta', 'depth' keys
+            max_depth: Maximum depth to display in meters
+            
+        Returns:
+            Canvas image with 3D depth radar visualization
+        """
+        canvas = np.zeros((self.canvas_size, self.canvas_size, 3), dtype=np.uint8)
+        center = self.canvas_size // 2
+        
+        # Draw depth circles (concentric circles for depth reference)
+        for i in range(1, 6):
+            radius = int((self.canvas_size // 2) * (i / 5))
+            depth_value = (i / 5) * max_depth
+            cv2.circle(canvas, (center, center), radius, (50, 50, 50), 1)
+            # Label depth circles
+            cv2.putText(canvas, f"{depth_value:.0f}m", (center + radius - 20, center - 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+        
+        # Draw cardinal directions
+        cv2.line(canvas, (center, center), (center, 0), (100, 100, 100), 2)
+        cv2.putText(canvas, "F", (center - 10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        cv2.line(canvas, (center, center), (self.canvas_size, center), (100, 100, 100), 2)
+        cv2.putText(canvas, "R", (self.canvas_size - 25, center + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        cv2.line(canvas, (center, center), (0, center), (100, 100, 100), 2)
+        cv2.putText(canvas, "L", (5, center + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        cv2.line(canvas, (center, center), (center, self.canvas_size), (100, 100, 100), 2)
+        cv2.putText(canvas, "B", (center - 10, self.canvas_size - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        
+        # Draw center point (vehicle position)
+        cv2.circle(canvas, (center, center), 5, (255, 255, 255), -1)
+        
+        # Draw objects with depth
+        for obj in objects:
+            theta = obj.get('theta', 0.0)  # Horizontal angle
+            depth = obj.get('depth', 0.0)  # Depth in meters
+            obj_type = obj.get('name', 'default')
+            obj_id = obj.get('ID', 0)
+            confidence = obj.get('confidence', 0.0)
+            
+            if depth <= 0 or depth > max_depth:
+                continue  # Skip invalid or out-of-range depths
+            
+            # Convert theta to screen coordinates
+            theta_rad = self.angle_to_rad(theta)
+            
+            # Calculate position based on depth and angle
+            # Depth determines distance from center
+            depth_ratio = depth / max_depth
+            max_radius = self.canvas_size // 2 - 20
+            radius = int(max_radius * depth_ratio)
+            
+            # Calculate x, y position
+            x = center + int(radius * math.sin(theta_rad))
+            y = center - int(radius * math.cos(theta_rad))
+            
+            # Color based on depth (closer = brighter/more red, farther = darker/more blue)
+            depth_normalized = depth / max_depth
+            color_r = int(255 * (1.0 - depth_normalized))
+            color_b = int(255 * depth_normalized)
+            color_g = int(128)
+            color = (color_b, color_g, color_r)  # BGR format
+            
+            # Draw object as circle with size based on confidence
+            radius_obj = max(5, int(10 * confidence))
+            cv2.circle(canvas, (x, y), radius_obj, color, -1)
+            cv2.circle(canvas, (x, y), radius_obj, (255, 255, 255), 1)
+            
+            # Draw line from center to object
+            cv2.line(canvas, (center, center), (x, y), color, 1)
+            
+            # Draw label
+            label = f"{obj_type[:3]} {obj_id}"
+            label += f" {depth:.1f}m"
+            
+            # Position label above object
+            (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+            label_x = x - label_w // 2
+            label_y = y - radius_obj - 5
+            
+            # Draw label background
+            cv2.rectangle(canvas, 
+                         (label_x - 2, label_y - label_h - 2),
+                         (label_x + label_w + 2, label_y + 2),
+                         (0, 0, 0), -1)
+            
+            # Draw label text
+            cv2.putText(canvas, label, (label_x, label_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+        
+        # Add title
+        title = "3D Depth View (Theta & Depth)"
+        cv2.putText(canvas, title, (10, 25), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Add depth legend
+        legend_y = self.canvas_size - 80
+        cv2.putText(canvas, "Close (red)", (10, legend_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 128, 255), 1)
+        cv2.putText(canvas, "Far (blue)", (10, legend_y + 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 128, 0), 1)
+        cv2.putText(canvas, f"Max Depth: {max_depth}m", (10, legend_y + 40), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+        
+        return canvas
+    
     def run(self):
         """Run radar visualization loop."""
         print("Starting radar visualization...")
@@ -296,10 +408,12 @@ class RadarView:
         try:
             cv2.namedWindow(self.window_top_down, cv2.WINDOW_NORMAL)
             cv2.namedWindow(self.window_front, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(self.window_3d, cv2.WINDOW_NORMAL)
             
             # Position windows
             cv2.moveWindow(self.window_top_down, 100, 100)
             cv2.moveWindow(self.window_front, 750, 100)
+            cv2.moveWindow(self.window_3d, 100, 750)
             
             while True:
                 # Get latest objects from vision system
@@ -308,10 +422,12 @@ class RadarView:
                 # Draw radar views
                 top_down_canvas = self.draw_top_down_view(objects)
                 front_canvas = self.draw_front_view(objects)
+                depth_3d_canvas = self.draw_3d_depth_view(objects, max_depth=50.0)
                 
                 # Display
                 cv2.imshow(self.window_top_down, top_down_canvas)
                 cv2.imshow(self.window_front, front_canvas)
+                cv2.imshow(self.window_3d, depth_3d_canvas)
                 
                 # Check for quit
                 key = cv2.waitKey(1) & 0xFF
@@ -330,6 +446,7 @@ class RadarView:
             try:
                 cv2.destroyWindow(self.window_top_down)
                 cv2.destroyWindow(self.window_front)
+                cv2.destroyWindow(self.window_3d)
             except:
                 pass
             print("Radar visualization ended")
