@@ -661,22 +661,32 @@ class VisionYolo:
             self._timing_stats['total'].append(total_time)
             self._timing_frame_count += 1
             
-            # Print timing summary every 60 frames
+            # Print detailed timing summary every 60 frames
             if self._timing_frame_count % 60 == 0:
-                avg_preprocess = np.mean(self._timing_stats['preprocess'][-60:])
-                avg_inference = np.mean(self._timing_stats['inference'][-60:])
-                avg_postprocess = np.mean(self._timing_stats['postprocess'][-60:])
-                avg_box_scale = np.mean(self._timing_stats['box_scale'][-60:])
-                avg_tracking = np.mean(self._timing_stats['tracking'][-60:])
-                avg_total = np.mean(self._timing_stats['total'][-60:])
+                window_size = min(60, len(self._timing_stats['total']))
+                window_slice = slice(-window_size, None)
                 
-                print(f"[RKNN TIMING] Frame {self._timing_frame_count}: "
-                      f"Preprocess={avg_preprocess:.1f}ms | "
-                      f"Inference={avg_inference:.1f}ms | "
-                      f"Postprocess={avg_postprocess:.1f}ms | "
-                      f"BoxScale={avg_box_scale:.1f}ms | "
-                      f"Tracking={avg_tracking:.1f}ms | "
-                      f"Total={avg_total:.1f}ms ({1000/avg_total:.1f} FPS)")
+                avg_preprocess = np.mean(self._timing_stats['preprocess'][window_slice])
+                avg_inference = np.mean(self._timing_stats['inference'][window_slice])
+                avg_postprocess = np.mean(self._timing_stats['postprocess'][window_slice])
+                avg_box_scale = np.mean(self._timing_stats['box_scale'][window_slice])
+                avg_tracking = np.mean(self._timing_stats['tracking'][window_slice])
+                avg_total = np.mean(self._timing_stats['total'][window_slice])
+                
+                # Calculate percentages
+                pct_preprocess = (avg_preprocess / avg_total) * 100 if avg_total > 0 else 0
+                pct_inference = (avg_inference / avg_total) * 100 if avg_total > 0 else 0
+                pct_postprocess = (avg_postprocess / avg_total) * 100 if avg_total > 0 else 0
+                pct_box_scale = (avg_box_scale / avg_total) * 100 if avg_total > 0 else 0
+                pct_tracking = (avg_tracking / avg_total) * 100 if avg_total > 0 else 0
+                
+                print(f"\n[RKNN YOLO TIMING] Frame {self._timing_frame_count} (avg over last {window_size}):")
+                print(f"  Preprocess:   {avg_preprocess:6.2f}ms ({pct_preprocess:5.1f}%)")
+                print(f"  Inference:    {avg_inference:6.2f}ms ({pct_inference:5.1f}%) ⚡")
+                print(f"  Postprocess:  {avg_postprocess:6.2f}ms ({pct_postprocess:5.1f}%)")
+                print(f"  Box Scale:    {avg_box_scale:6.2f}ms ({pct_box_scale:5.1f}%)")
+                print(f"  Tracking:     {avg_tracking:6.2f}ms ({pct_tracking:5.1f}%)")
+                print(f"  TOTAL:        {avg_total:6.2f}ms ({1000/avg_total:.1f} FPS)")
             
             return detections
             
@@ -1032,6 +1042,8 @@ class VISION:
     def _data_collector(self):
         """Background thread to continuously process frames from both cameras with shared YOLO model."""
         print(f"{self.name}: Data collector started.")
+        print(f"{self.name}: Timing reports will be printed every 30 frames or every 2 seconds.")
+        print(f"{self.name}: Detailed performance analysis will show bottlenecks and operation breakdowns.\n")
         
         object_id_counter = 0  # Incremental ID for objects
         
@@ -1200,29 +1212,87 @@ class VISION:
                 
                 # Store timing stats
                 timing_stats['frame_get'].append(frame_get_time)
+                timing_stats['frame_copy'].append(frame_copy_time)
                 timing_stats['yolo_left'].append(yolo_left_time)
                 timing_stats['yolo_right'].append(yolo_right_time)
+                timing_stats['detection_tag'].append(detection_tag_time)
                 timing_stats['angle_compute'].append(angle_total_time)
                 timing_stats['buffer_update'].append(buffer_time)
                 timing_stats['total_loop'].append(total_loop_time)
                 frame_count += 1
                 
-                # Print timing summary every 60 frames
-                if frame_count % 60 == 0:
-                    avg_frame_get = np.mean(timing_stats['frame_get'][-60:])
-                    avg_yolo_left = np.mean(timing_stats['yolo_left'][-60:])
-                    avg_yolo_right = np.mean(timing_stats['yolo_right'][-60:])
-                    avg_angle = np.mean(timing_stats['angle_compute'][-60:])
-                    avg_buffer = np.mean(timing_stats['buffer_update'][-60:])
-                    avg_total = np.mean(timing_stats['total_loop'][-60:])
+                # Print detailed timing summary every 30 frames or every 2 seconds
+                current_time = time.time()
+                should_report = (frame_count % 30 == 0) or (current_time - last_timing_report >= 2.0)
+                
+                if should_report and len(timing_stats['total_loop']) >= 10:
+                    # Calculate averages over last 30 frames (or all if less than 30)
+                    window_size = min(30, len(timing_stats['total_loop']))
+                    window_slice = slice(-window_size, None)
                     
-                    print(f"[VISION TIMING] Frame {frame_count}: "
-                          f"FrameGet={avg_frame_get:.1f}ms | "
-                          f"YOLO_Left={avg_yolo_left:.1f}ms | "
-                          f"YOLO_Right={avg_yolo_right:.1f}ms | "
-                          f"Angle={avg_angle:.1f}ms | "
-                          f"Buffer={avg_buffer:.1f}ms | "
-                          f"Total={avg_total:.1f}ms ({1000/avg_total:.1f} FPS)")
+                    avg_frame_get = np.mean(timing_stats['frame_get'][window_slice])
+                    avg_frame_copy = np.mean(timing_stats['frame_copy'][window_slice])
+                    avg_yolo_left = np.mean(timing_stats['yolo_left'][window_slice])
+                    avg_yolo_right = np.mean(timing_stats['yolo_right'][window_slice])
+                    avg_detection_tag = np.mean(timing_stats['detection_tag'][window_slice])
+                    avg_angle = np.mean(timing_stats['angle_compute'][window_slice])
+                    avg_buffer = np.mean(timing_stats['buffer_update'][window_slice])
+                    avg_total = np.mean(timing_stats['total_loop'][window_slice])
+                    
+                    # Calculate percentages
+                    yolo_total = avg_yolo_left + avg_yolo_right
+                    pct_frame_get = (avg_frame_get / avg_total) * 100 if avg_total > 0 else 0
+                    pct_frame_copy = (avg_frame_copy / avg_total) * 100 if avg_total > 0 else 0
+                    pct_yolo_total = (yolo_total / avg_total) * 100 if avg_total > 0 else 0
+                    pct_yolo_left = (avg_yolo_left / avg_total) * 100 if avg_total > 0 else 0
+                    pct_yolo_right = (avg_yolo_right / avg_total) * 100 if avg_total > 0 else 0
+                    pct_detection_tag = (avg_detection_tag / avg_total) * 100 if avg_total > 0 else 0
+                    pct_angle = (avg_angle / avg_total) * 100 if avg_total > 0 else 0
+                    pct_buffer = (avg_buffer / avg_total) * 100 if avg_total > 0 else 0
+                    
+                    # Find max times to identify outliers
+                    max_yolo_left = np.max(timing_stats['yolo_left'][window_slice])
+                    max_yolo_right = np.max(timing_stats['yolo_right'][window_slice])
+                    max_total = np.max(timing_stats['total_loop'][window_slice])
+                    
+                    # Count detections
+                    num_detections_left = len(detections_left) if detections_left else 0
+                    num_detections_right = len(detections_right) if detections_right else 0
+                    total_detections = num_detections_left + num_detections_right
+                    
+                    print(f"\n{'='*80}")
+                    print(f"[VISION TIMING REPORT] Frame {frame_count} | FPS: {1000/avg_total:.1f} | Detections: L={num_detections_left}, R={num_detections_right}, Total={total_detections}")
+                    print(f"{'='*80}")
+                    print(f"Operation Breakdown (avg over last {window_size} frames):")
+                    print(f"  Frame Get:        {avg_frame_get:6.2f}ms ({pct_frame_get:5.1f}%)")
+                    print(f"  Frame Copy:       {avg_frame_copy:6.2f}ms ({pct_frame_copy:5.1f}%)")
+                    print(f"  YOLO Left:        {avg_yolo_left:6.2f}ms ({pct_yolo_left:5.1f}%) [max: {max_yolo_left:.1f}ms]")
+                    print(f"  YOLO Right:       {avg_yolo_right:6.2f}ms ({pct_yolo_right:5.1f}%) [max: {max_yolo_right:.1f}ms]")
+                    print(f"  YOLO Total:       {yolo_total:6.2f}ms ({pct_yolo_total:5.1f}%)")
+                    print(f"  Detection Tag:    {avg_detection_tag:6.2f}ms ({pct_detection_tag:5.1f}%)")
+                    print(f"  Angle Compute:    {avg_angle:6.2f}ms ({pct_angle:5.1f}%)")
+                    print(f"  Buffer Update:    {avg_buffer:6.2f}ms ({pct_buffer:5.1f}%)")
+                    print(f"  {'-'*76}")
+                    print(f"  TOTAL LOOP:       {avg_total:6.2f}ms (100.0%) [max: {max_total:.1f}ms]")
+                    
+                    # Identify bottleneck
+                    bottlenecks = []
+                    if pct_yolo_total > 70:
+                        bottlenecks.append(f"YOLO inference ({pct_yolo_total:.1f}%)")
+                    if pct_frame_copy > 10:
+                        bottlenecks.append(f"Frame copying ({pct_frame_copy:.1f}%)")
+                    if pct_angle > 10:
+                        bottlenecks.append(f"Angle computation ({pct_angle:.1f}%)")
+                    if pct_buffer > 5:
+                        bottlenecks.append(f"Buffer operations ({pct_buffer:.1f}%)")
+                    
+                    if bottlenecks:
+                        print(f"\n⚠️  Potential Bottlenecks: {', '.join(bottlenecks)}")
+                    else:
+                        print(f"\n✅ Processing balanced across operations")
+                    print(f"{'='*80}\n")
+                    
+                    last_timing_report = current_time
                 
                 # Update FPS
                 self.fps_counter += 1
@@ -1587,4 +1657,12 @@ class VISION:
             import traceback
             traceback.print_exc()
         finally:
-        
+            try:
+                cv2.destroyWindow(window_name)
+            except:
+                pass
+            print(f"{self.name}: Visual debug mode ended")
+    
+    def __repr__(self):
+        return f"<VISION name={self.name}, connected={self.connected}>"
+
