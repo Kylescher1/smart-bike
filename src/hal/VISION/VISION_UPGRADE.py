@@ -1316,104 +1316,66 @@ class VISION:
         
         print(f"{self.name}: Data collector stopped.")
     
-    def read(self) -> Dict:
+    def read(self) -> List[Dict]:
         """
-        Return the latest buffer frame (non-blocking).
+        Return the latest object detections (non-blocking).
         Contains combined detections from both left and right cameras.
         
         Returns:
-            dict: {
-                'timestamp': float,
-                'objects': [
-                    {
-                        'theta': float,      # horizontal angle from center
-                        'alpha': float,      # vertical angle from center
-                        'width': int,        # bounding box width
-                        'height': int,       # bounding box height
-                        'confidence': float,  # YOLO confidence
-                        'id': int,           # unique object ID
-                        'type': str,         # class label
-                        'camera': str        # 'left' or 'right'
-                    },
-                    ...
-                ]
-            }
+            List of dicts, each containing:
+                'theta': float,      # horizontal angle from center
+                'alpha': float,      # vertical angle from center
+                'w': int,            # bounding box width
+                'h': int,            # bounding box height
+                'confidence': float, # YOLO confidence
+                'ID': int,           # unique object ID
+                'name': str,         # class label
+                'time': float        # timestamp
         """
         with self.buffer_lock:
             if len(self.data_buffer) > 0:
-                return self.data_buffer[-1].copy()
+                buffer_entry = self.data_buffer[-1]
+                objects = buffer_entry.get('objects', [])
+                timestamp = buffer_entry.get('timestamp', time.time())
             else:
-                return {
-                    'timestamp': time.time(),
-                    'objects': []
-                }
+                objects = []
+                timestamp = time.time()
+        
+        # Format objects with requested fields
+        formatted_objects = []
+        for obj in objects:
+            formatted_obj = {
+                'theta': obj.get('theta', 0.0),
+                'alpha': obj.get('alpha', 0.0),
+                'w': obj.get('width', 0),
+                'h': obj.get('height', 0),
+                'confidence': obj.get('confidence', 0.0),
+                'ID': obj.get('id', 0),
+                'name': obj.get('type', 'unknown'),
+                'time': timestamp
+            }
+            formatted_objects.append(formatted_obj)
+        
+        return formatted_objects
     
-    def debug(self) -> Dict:
+    def debug(self) -> List[Dict]:
         """
-        Return internal diagnostics with visualizations for both camera streams.
+        Return object detection data with required fields.
+        Same format as read().
         
         Returns:
-            dict: {
-                'last_left_image': np.ndarray,
-                'last_right_image': np.ndarray,
-                'yolo_visualization_left': np.ndarray,
-                'yolo_visualization_right': np.ndarray,
-                'fps': float,
-                'errors': List[str],
-                'buffer_size': int,
-                'num_objects': int
-            }
+            List of dicts, each containing:
+                'theta': float,      # horizontal angle from center
+                'alpha': float,      # vertical angle from center
+                'w': int,            # bounding box width
+                'h': int,            # bounding box height
+                'confidence': float, # YOLO confidence
+                'ID': int,           # unique object ID
+                'name': str,         # class label
+                'time': float        # timestamp
         """
-        errors = []
-        
-        # Get latest data
-        latest = self.read()
-        num_objects = len(latest.get('objects', []))
-        
-        # Get cached detections (thread-safe)
-        with self.frame_lock:
-            last_left = self.last_left_frame.copy() if self.last_left_frame is not None else None
-            last_right = self.last_right_frame.copy() if self.last_right_frame is not None else None
-            detections = self.last_detections_cache.copy() if self.last_detections_cache else []
-        
-        # Separate detections by camera
-        detections_left = [det for det in detections if det.get('camera') == 'left']
-        detections_right = [det for det in detections if det.get('camera') == 'right']
-        
-        # Create YOLO visualization for left camera
-        yolo_viz_left = None
-        if last_left is not None:
-            try:
-                yolo_viz_left = last_left.copy()
-                if draw_detections is not None and detections_left:
-                    yolo_viz_left = draw_detections(yolo_viz_left, detections_left, 
-                                                  tracker=self.yolo.tracker if self.yolo else None)
-            except Exception as e:
-                errors.append(f"YOLO visualization error (left): {e}")
-                yolo_viz_left = last_left.copy() if last_left is not None else None
-        
-        # Create YOLO visualization for right camera
-        yolo_viz_right = None
-        if last_right is not None:
-            try:
-                yolo_viz_right = last_right.copy()
-                if draw_detections is not None and detections_right:
-                    yolo_viz_right = draw_detections(yolo_viz_right, detections_right, 
-                                                    tracker=self.yolo.tracker if self.yolo else None)
-            except Exception as e:
-                errors.append(f"YOLO visualization error (right): {e}")
-                yolo_viz_right = last_right.copy() if last_right is not None else None
-        
-        return {
-            'last_left_image': last_left,
-            'last_right_image': last_right,
-            'yolo_visualization_left': yolo_viz_left,
-            'yolo_visualization_right': yolo_viz_right,
-            'fps': self.current_fps,
-            'errors': errors,
-            'buffer_size': len(self.data_buffer),
-            'num_objects': num_objects
-        }
+        # read() now returns formatted objects directly
+        return self.read()
     
     def _load_config_for_saving(self):
         """Load config.dill to prepare for saving."""
@@ -1584,6 +1546,16 @@ class VISION:
                     else:
                         all_detections = []
                 
+                # Get formatted objects with theta, alpha, time from read()
+                formatted_objects = self.read()
+                
+                # Create a mapping from track_id to formatted object for matching
+                id_to_object = {}
+                for obj in formatted_objects:
+                    obj_id = obj.get('ID', None)
+                    if obj_id is not None:
+                        id_to_object[obj_id] = obj
+                
                 # Separate detections by camera
                 detections_left = [det for det in all_detections if det.get('camera') == 'left']
                 detections_right = [det for det in all_detections if det.get('camera') == 'right']
@@ -1608,14 +1580,27 @@ class VISION:
                             color = (0, 255, 0)  # Green
                             cv2.rectangle(display_left, (x1, y1), (x2, y2), color, 2)
                             
-                            # Prepare label
-                            class_name = det.get('class_name', 'object')
-                            score = det.get('score', 0.0)
+                            # Find matching formatted object to get theta, alpha, time
                             track_id = det.get('track_id')
+                            obj_data = id_to_object.get(track_id) if track_id is not None else None
                             
-                            label = f"{class_name} {score:.2f}"
-                            if track_id is not None:
-                                label += f" ID:{track_id}"
+                            # If no match found, compute theta/alpha from bbox
+                            if obj_data is None:
+                                center_x = (x1 + x2) / 2.0
+                                center_y = (y1 + y2) / 2.0
+                                fov_h = getattr(self, 'fov_horizontal', 60.0)
+                                fov_v = getattr(self, 'fov_vertical', 45.0)
+                                theta = ((center_x - w / 2.0) / w) * fov_h
+                                alpha = ((center_y - h / 2.0) / h) * fov_v
+                                obj_time = formatted_objects[0].get('time', time.time()) if formatted_objects else time.time()
+                            else:
+                                theta = obj_data.get('theta', 0.0)
+                                alpha = obj_data.get('alpha', 0.0)
+                                obj_time = obj_data.get('time', time.time())
+                            
+                            # Prepare label with name, theta, alpha, time
+                            class_name = det.get('class_name', 'object')
+                            label = f"{class_name} θ:{theta:.1f}° α:{alpha:.1f}° t:{obj_time:.1f}"
                             
                             # Draw label background
                             (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
@@ -1662,14 +1647,27 @@ class VISION:
                             color = (255, 0, 0)  # Blue
                             cv2.rectangle(display_right, (x1, y1), (x2, y2), color, 2)
                             
-                            # Prepare label
-                            class_name = det.get('class_name', 'object')
-                            score = det.get('score', 0.0)
+                            # Find matching formatted object to get theta, alpha, time
                             track_id = det.get('track_id')
+                            obj_data = id_to_object.get(track_id) if track_id is not None else None
                             
-                            label = f"{class_name} {score:.2f}"
-                            if track_id is not None:
-                                label += f" ID:{track_id}"
+                            # If no match found, compute theta/alpha from bbox
+                            if obj_data is None:
+                                center_x = (x1 + x2) / 2.0
+                                center_y = (y1 + y2) / 2.0
+                                fov_h = getattr(self, 'fov_horizontal', 60.0)
+                                fov_v = getattr(self, 'fov_vertical', 45.0)
+                                theta = ((center_x - w / 2.0) / w) * fov_h
+                                alpha = ((center_y - h / 2.0) / h) * fov_v
+                                obj_time = formatted_objects[0].get('time', time.time()) if formatted_objects else time.time()
+                            else:
+                                theta = obj_data.get('theta', 0.0)
+                                alpha = obj_data.get('alpha', 0.0)
+                                obj_time = obj_data.get('time', time.time())
+                            
+                            # Prepare label with name, theta, alpha, time
+                            class_name = det.get('class_name', 'object')
+                            label = f"{class_name} θ:{theta:.1f}° α:{alpha:.1f}° t:{obj_time:.1f}"
                             
                             # Draw label background
                             (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)

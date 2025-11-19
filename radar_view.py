@@ -100,9 +100,9 @@ class RadarView:
         # Draw objects
         for obj in objects:
             theta = obj.get('theta', 0.0)  # Horizontal angle in degrees
-            camera = obj.get('camera', 'left')
-            obj_type = obj.get('type', 'default')
-            obj_id = obj.get('id', 0)
+            # Note: camera info not available in new format, using default
+            obj_type = obj.get('name', 'default')
+            obj_id = obj.get('ID', 0)
             confidence = obj.get('confidence', 0.0)
             
             # Convert theta to screen coordinates
@@ -122,8 +122,8 @@ class RadarView:
             x = center + int(radius * math.sin(theta_rad))
             y = center - int(radius * math.cos(theta_rad))
             
-            # Get color based on camera
-            color = self.camera_colors.get(camera, (255, 255, 255))
+            # Use default color (camera info not in new format)
+            color = (255, 255, 255)  # White for all objects
             
             # Draw object as circle with size based on confidence
             radius_obj = max(5, int(10 * confidence))
@@ -216,9 +216,8 @@ class RadarView:
         for obj in objects:
             theta = obj.get('theta', 0.0)  # Horizontal angle
             alpha = obj.get('alpha', 0.0)   # Vertical angle
-            camera = obj.get('camera', 'left')
-            obj_type = obj.get('type', 'default')
-            obj_id = obj.get('id', 0)
+            obj_type = obj.get('name', 'default')
+            obj_id = obj.get('ID', 0)
             confidence = obj.get('confidence', 0.0)
             
             # Normalize angles to max_range
@@ -238,8 +237,8 @@ class RadarView:
             x = max(10, min(self.canvas_size - 10, x))
             y = max(10, min(self.canvas_size - 10, y))
             
-            # Get color based on camera
-            color = self.camera_colors.get(camera, (255, 255, 255))
+            # Use default color (camera info not in new format)
+            color = (255, 255, 255)  # White for all objects
             
             # Draw object as circle with size based on confidence
             radius_obj = max(5, int(10 * confidence))
@@ -304,8 +303,7 @@ class RadarView:
             
             while True:
                 # Get latest objects from vision system
-                result = self.vision.read()
-                objects = result.get('objects', [])
+                objects = self.vision.read()
                 
                 # Draw radar views
                 top_down_canvas = self.draw_top_down_view(objects)
