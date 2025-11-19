@@ -1545,20 +1545,25 @@ class VISION:
     
     def debug_visual(self):
         """
-        Simple visual debug mode showing YOLO detections.
+        Visual debug mode showing YOLO detections for both camera streams.
         Press 'q' to quit.
         """
         if not self.connected:
             print(f"{self.name}: Cannot start visual debug mode. Vision system not connected. Call start() first.")
             return
         
-        print(f"{self.name}: Starting YOLO visualization mode...")
+        print(f"{self.name}: Starting dual camera YOLO visualization mode...")
         print(f"{self.name}: Press 'q' to exit")
         
-        window_name = f"{self.name} - YOLO Visualization"
+        window_name_left = f"{self.name} - Left Camera"
+        window_name_right = f"{self.name} - Right Camera"
         
         try:
-            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(window_name_left, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(window_name_right, cv2.WINDOW_NORMAL)
+            # Position windows side by side
+            cv2.moveWindow(window_name_left, 100, 100)
+            cv2.moveWindow(window_name_right, 750, 100)
         except Exception as e:
             print(f"{self.name}: Warning: Window creation issue: {e}")
             print(f"{self.name}: Visual debug mode may not work properly")
@@ -1566,82 +1571,130 @@ class VISION:
         
         try:
             while True:
-                # Get latest frame and detections (thread-safe copy)
+                # Get latest frames and detections (thread-safe copy)
                 with self.frame_lock:
-                    if self.last_left_frame is not None:
-                        frame = self.last_left_frame.copy()
-                    else:
-                        frame = None
+                    left_frame = self.last_left_frame.copy() if self.last_left_frame is not None else None
+                    right_frame = self.last_right_frame.copy() if self.last_right_frame is not None else None
                     
                     # Get cached detections if recent
                     current_time = time.time()
                     if hasattr(self, 'last_detections_cache') and \
                        (current_time - self.last_detections_time) < 1.0:
-                        detections = self.last_detections_cache.copy() if self.last_detections_cache else []
+                        all_detections = self.last_detections_cache.copy() if self.last_detections_cache else []
                     else:
-                        detections = []
+                        all_detections = []
                 
-                if frame is None:
-                    time.sleep(0.01)
-                    continue
+                # Separate detections by camera
+                detections_left = [det for det in all_detections if det.get('camera') == 'left']
+                detections_right = [det for det in all_detections if det.get('camera') == 'right']
                 
-                # Validate frame shape
-                if not hasattr(frame, 'shape') or len(frame.shape) < 2:
-                    time.sleep(0.01)
-                    continue
+                # Process left camera frame
+                if left_frame is not None:
+                    # Validate frame shape
+                    if hasattr(left_frame, 'shape') and len(left_frame.shape) >= 2 and left_frame.size > 0:
+                        # Create display frame (copy for drawing)
+                        display_left = left_frame.copy()
+                        h, w = display_left.shape[:2]
+                        
+                        # Draw left camera detections
+                        for det in detections_left:
+                            bbox = det.get('bbox', [])
+                            if len(bbox) != 4:
+                                continue
+                            
+                            x1, y1, x2, y2 = [int(coord) for coord in bbox]
+                            
+                            # Draw bounding box (green for left)
+                            color = (0, 255, 0)  # Green
+                            cv2.rectangle(display_left, (x1, y1), (x2, y2), color, 2)
+                            
+                            # Prepare label
+                            class_name = det.get('class_name', 'object')
+                            score = det.get('score', 0.0)
+                            track_id = det.get('track_id')
+                            
+                            label = f"{class_name} {score:.2f}"
+                            if track_id is not None:
+                                label += f" ID:{track_id}"
+                            
+                            # Draw label background
+                            (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                            cv2.rectangle(display_left, (x1, y1 - label_h - 5), 
+                                        (x1 + label_w, y1), color, -1)
+                            
+                            # Draw label text
+                            cv2.putText(display_left, label, (x1, y1 - 5), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                        
+                        # Add metadata overlay
+                        fps_text = f"FPS: {self.current_fps:.1f}"
+                        cv2.putText(display_left, fps_text, (10, 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        
+                        det_text = f"Left Detections: {len(detections_left)}"
+                        cv2.putText(display_left, det_text, (10, 60), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        
+                        # Display left frame
+                        try:
+                            cv2.imshow(window_name_left, display_left)
+                        except Exception as e:
+                            if self.debug_mode:
+                                print(f"{self.name}: imshow error (left): {e}")
                 
-                # Create display frame (copy for drawing)
-                display_frame = frame.copy()
-                h, w = display_frame.shape[:2]
-                
-                # Draw detections
-                for det in detections:
-                    bbox = det.get('bbox', [])
-                    if len(bbox) != 4:
-                        continue
-                    
-                    x1, y1, x2, y2 = [int(coord) for coord in bbox]
-                    
-                    # Draw bounding box
-                    color = (0, 255, 0)  # Green
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
-                    
-                    # Prepare label
-                    class_name = det.get('class_name', 'object')
-                    score = det.get('score', 0.0)
-                    track_id = det.get('track_id')
-                    
-                    label = f"{class_name} {score:.2f}"
-                    if track_id is not None:
-                        label += f" ID:{track_id}"
-                    
-                    # Draw label background
-                    (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                    cv2.rectangle(display_frame, (x1, y1 - label_h - 5), 
-                                (x1 + label_w, y1), color, -1)
-                    
-                    # Draw label text
-                    cv2.putText(display_frame, label, (x1, y1 - 5), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-                
-                # Add metadata overlay
-                fps_text = f"FPS: {self.current_fps:.1f}"
-                cv2.putText(display_frame, fps_text, (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                
-                if detections:
-                    det_text = f"Detections: {len(detections)}"
-                    cv2.putText(display_frame, det_text, (10, 60), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                
-                # Display the frame
-                try:
-                    if display_frame is not None and hasattr(display_frame, 'shape') and len(display_frame.shape) >= 2:
-                        if display_frame.size > 0:
-                            cv2.imshow(window_name, display_frame)
-                except Exception as e:
-                    if self.debug_mode:
-                        print(f"{self.name}: imshow error: {e}")
+                # Process right camera frame
+                if right_frame is not None:
+                    # Validate frame shape
+                    if hasattr(right_frame, 'shape') and len(right_frame.shape) >= 2 and right_frame.size > 0:
+                        # Create display frame (copy for drawing)
+                        display_right = right_frame.copy()
+                        h, w = display_right.shape[:2]
+                        
+                        # Draw right camera detections
+                        for det in detections_right:
+                            bbox = det.get('bbox', [])
+                            if len(bbox) != 4:
+                                continue
+                            
+                            x1, y1, x2, y2 = [int(coord) for coord in bbox]
+                            
+                            # Draw bounding box (blue for right)
+                            color = (255, 0, 0)  # Blue
+                            cv2.rectangle(display_right, (x1, y1), (x2, y2), color, 2)
+                            
+                            # Prepare label
+                            class_name = det.get('class_name', 'object')
+                            score = det.get('score', 0.0)
+                            track_id = det.get('track_id')
+                            
+                            label = f"{class_name} {score:.2f}"
+                            if track_id is not None:
+                                label += f" ID:{track_id}"
+                            
+                            # Draw label background
+                            (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                            cv2.rectangle(display_right, (x1, y1 - label_h - 5), 
+                                        (x1 + label_w, y1), color, -1)
+                            
+                            # Draw label text
+                            cv2.putText(display_right, label, (x1, y1 - 5), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                        
+                        # Add metadata overlay
+                        fps_text = f"FPS: {self.current_fps:.1f}"
+                        cv2.putText(display_right, fps_text, (10, 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        
+                        det_text = f"Right Detections: {len(detections_right)}"
+                        cv2.putText(display_right, det_text, (10, 60), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        
+                        # Display right frame
+                        try:
+                            cv2.imshow(window_name_right, display_right)
+                        except Exception as e:
+                            if self.debug_mode:
+                                print(f"{self.name}: imshow error (right): {e}")
                 
                 # Check for quit key
                 key = cv2.waitKey(1) & 0xFF
@@ -1658,7 +1711,8 @@ class VISION:
             traceback.print_exc()
         finally:
             try:
-                cv2.destroyWindow(window_name)
+                cv2.destroyWindow(window_name_left)
+                cv2.destroyWindow(window_name_right)
             except:
                 pass
             print(f"{self.name}: Visual debug mode ended")
