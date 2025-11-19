@@ -2,14 +2,13 @@
 Vision System Upgrade - Complete Refactor
 
 This module implements a new vision system architecture with:
-- YOLO object detection
-- Custom block matching for depth estimation (in debug mode)
+- Dual camera YOLO object detection
 - Thread-safe buffering
 - Structured object detection output
 
 Architecture:
-- Camera class: Handles stereo camera capture and rectification
-- Yolo class: Runs YOLO inference on camera stream
+- Camera class: Handles dual camera capture and rectification
+- Yolo class: Runs YOLO inference on camera streams (shared model)
 - VISION class: Main interface with start(), stop(), read(), debug()
 """
 
@@ -159,12 +158,12 @@ YOLO_AVAILABLE = RKNN_AVAILABLE or ULTRALYTICS_AVAILABLE
 
 class VisionCamera:
     """
-    Streaming camera that continuously captures frames in background thread.
-    Feeds video stream directly to YOLO without blocking.
-    Only uses left camera for YOLO (right camera optional for stereo/depth).
+    Streaming camera that continuously captures frames from both cameras in background thread.
+    Feeds video streams directly to YOLO without blocking.
+    Both cameras are processed independently with the same YOLO model.
     """
     
-    def __init__(self, left_config: Dict, right_config: Optional[Dict] = None):
+    def __init__(self, left_config: Dict, right_config: Dict):
         """
         Initialize streaming camera system.
         
@@ -173,7 +172,7 @@ class VisionCamera:
                 - port: Camera port/index
                 - map_x: Rectification map X (optional)
                 - map_y: Rectification map Y (optional)
-            right_config: Optional right camera config (for stereo/depth, not used for YOLO)
+            right_config: Right camera config (required) with same structure as left_config
         """
         self.left_config = left_config
         self.right_config = right_config
@@ -185,12 +184,13 @@ class VisionCamera:
         # Extract calibration maps (optional)
         self.left_map_x = left_config.get('map_x')
         self.left_map_y = left_config.get('map_y')
-        self.right_map_x = right_config.get('map_x') if right_config else None
-        self.right_map_y = right_config.get('map_y') if right_config else None
+        self.right_map_x = right_config.get('map_x')
+        self.right_map_y = right_config.get('map_y')
         
         # Check if maps are available
         self.has_maps = (
-            self.left_map_x is not None and self.left_map_y is not None
+            self.left_map_x is not None and self.left_map_y is not None and
+            self.right_map_x is not None and self.right_map_y is not None
         )
         
         # Streaming state
@@ -216,7 +216,7 @@ class VisionCamera:
         if self.streaming:
             return
         
-        # Open left camera (required for YOLO)
+        # Open left camera (required)
         self.left_camera = Camera(self.left_config['port'], CAMERA_CONFIG)
         try:
             self.left_camera.open()
@@ -224,15 +224,13 @@ class VisionCamera:
         except Exception as e:
             raise RuntimeError(f"Failed to open left camera: {e}")
         
-        # Open right camera (optional, for stereo/depth)
-        if self.right_config:
-            self.right_camera = Camera(self.right_config['port'], CAMERA_CONFIG)
-            try:
-                self.right_camera.open()
-                print(f"✅ Right camera opened on port {self.right_config['port']}")
-            except Exception as e:
-                print(f"⚠️ Failed to open right camera: {e} (continuing with left only)")
-                self.right_camera = None
+        # Open right camera (required)
+        self.right_camera = Camera(self.right_config['port'], CAMERA_CONFIG)
+        try:
+            self.right_camera.open()
+            print(f"✅ Right camera opened on port {self.right_config['port']}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to open right camera: {e}")
         
         # Pre-scale maps if available (one-time setup for performance)
         if self.has_maps and self.left_camera:
@@ -252,8 +250,8 @@ class VisionCamera:
                     self.left_map_x_scaled = self.left_map_x
                     self.left_map_y_scaled = self.left_map_y
                 
-                # Scale right maps if right camera available
-                if self.right_camera and self.right_map_x is not None:
+                # Scale right maps
+                if self.right_map_x is not None:
                     if (h_raw, w_raw) != (h_map, w_map):
                         self.right_map_x_scaled = cv2.resize(self.right_map_x, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_x
                         self.right_map_y_scaled = cv2.resize(self.right_map_y, (w_raw, h_raw), interpolation=cv2.INTER_LINEAR) * scale_y
@@ -311,7 +309,7 @@ class VisionCamera:
                             self.latest_left_frame = left_rect.copy()
                         self.frame_ready_event.set()
                 
-                # Read right frame (optional, for stereo/depth)
+                # Read right frame (required)
                 if self.right_camera:
                     right_raw = self.right_camera.read_frame()
                     if right_raw is not None:
@@ -801,6 +799,17 @@ class VISION:
     Provides start(), stop(), read(), and debug() methods.
     """
     
+    # ========================================================================
+    # EASY MODEL SWITCHING - Change this to switch between .rknn and .pt
+    # ========================================================================
+    # Set to None to use config file or auto-detect, or set a specific path:
+    # Examples:
+    #   DEFAULT_MODEL_PATH = 'yolo/models/yolo11n.pt'      # Use .pt model (Windows/CPU/GPU)
+    #   DEFAULT_MODEL_PATH = 'yolo/models/yolo11n.rknn'    # Use .rknn model (NPU)
+    #   DEFAULT_MODEL_PATH = None                          # Auto-detect (default)
+    DEFAULT_MODEL_PATH = 'yolo/models/yolo11n.pt' 
+    # ========================================================================
+    
     def __init__(self, name: str = "Unnamed VISION", **kwargs):
         """
         Initialize VISION system.
@@ -808,11 +817,9 @@ class VISION:
         Args:
             name: System name
             **kwargs: Configuration dict with keys:
-                - camera.left: Left camera config
-                - camera.right: Right camera config
-                - camera.yolo: YOLO config (model_path, conf_threshold, etc.)
-                - baseline: Stereo baseline (meters)
-                - focal_length_px: Focal length (pixels)
+                - left: Left camera config (required)
+                - right: Right camera config (required)
+                - yolo: YOLO config (model_path, conf_threshold, etc.)
                 - buffer_size: Circular buffer size
                 - safe_mode: If True, disables features that might cause segfaults
         """
@@ -829,9 +836,11 @@ class VISION:
         self.right_config = kwargs.get('right', {})
         self.yolo_config = kwargs.get('yolo', {})
         
-        # Depth parameters (for custom block matching)
-        self.baseline = getattr(self, 'baseline', 0.12)  # meters
-        self.focal_length_px = getattr(self, 'focal_length_px', 800.0)  # pixels
+        # Validate that both camera configs are provided
+        if not self.left_config:
+            raise ValueError("Left camera config is required")
+        if not self.right_config:
+            raise ValueError("Right camera config is required")
         
         # Buffer configuration (reduced for memory efficiency)
         # Force smaller buffer even if config says otherwise
@@ -853,7 +862,6 @@ class VISION:
         # Debug state
         self.last_left_frame: Optional[np.ndarray] = None
         self.last_right_frame: Optional[np.ndarray] = None
-        self.last_disparity: Optional[np.ndarray] = None
         self.last_yolo_frame: Optional[np.ndarray] = None
         self.last_detections_cache: List[Dict] = []  # Cache last detections to avoid double YOLO call
         self.last_detections_time: float = 0.0
@@ -904,7 +912,37 @@ class VISION:
         self.camera.start()
         
         # Initialize YOLO (optional - not needed for calibration)
-        model_path = self.yolo_config.get('model_path') if self.yolo_config else None
+        # Priority: 1) DEFAULT_MODEL_PATH class constant (overrides config), 2) config file, 3) auto-detect
+        model_path = None
+        
+        # Use hardcoded DEFAULT_MODEL_PATH first (takes priority over config)
+        if VISION.DEFAULT_MODEL_PATH is not None:
+            model_path = VISION.DEFAULT_MODEL_PATH
+            if Path(model_path).exists():
+                print(f"✅ Using hardcoded model path (overrides config): {model_path}")
+            else:
+                print(f"⚠️  Hardcoded model path not found: {model_path}, falling back to config/auto-detect")
+                model_path = None
+        
+        # If no hardcoded path, use config file
+        if model_path is None:
+            model_path = self.yolo_config.get('model_path') if self.yolo_config else None
+            
+            # If config specifies .rknn but RKNN is not available, try to use .pt version instead
+            if model_path and model_path.endswith('.rknn') and not RKNN_AVAILABLE:
+                # Try to find corresponding .pt file
+                pt_path = model_path.replace('.rknn', '.pt')
+                if Path(pt_path).exists():
+                    print(f"⚠️  Config specifies .rknn model but RKNN not available on Windows")
+                    print(f"✅ Using .pt version instead: {pt_path}")
+                    model_path = pt_path
+                elif VISION.DEFAULT_MODEL_PATH is not None and Path(VISION.DEFAULT_MODEL_PATH).exists():
+                    print(f"⚠️  Config specifies .rknn model but RKNN not available on Windows")
+                    print(f"✅ Using DEFAULT_MODEL_PATH instead: {VISION.DEFAULT_MODEL_PATH}")
+                    model_path = VISION.DEFAULT_MODEL_PATH
+                else:
+                    print(f"⚠️  Config specifies .rknn model but RKNN not available, and no .pt fallback found")
+                    model_path = None
         
         # Prefer .rknn models (NPU backend - much faster), fallback to .pt if needed
         if model_path is None:
@@ -992,7 +1030,7 @@ class VISION:
         print(f"{self.name}: Vision system stopped")
     
     def _data_collector(self):
-        """Background thread to continuously process frames from streaming camera."""
+        """Background thread to continuously process frames from both cameras with shared YOLO model."""
         print(f"{self.name}: Data collector started.")
         
         object_id_counter = 0  # Incremental ID for objects
@@ -1000,49 +1038,68 @@ class VISION:
         # Initialize timing stats
         timing_stats = {
             'frame_get': [],
-            'yolo_detect': [],
+            'frame_copy': [],
+            'yolo_left': [],
+            'yolo_right': [],
+            'detection_tag': [],
             'angle_compute': [],
             'buffer_update': [],
             'total_loop': []
         }
         frame_count = 0
+        last_timing_report = time.time()
         
         while not self.stop_event.is_set():
             try:
                 loop_start = time.time()
                 
-                # Get latest frame from streaming camera (non-blocking, already captured in background)
+                # Get latest frames from both cameras (non-blocking, already captured in background)
                 frame_get_start = time.time()
-                left_rect = self.camera.get_latest_frame()
+                left_rect, right_rect = self.camera.get_latest_frames()
                 frame_get_time = (time.time() - frame_get_start) * 1000  # ms
                 
-                if left_rect is None:
-                    time.sleep(0.001)  # Very short sleep if no frame ready
+                if left_rect is None or right_rect is None:
+                    time.sleep(0.001)  # Very short sleep if frames not ready
                     continue
                 
                 # Store for debug (thread-safe frame storage)
+                frame_copy_start = time.time()
                 with self.frame_lock:
                     self.last_left_frame = left_rect.copy()
-                    # Get right frame if available (for debug visualization)
-                    _, right_rect = self.camera.get_latest_frames()
-                    self.last_right_frame = right_rect.copy() if right_rect is not None else None
+                    self.last_right_frame = right_rect.copy()
+                frame_copy_time = (time.time() - frame_copy_start) * 1000  # ms
                 
-                # Run YOLO detection on left frame (streaming - no blocking)
-                yolo_start = time.time()
-                detections = self.yolo.detect(left_rect)
-                yolo_time = (time.time() - yolo_start) * 1000  # ms
+                # Run YOLO detection on left frame (shared model instance)
+                yolo_left_start = time.time()
+                detections_left = self.yolo.detect(left_rect)
+                yolo_left_time = (time.time() - yolo_left_start) * 1000  # ms
+                
+                # Run YOLO detection on right frame (same shared model instance)
+                yolo_right_start = time.time()
+                detections_right = self.yolo.detect(right_rect)
+                yolo_right_time = (time.time() - yolo_right_start) * 1000  # ms
+                
+                # Tag detections with camera source and combine
+                detection_tag_start = time.time()
+                for det in detections_left:
+                    det['camera'] = 'left'
+                for det in detections_right:
+                    det['camera'] = 'right'
+                all_detections = detections_left + detections_right
+                detection_tag_time = (time.time() - detection_tag_start) * 1000  # ms
                 
                 # Cache detections to avoid double YOLO call (thread-safe)
                 with self.frame_lock:  # Reuse frame_lock for detection cache
-                    self.last_detections_cache = detections.copy() if detections else []
+                    self.last_detections_cache = all_detections.copy() if all_detections else []
                     self.last_detections_time = time.time()
                 
-                # Process each detection: compute angles (depth computation removed - SGBM outdated)
+                # Process each detection: compute angles
                 objects = []
                 angle_total_time = 0
                 
-                if detections:
-                    for det in detections:
+                # Process left camera detections
+                if detections_left:
+                    for det in detections_left:
                         bbox = det['bbox']
                         # Ensure bbox coordinates are integers
                         bbox = [int(coord) for coord in bbox]
@@ -1070,7 +1127,7 @@ class VISION:
                         if track_id is None:
                             object_id_counter += 1
                         
-                        # Create object dict (depth set to 0.0 since SGBM removed)
+                        # Create object dict
                         obj = {
                             'theta': float(theta),
                             'alpha': float(alpha),
@@ -1079,7 +1136,50 @@ class VISION:
                             'confidence': float(det['score']),
                             'id': int(obj_id),
                             'type': str(det['class_name']),
-                            'depth': 0.0  # Depth computation removed (SGBM outdated)
+                            'camera': 'left'
+                        }
+                        objects.append(obj)
+                
+                # Process right camera detections
+                if detections_right:
+                    for det in detections_right:
+                        bbox = det['bbox']
+                        # Ensure bbox coordinates are integers
+                        bbox = [int(coord) for coord in bbox]
+                        x1, y1, x2, y2 = bbox
+                        
+                        # Compute angles (theta = horizontal, alpha = vertical)
+                        angle_start = time.time()
+                        h, w = right_rect.shape[:2]
+                        center_x = (x1 + x2) / 2.0
+                        center_y = (y1 + y2) / 2.0
+                        
+                        # Convert pixel coordinates to angles
+                        # Assuming camera FOV (can be configured)
+                        fov_h = getattr(self, 'fov_horizontal', 60.0)  # degrees
+                        fov_v = getattr(self, 'fov_vertical', 45.0)  # degrees
+                        
+                        # Pixel to angle conversion
+                        theta = ((center_x - w / 2.0) / w) * fov_h  # horizontal angle
+                        alpha = ((center_y - h / 2.0) / h) * fov_v  # vertical angle
+                        angle_total_time += (time.time() - angle_start) * 1000  # ms
+                        
+                        # Use track_id as object ID, or assign new ID
+                        track_id = det.get('track_id', None)
+                        obj_id = track_id if track_id is not None else object_id_counter
+                        if track_id is None:
+                            object_id_counter += 1
+                        
+                        # Create object dict
+                        obj = {
+                            'theta': float(theta),
+                            'alpha': float(alpha),
+                            'width': int(x2 - x1),
+                            'height': int(y2 - y1),
+                            'confidence': float(det['score']),
+                            'id': int(obj_id),
+                            'type': str(det['class_name']),
+                            'camera': 'right'
                         }
                         objects.append(obj)
                 
@@ -1100,7 +1200,8 @@ class VISION:
                 
                 # Store timing stats
                 timing_stats['frame_get'].append(frame_get_time)
-                timing_stats['yolo_detect'].append(yolo_time)
+                timing_stats['yolo_left'].append(yolo_left_time)
+                timing_stats['yolo_right'].append(yolo_right_time)
                 timing_stats['angle_compute'].append(angle_total_time)
                 timing_stats['buffer_update'].append(buffer_time)
                 timing_stats['total_loop'].append(total_loop_time)
@@ -1109,14 +1210,16 @@ class VISION:
                 # Print timing summary every 60 frames
                 if frame_count % 60 == 0:
                     avg_frame_get = np.mean(timing_stats['frame_get'][-60:])
-                    avg_yolo = np.mean(timing_stats['yolo_detect'][-60:])
+                    avg_yolo_left = np.mean(timing_stats['yolo_left'][-60:])
+                    avg_yolo_right = np.mean(timing_stats['yolo_right'][-60:])
                     avg_angle = np.mean(timing_stats['angle_compute'][-60:])
                     avg_buffer = np.mean(timing_stats['buffer_update'][-60:])
                     avg_total = np.mean(timing_stats['total_loop'][-60:])
                     
                     print(f"[VISION TIMING] Frame {frame_count}: "
                           f"FrameGet={avg_frame_get:.1f}ms | "
-                          f"YOLO={avg_yolo:.1f}ms | "
+                          f"YOLO_Left={avg_yolo_left:.1f}ms | "
+                          f"YOLO_Right={avg_yolo_right:.1f}ms | "
                           f"Angle={avg_angle:.1f}ms | "
                           f"Buffer={avg_buffer:.1f}ms | "
                           f"Total={avg_total:.1f}ms ({1000/avg_total:.1f} FPS)")
@@ -1146,6 +1249,7 @@ class VISION:
     def read(self) -> Dict:
         """
         Return the latest buffer frame (non-blocking).
+        Contains combined detections from both left and right cameras.
         
         Returns:
             dict: {
@@ -1159,7 +1263,7 @@ class VISION:
                         'confidence': float,  # YOLO confidence
                         'id': int,           # unique object ID
                         'type': str,         # class label
-                        'depth': float       # depth in meters
+                        'camera': str        # 'left' or 'right'
                     },
                     ...
                 ]
@@ -1176,14 +1280,14 @@ class VISION:
     
     def debug(self) -> Dict:
         """
-        Return internal diagnostics.
+        Return internal diagnostics with visualizations for both camera streams.
         
         Returns:
             dict: {
                 'last_left_image': np.ndarray,
                 'last_right_image': np.ndarray,
-                'disparity_map': np.ndarray,
-                'yolo_visualization': np.ndarray,
+                'yolo_visualization_left': np.ndarray,
+                'yolo_visualization_right': np.ndarray,
                 'fps': float,
                 'errors': List[str],
                 'buffer_size': int,
@@ -1196,27 +1300,45 @@ class VISION:
         latest = self.read()
         num_objects = len(latest.get('objects', []))
         
-        # Create YOLO visualization if available (thread-safe)
-        yolo_viz = None
+        # Get cached detections (thread-safe)
         with self.frame_lock:
             last_left = self.last_left_frame.copy() if self.last_left_frame is not None else None
             last_right = self.last_right_frame.copy() if self.last_right_frame is not None else None
+            detections = self.last_detections_cache.copy() if self.last_detections_cache else []
         
-        if last_left is not None and latest.get('raw_yolo'):
+        # Separate detections by camera
+        detections_left = [det for det in detections if det.get('camera') == 'left']
+        detections_right = [det for det in detections if det.get('camera') == 'right']
+        
+        # Create YOLO visualization for left camera
+        yolo_viz_left = None
+        if last_left is not None:
             try:
-                yolo_viz = last_left.copy()
-                if draw_detections is not None:
-                    yolo_viz = draw_detections(yolo_viz, latest['raw_yolo'], 
-                                             tracker=self.yolo.tracker if self.yolo else None)
+                yolo_viz_left = last_left.copy()
+                if draw_detections is not None and detections_left:
+                    yolo_viz_left = draw_detections(yolo_viz_left, detections_left, 
+                                                  tracker=self.yolo.tracker if self.yolo else None)
             except Exception as e:
-                errors.append(f"YOLO visualization error: {e}")
-                yolo_viz = last_left.copy() if last_left is not None else None
+                errors.append(f"YOLO visualization error (left): {e}")
+                yolo_viz_left = last_left.copy() if last_left is not None else None
+        
+        # Create YOLO visualization for right camera
+        yolo_viz_right = None
+        if last_right is not None:
+            try:
+                yolo_viz_right = last_right.copy()
+                if draw_detections is not None and detections_right:
+                    yolo_viz_right = draw_detections(yolo_viz_right, detections_right, 
+                                                    tracker=self.yolo.tracker if self.yolo else None)
+            except Exception as e:
+                errors.append(f"YOLO visualization error (right): {e}")
+                yolo_viz_right = last_right.copy() if last_right is not None else None
         
         return {
             'last_left_image': last_left,
             'last_right_image': last_right,
-            'disparity_map': self.last_disparity.copy() if self.last_disparity is not None else None,
-            'yolo_visualization': yolo_viz,
+            'yolo_visualization_left': yolo_viz_left,
+            'yolo_visualization_right': yolo_viz_right,
             'fps': self.current_fps,
             'errors': errors,
             'buffer_size': len(self.data_buffer),
@@ -1257,10 +1379,6 @@ class VISION:
             # Update YOLO parameters
             if 'yolo' in camera_config:
                 camera_config['yolo']['conf_threshold'] = self.yolo_config.get('conf_threshold', 0.25)
-            
-            # Update depth parameters (for custom block matching)
-            camera_config['baseline'] = self.baseline
-            camera_config['focal_length_px'] = self.focal_length_px
             
             # Update FOV parameters if they exist
             if hasattr(self, 'fov_horizontal'):
@@ -1469,12 +1587,4 @@ class VISION:
             import traceback
             traceback.print_exc()
         finally:
-            try:
-                cv2.destroyWindow(window_name)
-            except:
-                pass
-            print(f"{self.name}: Visual debug mode ended")
-    
-    def __repr__(self):
-        return f"<VISION name={self.name}, connected={self.connected}>"
-
+        
