@@ -81,6 +81,17 @@ def main():
         # Check if camera sensor has debug_visual method and call it
         camera_sensor = sensors.get('camera')
         if camera_sensor and hasattr(camera_sensor, 'debug_visual'):
+            # Option to show radar view alongside camera visualization
+            # Set SHOW_RADAR to True to enable radar view
+            SHOW_RADAR = True  # Change to True to show radar view
+            
+            if SHOW_RADAR and hasattr(camera_sensor, 'debug_radar'):
+                import threading
+                print("Starting radar view in separate thread...")
+                radar_thread = threading.Thread(target=camera_sensor.debug_radar, daemon=True)
+                radar_thread.start()
+                time.sleep(1)  # Give radar view time to initialize
+            
             camera_sensor.debug_visual()
         else:
             # Fallback to regular debug loop

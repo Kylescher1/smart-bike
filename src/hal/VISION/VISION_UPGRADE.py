@@ -1717,6 +1717,28 @@ class VISION:
                 pass
             print(f"{self.name}: Visual debug mode ended")
     
+    def debug_radar(self):
+        """
+        Show radar visualization of detected objects.
+        Displays two windows:
+        1. Top-down view showing horizontal angles (theta)
+        2. Front view showing both horizontal (theta) and vertical (alpha) angles
+        Press 'q' to quit.
+        """
+        if not self.connected:
+            print(f"{self.name}: Cannot start radar view. Vision system not connected. Call start() first.")
+            return
+        
+        try:
+            from radar_view import RadarView
+        except ImportError:
+            print(f"{self.name}: Error: radar_view module not found. Make sure radar_view.py is in the project root.")
+            return
+        
+        print(f"{self.name}: Starting radar visualization...")
+        radar = RadarView(self, canvas_size=600, max_range=90.0)
+        radar.run()
+    
     def __repr__(self):
         return f"<VISION name={self.name}, connected={self.connected}>"
 
