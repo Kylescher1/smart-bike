@@ -1929,6 +1929,152 @@ class VISION:
                 pass
             print(f"{self.name}: Tuner mode ended")
     
+    def debug_spherical_3d(self):
+        """
+        Create a 3D spherical visualization of detected objects.
+        Objects are displayed as points on a unit sphere using their x, y, z coordinates.
+        Press 'q' to quit.
+        """
+        if not self.connected:
+            print(f"{self.name}: Cannot start 3D visualization. Vision system not connected. Call start() first.")
+            return
+        
+        try:
+            import matplotlib.pyplot as plt
+            from mpl_toolkits.mplot3d import Axes3D
+            import matplotlib.animation as animation
+        except ImportError:
+            print(f"{self.name}: matplotlib not available. Please install: pip install matplotlib")
+            return
+        
+        print(f"{self.name}: Starting 3D spherical visualization...")
+        print(f"{self.name}: Press 'q' to exit, close window to quit")
+        
+        # Create figure and 3D axis
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # Set equal aspect ratio
+        ax.set_box_aspect([1, 1, 1])
+        
+        # Draw unit sphere wireframe as reference
+        u = np.linspace(0, 2 * np.pi, 50)
+        v = np.linspace(0, np.pi, 50)
+        x_sphere = np.outer(np.cos(u), np.sin(v))
+        y_sphere = np.outer(np.sin(u), np.sin(v))
+        z_sphere = np.outer(np.ones(np.size(u)), np.cos(v))
+        ax.plot_wireframe(x_sphere, y_sphere, z_sphere, alpha=0.1, color='gray', linewidth=0.5)
+        
+        # Set axis limits
+        ax.set_xlim([-1.2, 1.2])
+        ax.set_ylim([-1.2, 1.2])
+        ax.set_zlim([-1.2, 1.2])
+        
+        # Labels
+        ax.set_xlabel('X', fontsize=10)
+        ax.set_ylabel('Y', fontsize=10)
+        ax.set_zlabel('Z', fontsize=10)
+        ax.set_title(f'{self.name} - 3D Spherical Object Visualization', fontsize=14, fontweight='bold')
+        
+        # Add origin point
+        ax.scatter([0], [0], [0], s=50, c='black', marker='o', label='Origin')
+        
+        # Color map for object types
+        type_colors = {}
+        color_palette = plt.cm.tab20(np.linspace(0, 1, 20))
+        color_index = 0
+        
+        # Legend will be updated dynamically
+        legend = ax.legend(loc='upper left', fontsize=8)
+        
+        # Store plot elements
+        scatter = None
+        text_objects = []
+        
+        def update_plot(frame):
+            """Update the 3D plot with latest object data."""
+            nonlocal scatter, text_objects, color_index
+            
+            # Get latest data
+            latest = self.read()
+            objects = latest.get('objects', [])
+            
+            # Remove old scatter plot if it exists
+            if scatter is not None:
+                scatter.remove()
+                scatter = None
+            
+            # Remove old text annotations
+            for txt in text_objects:
+                try:
+                    txt.remove()
+                except:
+                    pass
+            text_objects.clear()
+            
+            if not objects:
+                # Clear plot if no objects
+                ax.set_title(f'{self.name} - 3D Spherical Visualization (0 objects)', fontsize=12)
+                return []
+            
+            # Extract coordinates
+            xs = np.array([obj['x'] for obj in objects])
+            ys = np.array([obj['y'] for obj in objects])
+            zs = np.array([obj['z'] for obj in objects])
+            
+            # Get colors based on object type
+            colors = []
+            for obj in objects:
+                obj_type = obj.get('type', 'unknown')
+                if obj_type not in type_colors:
+                    type_colors[obj_type] = color_palette[color_index % len(color_palette)]
+                    color_index += 1
+                colors.append(type_colors[obj_type])
+            
+            # Create new scatter plot
+            scatter = ax.scatter(xs, ys, zs, s=150, c=colors, alpha=0.8, 
+                                edgecolors='black', linewidths=1.5, depthshade=True)
+            
+            # Add text labels for each object (limit to avoid clutter)
+            max_labels = 20  # Limit number of labels to avoid overcrowding
+            for i, obj in enumerate(objects[:max_labels]):
+                # Offset text slightly from point
+                offset = 0.08
+                label_text = f"ID:{obj['id']} {obj.get('type', 'unknown')[:10]}"
+                txt = ax.text(xs[i] + offset, ys[i] + offset, zs[i] + offset,
+                            label_text,
+                            fontsize=7, bbox=dict(boxstyle='round,pad=0.2', 
+                                                 facecolor='white', alpha=0.8, edgecolor='gray'))
+                text_objects.append(txt)
+            
+            # Update title with object count
+            ax.set_title(f'{self.name} - 3D Spherical Visualization ({len(objects)} objects)', 
+                         fontsize=12, fontweight='bold')
+            
+            # Update legend with current object types
+            if type_colors:
+                legend_elements = [plt.Line2D([0], [0], marker='o', color='w', 
+                                            markerfacecolor=color, markersize=10, label=obj_type)
+                                 for obj_type, color in type_colors.items()]
+                ax.legend(handles=legend_elements, loc='upper left', fontsize=8, ncol=2)
+            
+            return [scatter] + text_objects
+        
+        # Create animation
+        ani = animation.FuncAnimation(fig, update_plot, interval=100, blit=False, cache_frame_data=False)
+        
+        # Show plot (blocking)
+        try:
+            plt.show()
+        except KeyboardInterrupt:
+            print(f"\n{self.name}: 3D visualization interrupted by user")
+        except Exception as e:
+            print(f"{self.name}: Error in 3D visualization: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            print(f"{self.name}: 3D visualization ended")
+    
     def __repr__(self):
         return f"<VISION name={self.name}, connected={self.connected}>"
 
