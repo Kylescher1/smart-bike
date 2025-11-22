@@ -11,11 +11,12 @@ def get_default_backend():
         return cv2.CAP_V4L2
 
 # Centralized configuration
+# Using 640x480 for faster capture and processing (YOLO resizes to 640x640 anyway)
 CAMERA_CONFIG: Dict[str, int | str] = {
     #"backend": cv2.CAP_V4L2,
     "backend": get_default_backend(),
-    "width": 1920,
-    "height": 1200,
+    "width": 640,
+    "height": 480,
     "fps": 60,
     "fourcc": "MJPG",  # string form for clarity
 }
@@ -39,6 +40,10 @@ class Camera:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+        
+        # CRITICAL: Set buffer size to 1 to always get latest frame (reduces lag significantly)
+        # This prevents frame buffering which causes delays
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     def close(self):
         if self.cap and self.cap.isOpened():
@@ -47,7 +52,14 @@ class Camera:
     def read_frame(self):
         if not self.cap or not self.cap.isOpened():
             raise RuntimeError(f"[Camera {self.index}] Not open. Call open() first.")
-        ret, frame = self.cap.read()
+        # Optimize capture: multiple grabs to flush buffer and get latest frame
+        # This prevents using stale buffered frames and reduces latency
+        for _ in range(2):  # Grab twice to ensure we flush any buffered frames
+            self.cap.grab()
+        ret, frame = self.cap.retrieve()
+        if not ret:
+            # Fallback to regular read
+            ret, frame = self.cap.read()
         return frame if ret else None
 
 

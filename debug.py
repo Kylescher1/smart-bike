@@ -4,10 +4,27 @@ import sys
 from pathlib import Path
 import dashboard
 import time
+import faulthandler
+import traceback
+import signal
+import threading
 # from termcolor import colored, cprint #earn this buddy
+
+# Enable faulthandler to get stack traces on segfaults
+faulthandler.enable()
+# Also write to file for better debugging
+faulthandler.enable(file=open('crash_log.txt', 'w'), all_threads=True)
 
 # make sure src folder is on sys.path
 sys.path.append(str(Path(__file__).resolve().parent / "src"))
+
+def signal_handler(sig, frame):
+    """Handle signals gracefully"""
+    print("\n⚠️ Received signal, shutting down...")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 def load_class_from_path(path: str):
     """Load a class given its full import path"""
@@ -62,13 +79,28 @@ def main():
     # dash = dashboard.SensorDashboard(list(sensors.values()))
 
     try:
-        while True:
-            sensor_data = {}
-            for name, sensor in sensors.items():
-                sensor.debug()
-                sensor_data.update({name: sensor.read()})
-            # time.sleep(1)
-            # dash.update()
+        # Check if camera sensor has debug_visual method and call it
+        camera_sensor = sensors.get('camera')
+        if camera_sensor and hasattr(camera_sensor, 'debug_visual'):
+            # Start tuner window in a separate thread if debug_tuner method exists
+            tuner_thread = None
+            if hasattr(camera_sensor, 'debug_tuner'):
+                print("Starting tuner window in background...")
+                tuner_thread = threading.Thread(target=camera_sensor.debug_tuner, daemon=True)
+                tuner_thread.start()
+                time.sleep(0.5)  # Give tuner window time to initialize
+            
+            # Run visual debug (blocking)
+            camera_sensor.debug_visual()
+        else:
+            # Fallback to regular debug loop
+            while True:
+                sensor_data = {}
+                for name, sensor in sensors.items():
+                    sensor.debug()
+                    sensor_data.update({name: sensor.read()})
+                # time.sleep(1)
+                # dash.update()
     except KeyboardInterrupt: #Closed file
         print("\nStopping sensors...")
         for sensor in sensors.values():

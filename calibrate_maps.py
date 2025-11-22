@@ -1,12 +1,16 @@
 import cv2
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import dill
 import sys, os
 import importlib.util
 import time
+import argparse
+import glob
+import shutil
 
 config_path = r"config.dill"
+CALIB_PAIRS_DIR = "calib_pairs"
 
 
 def check_maps(map_x: np.ndarray, map_y: np.ndarray, size: Tuple[int, int], name: str) -> None:
@@ -47,84 +51,158 @@ def detect_corners(gray, pattern):
     return cv2.findChessboardCorners(gray, pattern, flags)
 
 
-def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5):
-    """Perform stereo calibration using the active cameras on the provided vision instance."""
+def load_cached_images(checkerboard=(7, 10)) -> Optional[List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]]:
+    """Load cached calibration images from calib_pairs directory."""
+    if not os.path.exists(CALIB_PAIRS_DIR):
+        return None
+    
+    left_images = sorted(glob.glob(os.path.join(CALIB_PAIRS_DIR, "left_*.png")))
+    right_images = sorted(glob.glob(os.path.join(CALIB_PAIRS_DIR, "right_*.png")))
+    
+    if len(left_images) == 0 or len(right_images) == 0:
+        return None
+    
+    if len(left_images) != len(right_images):
+        print(f"⚠️ Warning: Mismatched cached image pairs ({len(left_images)} left, {len(right_images)} right)")
+        return None
+    
+    CHECKERBOARD = checkerboard
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 1e-7)
+    captured_pairs = []
+    
+    print(f"\n📂 Loading {len(left_images)} cached image pairs from {CALIB_PAIRS_DIR}/...")
+    
+    for i, (left_path, right_path) in enumerate(zip(left_images, right_images)):
+        imgL = cv2.imread(left_path, cv2.IMREAD_GRAYSCALE)
+        imgR = cv2.imread(right_path, cv2.IMREAD_GRAYSCALE)
+        
+        if imgL is None or imgR is None:
+            print(f"⚠️ Failed to load cached pair {i+1}, skipping...")
+            continue
+        
+        retL, cornersL = detect_corners(imgL, CHECKERBOARD)
+        retR, cornersR = detect_corners(imgR, CHECKERBOARD)
+        
+        if retL and retR:
+            if not hasattr(cv2, "findChessboardCornersSB"):
+                cornersL = cv2.cornerSubPix(imgL, cornersL, (11, 11), (-1, -1), criteria)
+                cornersR = cv2.cornerSubPix(imgR, cornersR, (11, 11), (-1, -1), criteria)
+            
+            captured_pairs.append((imgL.copy(), imgR.copy(), cornersL, cornersR))
+            print(f"  ✓ Loaded pair {len(captured_pairs)}: {os.path.basename(left_path)} / {os.path.basename(right_path)}")
+        else:
+            print(f"  ⚠️ Checkerboard not detected in cached pair {i+1}, skipping...")
+    
+    if len(captured_pairs) == 0:
+        print("❌ No valid cached pairs found")
+        return None
+    
+    print(f"✅ Successfully loaded {len(captured_pairs)} valid cached pairs")
+    return captured_pairs
 
-    if not vision.connected:
-        print(f"{vision.name}: Starting cameras for calibration...")
-        vision.start()
+
+def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5, use_cache=True):
+    """Perform stereo calibration using the active cameras on the provided vision instance.
+    
+    Args:
+        vision: Vision system instance
+        checkerboard: Checkerboard pattern (cols, rows)
+        square_size: Size of checkerboard squares in mm
+        min_pairs: Minimum number of valid pairs required
+        use_cache: If True, try to load cached images first. If False or cache unavailable, capture new images.
+    """
 
     CHECKERBOARD = checkerboard
     SQUARE_SIZE = square_size
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 1e-7)
 
-    print("\n" + "=" * 60)
-    print("STEREO CALIBRATION - IMAGE CAPTURE")
-    print("=" * 60)
-    print("Instructions:")
-    print("  - Pictures will be captured automatically every 5 seconds")
-    print("  - Press 'q' to finish capturing and proceed with calibration")
-    print(f"  - You need at least {min_pairs} valid pairs with detected checkerboards")
-    print("=" * 60 + "\n")
-
+    # Try to load cached images first if use_cache is True
     captured_pairs: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
-    pair_count = 0
-    last_capture_time = time.time()
-    capture_interval = 5.0  # seconds
+    if use_cache:
+        cached_pairs = load_cached_images(checkerboard)
+        if cached_pairs is not None and len(cached_pairs) >= min_pairs:
+            captured_pairs = cached_pairs
+            print(f"\n✅ Using {len(captured_pairs)} cached image pairs for calibration")
+        elif cached_pairs is not None:
+            print(f"\n⚠️ Only {len(cached_pairs)} cached pairs found (need {min_pairs}), will capture additional images...")
+            captured_pairs = cached_pairs
+    
+    # If no cache or insufficient pairs, capture new images
+    if len(captured_pairs) < min_pairs:
+        if not vision.connected:
+            print(f"{vision.name}: Starting cameras for calibration...")
+            vision.start()
 
-    try:
-        while True:
-            left_frame = vision.left_camera.read_frame()
-            right_frame = vision.right_camera.read_frame()
+        print("\n" + "=" * 60)
+        print("STEREO CALIBRATION - IMAGE CAPTURE")
+        print("=" * 60)
+        print("Instructions:")
+        print("  - Pictures will be captured automatically every 5 seconds")
+        print("  - Press 'q' to finish capturing and proceed with calibration")
+        print(f"  - You need at least {min_pairs} valid pairs with detected checkerboards")
+        if len(captured_pairs) > 0:
+            print(f"  - Already have {len(captured_pairs)} cached pairs, capturing additional images...")
+        print("=" * 60 + "\n")
 
-            if left_frame is None or right_frame is None:
-                print("⚠️ Failed to grab one or both frames. Retrying...")
-                continue
+        pair_count = len(captured_pairs)
+        last_capture_time = time.time()
+        capture_interval = 5.0  # seconds
 
-            preview_left = cv2.resize(left_frame, (800, 600))
-            preview_right = cv2.resize(right_frame, (800, 600))
+        try:
+            while True:
+                left_frame = vision.left_camera.read_frame()
+                right_frame = vision.right_camera.read_frame()
 
-            # Display status without expensive corner detection
-            current_time = time.time()
-            time_until_next = max(0, capture_interval - (current_time - last_capture_time))
-            status_text = f"Pairs captured: {len(captured_pairs)}/{min_pairs} | Next capture in: {time_until_next:.1f}s"
-            cv2.putText(preview_left, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(preview_right, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                if left_frame is None or right_frame is None:
+                    print("⚠️ Failed to grab one or both frames. Retrying...")
+                    continue
 
-            cv2.imshow("Left Camera - Auto-capture every 5s, 'q' to finish", preview_left)
-            cv2.imshow("Right Camera - Auto-capture every 5s, 'q' to finish", preview_right)
+                preview_left = cv2.resize(left_frame, (800, 600))
+                preview_right = cv2.resize(right_frame, (800, 600))
 
-            key = cv2.waitKey(1) & 0xFF
+                # Display status without expensive corner detection
+                current_time = time.time()
+                time_until_next = max(0, capture_interval - (current_time - last_capture_time))
+                status_text = f"Pairs captured: {len(captured_pairs)}/{min_pairs} | Next capture in: {time_until_next:.1f}s"
+                if len(captured_pairs) > pair_count:
+                    status_text += f" (cached: {pair_count})"
+                cv2.putText(preview_left, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(preview_right, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-            if key == ord("q"):
-                print(f"\n✅ Finished capturing. Total pairs captured: {len(captured_pairs)}")
-                break
+                cv2.imshow("Left Camera - Auto-capture every 5s, 'q' to finish", preview_left)
+                cv2.imshow("Right Camera - Auto-capture every 5s, 'q' to finish", preview_right)
 
-            # Auto-capture every 5 seconds
-            if current_time - last_capture_time >= capture_interval:
-                gray_left = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
-                gray_right = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
+                key = cv2.waitKey(1) & 0xFF
 
-                retL, cornersL = detect_corners(gray_left, CHECKERBOARD)
-                retR, cornersR = detect_corners(gray_right, CHECKERBOARD)
+                if key == ord("q"):
+                    print(f"\n✅ Finished capturing. Total pairs captured: {len(captured_pairs)}")
+                    break
 
-                if retL and retR:
-                    if not hasattr(cv2, "findChessboardCornersSB"):
-                        cornersL = cv2.cornerSubPix(gray_left, cornersL, (11, 11), (-1, -1), criteria)
-                        cornersR = cv2.cornerSubPix(gray_right, cornersR, (11, 11), (-1, -1), criteria)
+                # Auto-capture every 5 seconds
+                if current_time - last_capture_time >= capture_interval:
+                    gray_left = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
+                    gray_right = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
 
-                    captured_pairs.append((gray_left.copy(), gray_right.copy(), cornersL, cornersR))
-                    print(f"✅ Captured pair {len(captured_pairs)}: Checkerboard detected in both images")
-                else:
-                    print(f"⚠️ Auto-capture: Checkerboard not detected in both images. Skipping...")
-                
-                last_capture_time = current_time
-                pair_count += 1
+                    retL, cornersL = detect_corners(gray_left, CHECKERBOARD)
+                    retR, cornersR = detect_corners(gray_right, CHECKERBOARD)
 
-    except KeyboardInterrupt:
-        print("\n⚠️ Capture interrupted by user")
-    finally:
-        cv2.destroyAllWindows()
+                    if retL and retR:
+                        if not hasattr(cv2, "findChessboardCornersSB"):
+                            cornersL = cv2.cornerSubPix(gray_left, cornersL, (11, 11), (-1, -1), criteria)
+                            cornersR = cv2.cornerSubPix(gray_right, cornersR, (11, 11), (-1, -1), criteria)
+
+                        captured_pairs.append((gray_left.copy(), gray_right.copy(), cornersL, cornersR))
+                        print(f"✅ Captured pair {len(captured_pairs)}: Checkerboard detected in both images")
+                    else:
+                        print(f"⚠️ Auto-capture: Checkerboard not detected in both images. Skipping...")
+                    
+                    last_capture_time = current_time
+                    pair_count += 1
+
+        except KeyboardInterrupt:
+            print("\n⚠️ Capture interrupted by user")
+        finally:
+            cv2.destroyAllWindows()
 
     if len(captured_pairs) < min_pairs:
         raise RuntimeError(f"Not enough valid pairs captured ({len(captured_pairs)}). Need at least {min_pairs}.")
@@ -152,43 +230,160 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
         raise RuntimeError(f"Not enough valid pairs ({N_OK}). Need at least {min_pairs}.")
 
     print("\n--- Single-Camera Calibration (Fisheye) ---")
-    single_flags = (
+    
+    # Initialize camera matrices with better estimates based on image size
+    img_width, img_height = vision.img_shape
+    cx, cy = img_width / 2.0, img_height / 2.0
+    
+    # Try using regular calibration first to get initial estimates
+    print("Bootstrapping with regular calibration for initial estimates...")
+    try:
+        # Convert data format for regular calibration (needs (N, 3) instead of (1, N, 3))
+        objpoints_regular = [objp[0] for objp in objpoints]
+        imgpointsL_regular = [pts[0] for pts in imgpointsL]
+        imgpointsR_regular = [pts[0] for pts in imgpointsR]
+        
+        # Regular calibration for left camera
+        ret, K1_init, D1_init, rvecs, tvecs = cv2.calibrateCamera(
+            objpoints_regular, imgpointsL_regular, vision.img_shape, None, None
+        )
+        print(f"  Regular calibration left RMS: {ret:.4f}")
+        
+        # Regular calibration for right camera
+        ret, K2_init, D2_init, rvecs, tvecs = cv2.calibrateCamera(
+            objpoints_regular, imgpointsR_regular, vision.img_shape, None, None
+        )
+        print(f"  Regular calibration right RMS: {ret:.4f}")
+        
+        # Use regular calibration results as initial estimates
+        K1 = K1_init.astype(np.float64)
+        K2 = K2_init.astype(np.float64)
+        print("  ✅ Using regular calibration estimates as initial values")
+    except Exception as e:
+        print(f"  ⚠️ Regular calibration failed: {e}")
+        print("  Falling back to image-size based estimates...")
+        # Fallback: use image width as focal length estimate (common for fisheye)
+        focal_estimate = img_width * 0.8
+        K1 = np.array([
+            [focal_estimate, 0, cx],
+            [0, focal_estimate, cy],
+            [0, 0, 1]
+        ], dtype=np.float64)
+        K2 = np.array([
+            [focal_estimate, 0, cx],
+            [0, focal_estimate, cy],
+            [0, 0, 1]
+        ], dtype=np.float64)
+    
+    D1 = np.zeros((4, 1), dtype=np.float64)
+    D2 = np.zeros((4, 1), dtype=np.float64)
+    
+    single_flags_strict = (
         cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC
         | cv2.fisheye.CALIB_CHECK_COND
         | cv2.fisheye.CALIB_FIX_SKEW
     )
-
-    K1 = np.eye(3)
-    D1 = np.zeros((4, 1))
-    print("Calibrating left camera...")
-    left_rms, K1, D1, left_rvecs, left_tvecs = cv2.fisheye.calibrate(
-        objpoints,
-        imgpointsL,
-        vision.img_shape,
-        K1,
-        D1,
-        None,
-        None,
-        flags=single_flags,
-        criteria=criteria,
+    
+    single_flags_relaxed = (
+        cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC
+        | cv2.fisheye.CALIB_FIX_SKEW
     )
-    print(f"  Left RMS reprojection error: {left_rms:.4f}")
+    
+    print("Calibrating left camera (fisheye)...")
+    left_calibrated = False
+    for attempt in range(3):
+        try:
+            if attempt == 0:
+                # First try: strict mode with current K1
+                flags = single_flags_strict
+                K_use = K1.copy()
+            elif attempt == 1:
+                # Second try: relaxed mode with current K1
+                print("  ⚠️ Strict calibration failed, trying relaxed mode...")
+                flags = single_flags_relaxed
+                K_use = K1.copy()
+            else:
+                # Third try: relaxed mode with larger focal length
+                print("  ⚠️ Initialization failed, trying with larger focal length estimate...")
+                focal_large = img_width * 1.5
+                K_use = np.array([
+                    [focal_large, 0, cx],
+                    [0, focal_large, cy],
+                    [0, 0, 1]
+                ], dtype=np.float64)
+                flags = single_flags_relaxed
+            
+            left_rms, K1, D1, left_rvecs, left_tvecs = cv2.fisheye.calibrate(
+                objpoints,
+                imgpointsL,
+                vision.img_shape,
+                K_use,
+                D1.copy(),
+                None,
+                None,
+                flags=flags,
+                criteria=criteria,
+            )
+            print(f"  Left RMS reprojection error: {left_rms:.4f}")
+            left_calibrated = True
+            break
+        except cv2.error as e:
+            error_str = str(e)
+            if attempt < 2:
+                continue  # Try next attempt
+            else:
+                raise RuntimeError(f"Failed to calibrate left camera after 3 attempts: {e}")
+    
+    if not left_calibrated:
+        raise RuntimeError("Failed to calibrate left camera")
 
-    K2 = np.eye(3)
-    D2 = np.zeros((4, 1))
-    print("Calibrating right camera...")
-    right_rms, K2, D2, right_rvecs, right_tvecs = cv2.fisheye.calibrate(
-        objpoints,
-        imgpointsR,
-        vision.img_shape,
-        K2,
-        D2,
-        None,
-        None,
-        flags=single_flags,
-        criteria=criteria,
-    )
-    print(f"  Right RMS reprojection error: {right_rms:.4f}")
+    print("Calibrating right camera (fisheye)...")
+    right_calibrated = False
+    for attempt in range(3):
+        try:
+            if attempt == 0:
+                # First try: strict mode with current K2
+                flags = single_flags_strict
+                K_use = K2.copy()
+            elif attempt == 1:
+                # Second try: relaxed mode with current K2
+                print("  ⚠️ Strict calibration failed, trying relaxed mode...")
+                flags = single_flags_relaxed
+                K_use = K2.copy()
+            else:
+                # Third try: relaxed mode with larger focal length
+                print("  ⚠️ Initialization failed, trying with larger focal length estimate...")
+                focal_large = img_width * 1.5
+                K_use = np.array([
+                    [focal_large, 0, cx],
+                    [0, focal_large, cy],
+                    [0, 0, 1]
+                ], dtype=np.float64)
+                flags = single_flags_relaxed
+            
+            right_rms, K2, D2, right_rvecs, right_tvecs = cv2.fisheye.calibrate(
+                objpoints,
+                imgpointsR,
+                vision.img_shape,
+                K_use,
+                D2.copy(),
+                None,
+                None,
+                flags=flags,
+                criteria=criteria,
+            )
+            print(f"  Right RMS reprojection error: {right_rms:.4f}")
+            right_calibrated = True
+            break
+        except cv2.error as e:
+            error_str = str(e)
+            if attempt < 2:
+                continue  # Try next attempt
+            else:
+                raise RuntimeError(f"Failed to calibrate right camera after 3 attempts: {e}")
+    
+    if not right_calibrated:
+        raise RuntimeError("Failed to calibrate right camera")
 
     print("\n--- Stereo Calibration (Fisheye) ---")
     stereo_flags = cv2.fisheye.CALIB_FIX_INTRINSIC
@@ -206,7 +401,10 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
         flags=stereo_flags,
     )
 
-    print(f"RMS reprojection error: {rms:.4f}, baseline: {np.linalg.norm(T):.3f} units")
+    # Calculate baseline from translation vector (in mm, convert to meters)
+    baseline_mm = np.linalg.norm(T)
+    baseline_m = baseline_mm / 1000.0  # Convert mm to meters
+    print(f"RMS reprojection error: {rms:.4f}, baseline: {baseline_mm:.3f} mm ({baseline_m:.4f} m)")
 
     R1, R2, P1, P2, vision.Q = cv2.fisheye.stereoRectify(
         K1,
@@ -278,15 +476,40 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
     camera_settings["left"]["map_size"] = tuple(map1x.shape[::-1])
     camera_settings["right"]["map_size"] = tuple(map2x.shape[::-1])
     camera_settings["Q"] = np.asarray(vision.Q, dtype=np.float64)
-
+    
+    # Calculate depth estimation parameters from calibration results
+    # Focal length: average of fx and fy from camera matrix (in pixels)
+    focal_left = (K1[0, 0] + K1[1, 1]) / 2.0
+    focal_right = (K2[0, 0] + K2[1, 1]) / 2.0
+    focal_length_px = (focal_left + focal_right) / 2.0  # Average focal length
+    
+    # Calculate FOV from focal length and image dimensions
+    # FOV = 2 * arctan(sensor_size / (2 * focal_length))
+    # For pixels: FOV = 2 * arctan(image_size_pixels / (2 * focal_length_pixels))
+    img_width, img_height = vision.img_shape
+    fov_horizontal = 2 * np.degrees(np.arctan(img_width / (2 * focal_length_px)))
+    fov_vertical = 2 * np.degrees(np.arctan(img_height / (2 * focal_length_px)))
+    
+    # Store depth estimation parameters
+    camera_settings["baseline"] = float(baseline_m)
+    camera_settings["focal_length_px"] = float(focal_length_px)
+    camera_settings["fov_horizontal"] = float(fov_horizontal)
+    camera_settings["fov_vertical"] = float(fov_vertical)
+    
     print(f"\n💾 Calibration complete")
     print(f"   Maps shape: {camera_settings['left']['map_x'].shape}")
     print(f"   Image size: {vision.img_shape}")
+    print(f"\n📐 Calculated Depth Parameters:")
+    print(f"   Baseline: {baseline_m:.4f} m ({baseline_mm:.2f} mm)")
+    print(f"   Focal Length: {focal_length_px:.2f} pixels")
+    print(f"   FOV Horizontal: {fov_horizontal:.2f}°")
+    print(f"   FOV Vertical: {fov_vertical:.2f}°")
 
-    os.makedirs("calib_pairs", exist_ok=True)
+    # Save captured pairs to cache
+    os.makedirs(CALIB_PAIRS_DIR, exist_ok=True)
     for i, (imgL, imgR, *_ ) in enumerate(captured_pairs):
-        cv2.imwrite(f"calib_pairs/left_{i:03d}.png", imgL)
-        cv2.imwrite(f"calib_pairs/right_{i:03d}.png", imgR)
+        cv2.imwrite(f"{CALIB_PAIRS_DIR}/left_{i:03d}.png", imgL)
+        cv2.imwrite(f"{CALIB_PAIRS_DIR}/right_{i:03d}.png", imgR)
 
 
 
@@ -296,6 +519,27 @@ def run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
     return camera_settings
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Stereo camera calibration")
+    parser.add_argument(
+        "-rmp", "--remove-cache",
+        action="store_true",
+        help="Remove cached calibration images and start fresh"
+    )
+    args = parser.parse_args()
+    
+    # Handle cache removal
+    if args.remove_cache:
+        if os.path.exists(CALIB_PAIRS_DIR):
+            print(f"🗑️  Removing cached images from {CALIB_PAIRS_DIR}/...")
+            shutil.rmtree(CALIB_PAIRS_DIR)
+            print("✅ Cache removed")
+        else:
+            print(f"ℹ️  No cache directory found at {CALIB_PAIRS_DIR}/")
+        use_cache = False
+    else:
+        use_cache = True
+    
     # Load config
     print("Loading Config...")
     try:
@@ -328,7 +572,13 @@ if __name__ == "__main__":
     
     try:
         # Run calibration
-        updated_camera_settings = run_calibration(vision, checkerboard=(7, 10), square_size=20.0, min_pairs=5)
+        updated_camera_settings = run_calibration(
+            vision, 
+            checkerboard=(7, 10), 
+            square_size=20.0, 
+            min_pairs=5,
+            use_cache=use_cache
+        )
         
         # Update the config with new calibration data
         config['camera'] = updated_camera_settings
