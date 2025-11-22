@@ -1347,6 +1347,12 @@ class VISION:
             # Update YOLO parameters
             if 'yolo' in camera_config:
                 camera_config['yolo']['conf_threshold'] = self.yolo_config.get('conf_threshold', 0.25)
+                # Update tracking parameters
+                camera_config['yolo']['track_thresh'] = self.yolo_config.get('track_thresh', 0.5)
+                camera_config['yolo']['track_high_thresh'] = self.yolo_config.get('track_high_thresh', 0.6)
+                camera_config['yolo']['track_match_thresh'] = self.yolo_config.get('track_match_thresh', 0.8)
+                camera_config['yolo']['track_buffer'] = self.yolo_config.get('track_buffer', 30)
+                camera_config['yolo']['frame_rate'] = self.yolo_config.get('frame_rate', 30)
             
             # Update depth parameters (for custom block matching)
             camera_config['baseline'] = self.baseline
@@ -1463,9 +1469,12 @@ class VISION:
             return
         
         print(f"{self.name}: Starting YOLO visualization mode...")
-        print(f"{self.name}: Press 'q' to exit")
+        print(f"{self.name}: Press 'q' to exit, 'm' to toggle masks")
         
         window_name = f"{self.name} - YOLO Visualization"
+        
+        # Mask display toggle state
+        show_masks = False
         
         try:
             cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -1515,6 +1524,37 @@ class VISION:
                     # Calculate center point
                     center_x = int((x1 + x2) / 2)
                     center_y = int((y1 + y2) / 2)
+                    
+                    # Draw segmentation mask if available and enabled
+                    if show_masks and 'mask' in det and det['mask'] is not None:
+                        try:
+                            mask = det['mask']
+                            # Ensure mask is the right size
+                            if mask.shape[:2] != (h, w):
+                                mask_resized = cv2.resize(mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+                            else:
+                                mask_resized = mask.astype(np.uint8)
+                            
+                            # Create colored mask overlay (semi-transparent)
+                            mask_color = (0, 255, 255)  # Cyan for masks
+                            mask_overlay = display_frame.copy()
+                            
+                            # Apply mask with color
+                            mask_bool = mask_resized > 0
+                            mask_overlay[mask_bool] = (
+                                display_frame[mask_bool] * 0.5 + 
+                                np.array(mask_color) * 0.5
+                            ).astype(np.uint8)
+                            
+                            # Blend overlay onto display frame
+                            display_frame = cv2.addWeighted(display_frame, 0.7, mask_overlay, 0.3, 0)
+                            
+                            # Draw mask contour for better visibility
+                            contours, _ = cv2.findContours(mask_resized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            cv2.drawContours(display_frame, contours, -1, mask_color, 2)
+                        except Exception as e:
+                            if self.debug_mode:
+                                print(f"{self.name}: Mask drawing error: {e}")
                     
                     # Draw bounding box
                     color = (0, 255, 0)  # Green
@@ -1567,6 +1607,19 @@ class VISION:
                     cv2.putText(display_frame, det_text, (10, 60), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 
+                # Show mask toggle state
+                mask_status = "Masks: ON" if show_masks else "Masks: OFF"
+                mask_color = (0, 255, 0) if show_masks else (0, 0, 255)
+                cv2.putText(display_frame, mask_status, (10, 90), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, mask_color, 2)
+                
+                # Count masks available
+                masks_count = sum(1 for det in detections if 'mask' in det and det['mask'] is not None)
+                if masks_count > 0:
+                    mask_info = f"Masks Available: {masks_count}"
+                    cv2.putText(display_frame, mask_info, (10, 120), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                
                 # Display the frame
                 try:
                     if display_frame is not None and hasattr(display_frame, 'shape') and len(display_frame.shape) >= 2:
@@ -1576,10 +1629,13 @@ class VISION:
                     if self.debug_mode:
                         print(f"{self.name}: imshow error: {e}")
                 
-                # Check for quit key
+                # Check for quit key and mask toggle
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     break
+                elif key == ord('m'):
+                    show_masks = not show_masks
+                    print(f"{self.name}: Masks {'enabled' if show_masks else 'disabled'}")
                 
                 time.sleep(0.01)  # Small delay for smoother display
                 
@@ -1616,9 +1672,9 @@ class VISION:
             pass
         
         try:
-            # Create tuner window
+            # Create tuner window (larger to fit all trackbars)
             cv2.namedWindow(tuner_window_name, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(tuner_window_name, 500, 600)
+            cv2.resizeWindow(tuner_window_name, 500, 800)
             
             # Create trackbars (values are stored as integers 0-100 for precision)
             # Smoothing enabled (0 = disabled, 1 = enabled)
@@ -1650,6 +1706,24 @@ class VISION:
             cv2.createTrackbar('YOLO Conf (x100)', tuner_window_name, 
                              int(yolo_conf * 100), 100, nothing)
             
+            # Tracking parameters (ByteTrack)
+            track_thresh = self.yolo_config.get('track_thresh', 0.5) if self.yolo_config else 0.5
+            high_thresh = self.yolo_config.get('track_high_thresh', 0.6) if self.yolo_config else 0.6
+            match_thresh = self.yolo_config.get('track_match_thresh', 0.8) if self.yolo_config else 0.8
+            track_buffer = self.yolo_config.get('track_buffer', 30) if self.yolo_config else 30
+            frame_rate = self.yolo_config.get('frame_rate', 30) if self.yolo_config else 30
+            
+            cv2.createTrackbar('Track Thresh (x100)', tuner_window_name, 
+                             int(track_thresh * 100), 100, nothing)
+            cv2.createTrackbar('High Thresh (x100)', tuner_window_name, 
+                             int(high_thresh * 100), 100, nothing)
+            cv2.createTrackbar('Match Thresh (x100)', tuner_window_name, 
+                             int(match_thresh * 100), 100, nothing)
+            cv2.createTrackbar('Track Buffer', tuner_window_name, 
+                             track_buffer, 100, nothing)
+            cv2.createTrackbar('Frame Rate', tuner_window_name, 
+                             frame_rate, 60, nothing)
+            
             print(f"{self.name}: Tuner window ready. Adjust parameters and see changes in real-time.")
             
             while True:
@@ -1661,6 +1735,13 @@ class VISION:
                 min_frames_val = cv2.getTrackbarPos('Min Frames', tuner_window_name)
                 timeout_val = cv2.getTrackbarPos('Timeout (x100ms)', tuner_window_name)
                 yolo_conf_val = cv2.getTrackbarPos('YOLO Conf (x100)', tuner_window_name)
+                
+                # Read tracking parameter values
+                track_thresh_val = cv2.getTrackbarPos('Track Thresh (x100)', tuner_window_name)
+                high_thresh_val = cv2.getTrackbarPos('High Thresh (x100)', tuner_window_name)
+                match_thresh_val = cv2.getTrackbarPos('Match Thresh (x100)', tuner_window_name)
+                track_buffer_val = cv2.getTrackbarPos('Track Buffer', tuner_window_name)
+                frame_rate_val = cv2.getTrackbarPos('Frame Rate', tuner_window_name)
                 
                 # Update parameters (thread-safe)
                 self.smoothing_enabled = bool(smoothing_enabled_val)
@@ -1677,16 +1758,51 @@ class VISION:
                 if self.yolo:
                     self.yolo.conf_threshold = yolo_threshold
                 
-                # Create info display image
-                info_img = np.zeros((400, 500, 3), dtype=np.uint8)
+                # Update tracking parameters
+                track_thresh = track_thresh_val / 100.0
+                high_thresh = high_thresh_val / 100.0
+                match_thresh = match_thresh_val / 100.0
+                track_buffer = max(1, track_buffer_val)  # Ensure at least 1
+                frame_rate = max(1, frame_rate_val)  # Ensure at least 1
+                
+                # Update config
+                if self.yolo_config:
+                    self.yolo_config['track_thresh'] = track_thresh
+                    self.yolo_config['track_high_thresh'] = high_thresh
+                    self.yolo_config['track_match_thresh'] = match_thresh
+                    self.yolo_config['track_buffer'] = track_buffer
+                    self.yolo_config['frame_rate'] = frame_rate
+                
+                # Update tracker dynamically if it exists
+                if self.yolo and self.yolo.tracker is not None:
+                    try:
+                        # Access the underlying ByteTracker instance
+                        if hasattr(self.yolo.tracker, 'tracker'):
+                            tracker_instance = self.yolo.tracker.tracker
+                            tracker_instance.track_thresh = track_thresh
+                            tracker_instance.high_thresh = high_thresh
+                            tracker_instance.match_thresh = match_thresh
+                            tracker_instance.track_buffer = track_buffer
+                            tracker_instance.frame_rate = frame_rate
+                    except Exception as e:
+                        if self.debug_mode:
+                            print(f"{self.name}: Warning: Could not update tracker parameters: {e}")
+                
+                # Create info display image (larger to fit all parameters)
+                info_img = np.zeros((600, 500, 3), dtype=np.uint8)
                 
                 # Display current parameter values
-                y_offset = 30
-                line_height = 30
+                y_offset = 25
+                line_height = 25
                 font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 0.6
+                font_scale = 0.55
                 color = (255, 255, 255)
                 thickness = 1
+                
+                # Smoothing section
+                cv2.putText(info_img, "--- Smoothing ---", 
+                           (10, y_offset), font, font_scale, (0, 255, 255), thickness)
+                y_offset += line_height
                 
                 cv2.putText(info_img, f"Smoothing: {'ON' if self.smoothing_enabled else 'OFF'}", 
                            (10, y_offset), font, font_scale, color, thickness)
@@ -1712,8 +1828,46 @@ class VISION:
                            (10, y_offset), font, font_scale, color, thickness)
                 y_offset += line_height
                 
+                # YOLO section
+                y_offset += 5
+                cv2.putText(info_img, "--- YOLO ---", 
+                           (10, y_offset), font, font_scale, (0, 255, 255), thickness)
+                y_offset += line_height
+                
                 cv2.putText(info_img, f"YOLO Conf: {yolo_threshold:.2f}", 
                            (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                # Tracking section
+                y_offset += 5
+                cv2.putText(info_img, "--- ByteTrack ---", 
+                           (10, y_offset), font, font_scale, (0, 255, 255), thickness)
+                y_offset += line_height
+                
+                cv2.putText(info_img, f"Track Thresh: {track_thresh:.2f}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                cv2.putText(info_img, f"High Thresh: {high_thresh:.2f}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                cv2.putText(info_img, f"Match Thresh: {match_thresh:.2f}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                cv2.putText(info_img, f"Track Buffer: {track_buffer}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                cv2.putText(info_img, f"Frame Rate: {frame_rate}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                # Status section
+                y_offset += 5
+                cv2.putText(info_img, "--- Status ---", 
+                           (10, y_offset), font, font_scale, (0, 255, 255), thickness)
                 y_offset += line_height
                 
                 # Display smoothing state info
