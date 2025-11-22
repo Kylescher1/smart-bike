@@ -877,6 +877,19 @@ class VISION:
         self.initial_memory = None
         self.last_data_collector_memory_check = 0.0
         self.data_collector_memory_interval = 10.0  # Check memory in data collector every 10 seconds
+        
+        # Detection smoothing parameters (modifiable)
+        self.smoothing_enabled = kwargs.get('smoothing_enabled', True)  # Enable/disable smoothing
+        self.smoothing_box_alpha = kwargs.get('smoothing_box_alpha', 0.3)  # EMA alpha for bounding boxes (0.0-1.0, lower = more smoothing)
+        self.smoothing_angle_alpha = kwargs.get('smoothing_angle_alpha', 0.4)  # EMA alpha for angles (0.0-1.0, lower = more smoothing)
+        self.smoothing_confidence_alpha = kwargs.get('smoothing_confidence_alpha', 0.5)  # EMA alpha for confidence (0.0-1.0, lower = more smoothing)
+        self.smoothing_min_frames = kwargs.get('smoothing_min_frames', 3)  # Minimum frames before smoothing kicks in
+        self.smoothing_timeout = kwargs.get('smoothing_timeout', 1.0)  # Seconds before removing stale smoothed values
+        
+        # Smoothing state: track smoothed values per object ID
+        # Format: {obj_id: {'bbox': [x1, y1, x2, y2], 'theta': float, 'alpha': float, 'confidence': float, 'frame_count': int, 'last_seen': float}}
+        self.smoothing_state: Dict[int, Dict] = {}
+        self.smoothing_lock = threading.Lock()  # Lock for smoothing state access
     
     @property
     def left_camera(self) -> Optional[Camera]:
@@ -904,7 +917,14 @@ class VISION:
         self.camera.start()
         
         # Initialize YOLO (optional - not needed for calibration)
-        model_path = self.yolo_config.get('model_path') if self.yolo_config else None
+        # HARDCODED: Always use yolo11n-seg.pt first (overrides config)
+        hardcoded_seg_model = Path('yolo/models/yolo11n-seg.pt')
+        if hardcoded_seg_model.exists():
+            model_path = str(hardcoded_seg_model)
+            print(f"✅ Using hardcoded segmentation model: {model_path} (overrides config)")
+        else:
+            # Fallback to config if hardcoded model doesn't exist
+            model_path = self.yolo_config.get('model_path') if self.yolo_config else None
         
         # Prefer .rknn models (NPU backend - much faster), fallback to .pt if needed
         if model_path is None:
@@ -1040,6 +1060,7 @@ class VISION:
                 # Process each detection: compute angles (depth computation removed - SGBM outdated)
                 objects = []
                 angle_total_time = 0
+                current_time = time.time()
                 
                 if detections:
                     for det in detections:
@@ -1070,18 +1091,87 @@ class VISION:
                         if track_id is None:
                             object_id_counter += 1
                         
+                        # Apply smoothing if enabled
+                        if self.smoothing_enabled:
+                            with self.smoothing_lock:
+                                # Get or initialize smoothing state for this object
+                                if obj_id not in self.smoothing_state:
+                                    self.smoothing_state[obj_id] = {
+                                        'bbox': [float(x1), float(y1), float(x2), float(y2)],
+                                        'theta': float(theta),
+                                        'alpha': float(alpha),
+                                        'confidence': float(det['score']),
+                                        'frame_count': 0,
+                                        'last_seen': current_time
+                                    }
+                                
+                                smooth_state = self.smoothing_state[obj_id]
+                                smooth_state['frame_count'] += 1
+                                smooth_state['last_seen'] = current_time
+                                
+                                # Apply exponential moving average smoothing
+                                # Only smooth after minimum frames threshold
+                                if smooth_state['frame_count'] >= self.smoothing_min_frames:
+                                    # Smooth bounding box
+                                    alpha_box = self.smoothing_box_alpha
+                                    smooth_state['bbox'][0] = alpha_box * float(x1) + (1 - alpha_box) * smooth_state['bbox'][0]  # x1
+                                    smooth_state['bbox'][1] = alpha_box * float(y1) + (1 - alpha_box) * smooth_state['bbox'][1]  # y1
+                                    smooth_state['bbox'][2] = alpha_box * float(x2) + (1 - alpha_box) * smooth_state['bbox'][2]  # x2
+                                    smooth_state['bbox'][3] = alpha_box * float(y2) + (1 - alpha_box) * smooth_state['bbox'][3]  # y2
+                                    
+                                    # Smooth angles
+                                    alpha_angle = self.smoothing_angle_alpha
+                                    smooth_state['theta'] = alpha_angle * float(theta) + (1 - alpha_angle) * smooth_state['theta']
+                                    smooth_state['alpha'] = alpha_angle * float(alpha) + (1 - alpha_angle) * smooth_state['alpha']
+                                    
+                                    # Smooth confidence
+                                    alpha_conf = self.smoothing_confidence_alpha
+                                    smooth_state['confidence'] = alpha_conf * float(det['score']) + (1 - alpha_conf) * smooth_state['confidence']
+                                    
+                                    # Use smoothed values
+                                    x1_smooth, y1_smooth, x2_smooth, y2_smooth = [int(coord) for coord in smooth_state['bbox']]
+                                    theta_smooth = smooth_state['theta']
+                                    alpha_smooth = smooth_state['alpha']
+                                    confidence_smooth = smooth_state['confidence']
+                                else:
+                                    # Not enough frames yet, use raw values but update state
+                                    smooth_state['bbox'] = [float(x1), float(y1), float(x2), float(y2)]
+                                    smooth_state['theta'] = float(theta)
+                                    smooth_state['alpha'] = float(alpha)
+                                    smooth_state['confidence'] = float(det['score'])
+                                    x1_smooth, y1_smooth, x2_smooth, y2_smooth = x1, y1, x2, y2
+                                    theta_smooth = theta
+                                    alpha_smooth = alpha
+                                    confidence_smooth = det['score']
+                        else:
+                            # Smoothing disabled, use raw values
+                            x1_smooth, y1_smooth, x2_smooth, y2_smooth = x1, y1, x2, y2
+                            theta_smooth = theta
+                            alpha_smooth = alpha
+                            confidence_smooth = det['score']
+                        
                         # Create object dict (depth set to 0.0 since SGBM removed)
                         obj = {
-                            'theta': float(theta),
-                            'alpha': float(alpha),
-                            'width': int(x2 - x1),
-                            'height': int(y2 - y1),
-                            'confidence': float(det['score']),
+                            'theta': float(theta_smooth),
+                            'alpha': float(alpha_smooth),
+                            'width': int(x2_smooth - x1_smooth),
+                            'height': int(y2_smooth - y1_smooth),
+                            'confidence': float(confidence_smooth),
                             'id': int(obj_id),
                             'type': str(det['class_name']),
                             'depth': 0.0  # Depth computation removed (SGBM outdated)
                         }
                         objects.append(obj)
+                    
+                    # Clean up stale smoothing state (objects that haven't been seen recently)
+                    if self.smoothing_enabled:
+                        with self.smoothing_lock:
+                            stale_ids = [
+                                obj_id for obj_id, state in self.smoothing_state.items()
+                                if (current_time - state['last_seen']) > self.smoothing_timeout
+                            ]
+                            for obj_id in stale_ids:
+                                del self.smoothing_state[obj_id]
                 
                 # Create buffer entry (minimal data to save memory)
                 buffer_start = time.time()
@@ -1268,6 +1358,14 @@ class VISION:
             if hasattr(self, 'fov_vertical'):
                 camera_config['fov_vertical'] = self.fov_vertical
             
+            # Update smoothing parameters
+            camera_config['smoothing_enabled'] = self.smoothing_enabled
+            camera_config['smoothing_box_alpha'] = self.smoothing_box_alpha
+            camera_config['smoothing_angle_alpha'] = self.smoothing_angle_alpha
+            camera_config['smoothing_confidence_alpha'] = self.smoothing_confidence_alpha
+            camera_config['smoothing_min_frames'] = self.smoothing_min_frames
+            camera_config['smoothing_timeout'] = self.smoothing_timeout
+            
             # Save updated config
             with open(self.config_path, "wb") as f:
                 dill.dump(self.original_config, f)
@@ -1414,18 +1512,41 @@ class VISION:
                     
                     x1, y1, x2, y2 = [int(coord) for coord in bbox]
                     
+                    # Calculate center point
+                    center_x = int((x1 + x2) / 2)
+                    center_y = int((y1 + y2) / 2)
+                    
                     # Draw bounding box
                     color = (0, 255, 0)  # Green
                     cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
                     
-                    # Prepare label
+                    # Draw center point (circle with crosshair)
+                    center_color = (255, 0, 255)  # Magenta
+                    center_radius = 5
+                    cv2.circle(display_frame, (center_x, center_y), center_radius, center_color, -1)  # Filled circle
+                    cv2.circle(display_frame, (center_x, center_y), center_radius + 2, center_color, 1)  # Outer circle
+                    # Draw crosshair lines
+                    crosshair_size = 8
+                    cv2.line(display_frame, (center_x - crosshair_size, center_y), 
+                            (center_x + crosshair_size, center_y), center_color, 1)
+                    cv2.line(display_frame, (center_x, center_y - crosshair_size), 
+                            (center_x, center_y + crosshair_size), center_color, 1)
+                    
+                    # Prepare label with ID
                     class_name = det.get('class_name', 'object')
                     score = det.get('score', 0.0)
                     track_id = det.get('track_id')
                     
-                    label = f"{class_name} {score:.2f}"
+                    # Always show ID if available, otherwise show index
                     if track_id is not None:
-                        label += f" ID:{track_id}"
+                        label = f"ID:{track_id} {class_name} {score:.2f}"
+                    else:
+                        # Try to get ID from detection if available
+                        det_id = det.get('id')
+                        if det_id is not None:
+                            label = f"ID:{det_id} {class_name} {score:.2f}"
+                        else:
+                            label = f"{class_name} {score:.2f}"
                     
                     # Draw label background
                     (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
@@ -1474,6 +1595,174 @@ class VISION:
             except:
                 pass
             print(f"{self.name}: Visual debug mode ended")
+    
+    def debug_tuner(self):
+        """
+        Open a tuner window with trackbars to adjust smoothing parameters in real-time.
+        Press 'q' to quit, 's' to save parameters to config.
+        """
+        if not self.connected:
+            print(f"{self.name}: Cannot start tuner mode. Vision system not connected. Call start() first.")
+            return
+        
+        print(f"{self.name}: Starting parameter tuner window...")
+        print(f"{self.name}: Press 'q' to exit, 's' to save parameters")
+        
+        tuner_window_name = f"{self.name} - Parameter Tuner"
+        
+        # Callback functions for trackbars (OpenCV requires these to be simple functions)
+        # We'll use a closure to access self
+        def nothing(x):
+            pass
+        
+        try:
+            # Create tuner window
+            cv2.namedWindow(tuner_window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(tuner_window_name, 500, 600)
+            
+            # Create trackbars (values are stored as integers 0-100 for precision)
+            # Smoothing enabled (0 = disabled, 1 = enabled)
+            cv2.createTrackbar('Smoothing Enabled', tuner_window_name, 
+                             1 if self.smoothing_enabled else 0, 1, nothing)
+            
+            # Box alpha (0-100, representing 0.0-1.0)
+            cv2.createTrackbar('Box Alpha (x100)', tuner_window_name, 
+                             int(self.smoothing_box_alpha * 100), 100, nothing)
+            
+            # Angle alpha (0-100, representing 0.0-1.0)
+            cv2.createTrackbar('Angle Alpha (x100)', tuner_window_name, 
+                             int(self.smoothing_angle_alpha * 100), 100, nothing)
+            
+            # Confidence alpha (0-100, representing 0.0-1.0)
+            cv2.createTrackbar('Conf Alpha (x100)', tuner_window_name, 
+                             int(self.smoothing_confidence_alpha * 100), 100, nothing)
+            
+            # Min frames (0-20)
+            cv2.createTrackbar('Min Frames', tuner_window_name, 
+                             self.smoothing_min_frames, 20, nothing)
+            
+            # Timeout (0-500, representing 0.0-5.0 seconds, in 0.01s increments)
+            cv2.createTrackbar('Timeout (x100ms)', tuner_window_name, 
+                             int(self.smoothing_timeout * 100), 500, nothing)
+            
+            # YOLO confidence threshold (0-100, representing 0.0-1.0)
+            yolo_conf = self.yolo_config.get('conf_threshold', 0.25) if self.yolo_config else 0.25
+            cv2.createTrackbar('YOLO Conf (x100)', tuner_window_name, 
+                             int(yolo_conf * 100), 100, nothing)
+            
+            print(f"{self.name}: Tuner window ready. Adjust parameters and see changes in real-time.")
+            
+            while True:
+                # Read trackbar values
+                smoothing_enabled_val = cv2.getTrackbarPos('Smoothing Enabled', tuner_window_name)
+                box_alpha_val = cv2.getTrackbarPos('Box Alpha (x100)', tuner_window_name)
+                angle_alpha_val = cv2.getTrackbarPos('Angle Alpha (x100)', tuner_window_name)
+                conf_alpha_val = cv2.getTrackbarPos('Conf Alpha (x100)', tuner_window_name)
+                min_frames_val = cv2.getTrackbarPos('Min Frames', tuner_window_name)
+                timeout_val = cv2.getTrackbarPos('Timeout (x100ms)', tuner_window_name)
+                yolo_conf_val = cv2.getTrackbarPos('YOLO Conf (x100)', tuner_window_name)
+                
+                # Update parameters (thread-safe)
+                self.smoothing_enabled = bool(smoothing_enabled_val)
+                self.smoothing_box_alpha = box_alpha_val / 100.0
+                self.smoothing_angle_alpha = angle_alpha_val / 100.0
+                self.smoothing_confidence_alpha = conf_alpha_val / 100.0
+                self.smoothing_min_frames = max(1, min_frames_val)  # Ensure at least 1
+                self.smoothing_timeout = timeout_val / 100.0
+                
+                # Update YOLO confidence threshold
+                yolo_threshold = yolo_conf_val / 100.0
+                if self.yolo_config:
+                    self.yolo_config['conf_threshold'] = yolo_threshold
+                if self.yolo:
+                    self.yolo.conf_threshold = yolo_threshold
+                
+                # Create info display image
+                info_img = np.zeros((400, 500, 3), dtype=np.uint8)
+                
+                # Display current parameter values
+                y_offset = 30
+                line_height = 30
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.6
+                color = (255, 255, 255)
+                thickness = 1
+                
+                cv2.putText(info_img, f"Smoothing: {'ON' if self.smoothing_enabled else 'OFF'}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                cv2.putText(info_img, f"Box Alpha: {self.smoothing_box_alpha:.2f}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                cv2.putText(info_img, f"Angle Alpha: {self.smoothing_angle_alpha:.2f}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                cv2.putText(info_img, f"Conf Alpha: {self.smoothing_confidence_alpha:.2f}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                cv2.putText(info_img, f"Min Frames: {self.smoothing_min_frames}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                cv2.putText(info_img, f"Timeout: {self.smoothing_timeout:.2f}s", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                cv2.putText(info_img, f"YOLO Conf: {yolo_threshold:.2f}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                # Display smoothing state info
+                with self.smoothing_lock:
+                    num_tracked = len(self.smoothing_state)
+                cv2.putText(info_img, f"Tracked Objects: {num_tracked}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                # Display FPS
+                cv2.putText(info_img, f"FPS: {self.current_fps:.1f}", 
+                           (10, y_offset), font, font_scale, color, thickness)
+                y_offset += line_height
+                
+                # Instructions
+                cv2.putText(info_img, "Press 'q' to quit", 
+                           (10, y_offset), font, font_scale, (0, 255, 0), thickness)
+                y_offset += line_height
+                cv2.putText(info_img, "Press 's' to save", 
+                           (10, y_offset), font, font_scale, (0, 255, 0), thickness)
+                
+                # Show info window
+                cv2.imshow(tuner_window_name, info_img)
+                
+                # Check for keys
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+                elif key == ord('s'):
+                    # Save parameters to config
+                    if self._save_config():
+                        print(f"{self.name}: ✅ Parameters saved!")
+                    else:
+                        print(f"{self.name}: ❌ Failed to save parameters")
+                
+                time.sleep(0.05)  # Small delay to reduce CPU usage
+                
+        except KeyboardInterrupt:
+            print(f"\n{self.name}: Tuner mode interrupted by user")
+        except Exception as e:
+            print(f"{self.name}: Error in tuner mode: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            try:
+                cv2.destroyWindow(tuner_window_name)
+            except:
+                pass
+            print(f"{self.name}: Tuner mode ended")
     
     def __repr__(self):
         return f"<VISION name={self.name}, connected={self.connected}>"
