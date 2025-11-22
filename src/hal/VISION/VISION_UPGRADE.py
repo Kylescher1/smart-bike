@@ -1150,10 +1150,20 @@ class VISION:
                             alpha_smooth = alpha
                             confidence_smooth = det['score']
                         
-                        # Create object dict (depth set to 0.0 since SGBM removed)
+                        # Convert angles from degrees to radians
+                        theta_rad = np.deg2rad(theta_smooth)
+                        alpha_rad = np.deg2rad(alpha_smooth)
+                        
+                        # Map angles to unit circle coordinates (spherical to Cartesian)
+                        x = np.sin(theta_rad) * np.cos(alpha_rad)
+                        y = np.sin(theta_rad) * np.sin(alpha_rad)
+                        z = np.cos(theta_rad)
+                        
+                        # Create object dict with unit circle coordinates
                         obj = {
-                            'theta': float(theta_smooth),
-                            'alpha': float(alpha_smooth),
+                            'x': float(x),
+                            'y': float(y),
+                            'z': float(z),
                             'width': int(x2_smooth - x1_smooth),
                             'height': int(y2_smooth - y1_smooth),
                             'confidence': float(confidence_smooth),
@@ -1242,8 +1252,9 @@ class VISION:
                 'timestamp': float,
                 'objects': [
                     {
-                        'theta': float,      # horizontal angle from center
-                        'alpha': float,      # vertical angle from center
+                        'x': float,          # x coordinate on unit circle (sin(theta) * cos(alpha))
+                        'y': float,          # y coordinate on unit circle (sin(theta) * sin(alpha))
+                        'z': float,          # z coordinate on unit circle (cos(theta))
                         'width': int,        # bounding box width
                         'height': int,       # bounding box height
                         'confidence': float,  # YOLO confidence
