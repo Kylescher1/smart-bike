@@ -29,6 +29,7 @@ import time
 import sys
 import dill
 import numpy as np
+import cv2
 from pathlib import Path
 
 # Add src to path
