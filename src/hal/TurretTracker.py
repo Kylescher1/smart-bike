@@ -89,6 +89,7 @@ class TurretTracker:
             right_cfg = self.camera_config.get('right', {})
             
             # Try to get rectified camera matrix (newK or from P matrix)
+            # Prefer newK (rectified) over original K for better accuracy
             if 'newK' in right_cfg:
                 self.right_K = np.asarray(right_cfg['newK'], dtype=np.float64)
             elif 'P' in right_cfg:
@@ -99,12 +100,27 @@ class TurretTracker:
                 # Use original K if newK/P not available
                 self.right_K = np.asarray(right_cfg['K'], dtype=np.float64)
             
+            # Also load distortion coefficients if available (for undistortion if needed)
+            if 'D' in right_cfg:
+                self.right_D = np.asarray(right_cfg['D'], dtype=np.float64)
+            else:
+                self.right_D = None
+            
             if self.right_K is not None:
-                print(f"TurretTracker: Loaded camera intrinsics - fx={self.right_K[0,0]:.1f}, fy={self.right_K[1,1]:.1f}, "
-                      f"cx={self.right_K[0,2]:.1f}, cy={self.right_K[1,2]:.1f}")
+                fx = self.right_K[0, 0]
+                fy = self.right_K[1, 1]
+                cx = self.right_K[0, 2]
+                cy = self.right_K[1, 2]
+                print(f"TurretTracker: Loaded camera intrinsics - fx={fx:.1f}, fy={fy:.1f}, "
+                      f"cx={cx:.1f}, cy={cy:.1f}")
+                if self.right_D is not None:
+                    print(f"TurretTracker: Loaded distortion coefficients D={self.right_D.ravel()}")
         except Exception as e:
             print(f"TurretTracker: Warning - Could not load camera intrinsics: {e}")
+            import traceback
+            traceback.print_exc()
             self.right_K = None
+            self.right_D = None
     
     def start_tracking(self):
         """Start automatic tracking thread."""
@@ -166,73 +182,162 @@ class TurretTracker:
     
     def _bbox_to_angles(self, bbox: List[int]) -> Tuple[float, float]:
         """
-        Convert bounding box to turret angles using pixel coordinates.
+        Convert bounding box to turret angles using camera intrinsics.
+        
+        This method properly handles fisheye cameras by using the camera matrix K
+        to convert pixel coordinates to normalized camera coordinates, then calculating
+        accurate angles using atan2. This is much more accurate than linear FOV approximation,
+        especially for objects far from the image center.
         
         Args:
-            bbox: Bounding box [x1, y1, x2, y2]
+            bbox: Bounding box [x1, y1, x2, y2] in rectified image coordinates
         
         Returns:
             Tuple of (theta_deg, alpha_deg) - horizontal and vertical angles relative to camera center
         
-        Note: Camera center = turret home position. Angles are calculated directly from
-        pixel coordinates using the same formula as VISION system:
-        - theta = ((center_x - w/2) / w) * fov_h  (horizontal)
-        - alpha = ((center_y - h/2) / h) * fov_v  (vertical)
+        Note: Camera center = turret home position. Angles are calculated using camera intrinsics
+        for accurate fisheye camera support.
         """
         if len(bbox) != 4:
             return (0.0, 0.0)
         
         x1, y1, x2, y2 = [int(c) for c in bbox]
         
-        # Get frame dimensions from vision system (using right camera)
-        try:
-            with self.vision.frame_lock:
-                if self.vision.last_right_frame is not None:
-                    h, w = self.vision.last_right_frame.shape[:2]
-                elif self.vision.last_left_frame is not None:
-                    # Fallback to left if right not available
-                    h, w = self.vision.last_left_frame.shape[:2]
-                else:
-                    # Default dimensions if frame not available
-                    h, w = 480, 640
-        except:
-            h, w = 480, 640  # Default fallback
-        
         # Calculate center of bounding box
         center_x = (x1 + x2) / 2.0
         center_y = (y1 + y2) / 2.0
         
-        # Convert pixel coordinates to angles
-        # For rectified fisheye images, use camera intrinsics if available
-        # Otherwise use FOV-based linear approximation
+        # Use camera intrinsics if available (more accurate for fisheye)
         if self.right_K is not None:
-            # Use camera intrinsics for accurate angle calculation
+            # Extract camera parameters from K matrix
             fx = self.right_K[0, 0]  # Focal length x
             fy = self.right_K[1, 1]  # Focal length y
-            # For rectified images, principal point is typically at image center
-            cx = w / 2.0  # Use image center, not K matrix cx (rectified images are centered)
-            cy = h / 2.0  # Use image center, not K matrix cy
+            cx = self.right_K[0, 2]  # Principal point x (for full rectified image)
+            cy = self.right_K[1, 2]  # Principal point y (for full rectified image)
             
-            # Convert to normalized camera coordinates (relative to principal point)
-            x_norm = (center_x - cx) / fx
-            y_norm = (center_y - cy) / fy
+            # Get actual image dimensions (may be cropped)
+            try:
+                with self.vision.frame_lock:
+                    if self.vision.last_right_frame is not None:
+                        h, w = self.vision.last_right_frame.shape[:2]
+                    elif self.vision.last_left_frame is not None:
+                        h, w = self.vision.last_left_frame.shape[:2]
+                    else:
+                        h, w = 480, 640
+            except:
+                h, w = 480, 640  # Default fallback
             
-            # Convert to angles using atan (for pinhole/rectified model)
-            # atan gives accurate angles for rectified fisheye images
-            theta_rad = np.arctan(x_norm)  # Horizontal angle
-            alpha_rad = np.arctan(y_norm)  # Vertical angle
+            # Get crop value from config if available
+            # If images are cropped, bbox coordinates are in cropped space but principal point is in full rectified space
+            crop_value = 0
+            if self.camera_config is not None:
+                crop_value = self.camera_config.get('crop', 0)
             
-            # Convert to degrees and flip (object right = turret move left)
-            theta_deg = -np.degrees(theta_rad)
-            alpha_deg = -np.degrees(alpha_rad)
+            # Adjust bbox coordinates to full rectified image space if cropped
+            # The principal point (cx, cy) in K matrix is for the full rectified image
+            center_x_full = center_x + crop_value
+            center_y_full = center_y + crop_value
+            
+            # Check if principal point matches expected center (accounting for crop)
+            # Full rectified image dimensions would be (w + 2*crop, h + 2*crop)
+            expected_cx = (w + 2 * crop_value) / 2.0 if crop_value > 0 else w / 2.0
+            expected_cy = (h + 2 * crop_value) / 2.0 if crop_value > 0 else h / 2.0
+            
+            cx_offset = cx - expected_cx
+            cy_offset = cy - expected_cy
+            
+            # If principal point is way off from expected center, use image center instead
+            # The K matrix principal point might be for a different image size/resolution
+            if abs(cx_offset) > 100 or abs(cy_offset) > 100:
+                # Principal point mismatch - use actual image center
+                # This handles cases where K matrix is for different resolution or coordinate system
+                cx_adjusted = w / 2.0  # Use actual image center
+                cy_adjusted = h / 2.0
+                center_x_use = center_x  # Use cropped coordinates (they're relative to cropped image)
+                center_y_use = center_y
+                
+                if not hasattr(self, '_warned_crop_adjustment'):
+                    print(f"TurretTracker: ⚠️ Principal point mismatch - using image center")
+                    print(f"TurretTracker:    K matrix principal point: ({cx:.1f},{cy:.1f})")
+                    print(f"TurretTracker:    Expected for image {w}x{h} (crop={crop_value}): ({expected_cx:.1f},{expected_cy:.1f})")
+                    print(f"TurretTracker:    Offset: ({cx_offset:.1f},{cy_offset:.1f})")
+                    print(f"TurretTracker:    Using image center: ({cx_adjusted:.1f},{cy_adjusted:.1f})")
+                    print(f"TurretTracker:    This suggests K matrix is for different image size - using image center for angle calc")
+                    self._warned_crop_adjustment = True
+            else:
+                # Principal point is reasonable, use it with full rectified coordinates
+                cx_adjusted = cx
+                cy_adjusted = cy
+                center_x_use = center_x_full
+                center_y_use = center_y_full
+            
+            # Convert pixel coordinates to normalized camera coordinates
+            # This accounts for the actual camera geometry, not just FOV
+            x_norm = (center_x_use - cx_adjusted) / fx  # Normalized x coordinate
+            y_norm = (center_y_use - cy_adjusted) / fy  # Normalized y coordinate
+            
+            # Calculate angles using atan2 for accurate angle calculation
+            # atan2 gives us the angle from the camera's optical axis
+            theta_rad = np.arctan2(x_norm, 1.0)  # Horizontal angle (yaw)
+            alpha_rad = np.arctan2(y_norm, 1.0)  # Vertical angle (pitch)
+            
+            # Convert to degrees
+            theta_deg = np.degrees(theta_rad)
+            alpha_deg = np.degrees(alpha_rad)
+            
+            # Flip signs (object right = turret move left, object up = turret move down)
+            theta_deg = -theta_deg
+            alpha_deg = -alpha_deg
+            
+            # Debug output (more frequently to catch issues)
+            if not hasattr(self, '_angle_debug_count'):
+                self._angle_debug_count = 0
+            self._angle_debug_count += 1
+            if self._angle_debug_count % 10 == 0:  # Every 10 frames for better visibility
+                pixel_error_x = center_x_use - cx_adjusted
+                pixel_error_y = center_y_use - cy_adjusted
+                print(f"TurretTracker: 🔍 Angle calc (intrinsics)")
+                print(f"  Bbox: ({x1},{y1}) to ({x2},{y2}), center (cropped)=({center_x:.1f},{center_y:.1f})")
+                print(f"  Image: {w}x{h}, crop={crop_value}, center (full)=({center_x_use:.1f},{center_y_use:.1f})")
+                print(f"  Principal point: K=({cx:.1f},{cy:.1f}), adjusted=({cx_adjusted:.1f},{cy_adjusted:.1f})")
+                print(f"  Focal: fx={fx:.1f}, fy={fy:.1f}")
+                print(f"  Pixel errors: X={pixel_error_x:+.1f}, Y={pixel_error_y:+.1f}")
+                print(f"  Normalized: x_norm={x_norm:.4f}, y_norm={y_norm:.4f}")
+                print(f"  Angles: θ={theta_deg:.2f}°, α={alpha_deg:.2f}°")
         else:
-            # Fallback to linear FOV model if intrinsics not available
+            # Fallback to FOV-based method if intrinsics not available
+            # Get frame dimensions from vision system (using right camera)
+            try:
+                with self.vision.frame_lock:
+                    if self.vision.last_right_frame is not None:
+                        h, w = self.vision.last_right_frame.shape[:2]
+                    elif self.vision.last_left_frame is not None:
+                        h, w = self.vision.last_left_frame.shape[:2]
+                    else:
+                        h, w = 480, 640
+            except:
+                h, w = 480, 640  # Default fallback
+            
             fov_h = getattr(self.vision, 'fov_horizontal', 126.0)  # degrees
             fov_v = getattr(self.vision, 'fov_vertical', 101.62)  # degrees
             
-            # Linear approximation (less accurate at edges)
-            theta_deg = -((center_x - w / 2.0) / w) * fov_h
-            alpha_deg = -((center_y - h / 2.0) / h) * fov_v
+            # Linear FOV approximation (less accurate, especially for fisheye)
+            theta = ((center_x - w / 2.0) / w) * fov_h
+            alpha = ((center_y - h / 2.0) / h) * fov_v
+            
+            theta_deg = -theta
+            alpha_deg = -alpha
+            
+            # Debug output
+            if not hasattr(self, '_angle_debug_count'):
+                self._angle_debug_count = 0
+            self._angle_debug_count += 1
+            if self._angle_debug_count % 30 == 0:
+                pixel_error_x = center_x - w / 2.0
+                pixel_error_y = center_y - h / 2.0
+                print(f"TurretTracker: Angle calc (FOV fallback) - bbox center=({center_x:.0f},{center_y:.0f}), "
+                      f"frame center=({w/2:.0f},{h/2:.0f}), pixel errors=({pixel_error_x:+.0f},{pixel_error_y:+.0f}), "
+                      f"FOV=({fov_h:.1f}°x{fov_v:.1f}°), angles=θ={theta_deg:.2f}° α={alpha_deg:.2f}°")
         
         return (theta_deg, alpha_deg)
     
@@ -352,9 +457,86 @@ class TurretTracker:
                 # Debug: Print before sending command
                 print(f"TurretTracker: 🎯 Calling center_object(theta={theta_deg:.2f}°, alpha={alpha_deg:.2f}°)")
                 
-                # Center turret on object
+                # Calculate direction vectors for vector-based correction
+                # This uses the actual geometric relationship, not potentially incorrect angle calculations
+                
+                # Get current turret position
+                s1, s2 = self.turret.get_position()
+                
+                # Calculate turret direction vector from servo positions
+                yaw_deg = s2 - self.turret.servo2_home
+                pitch_deg = s1 - self.turret.servo1_home
+                yaw_rad = np.deg2rad(yaw_deg)
+                pitch_rad = np.deg2rad(pitch_deg)
+                turret_dir = np.array([
+                    np.sin(yaw_rad) * np.cos(pitch_rad),
+                    np.sin(pitch_rad),
+                    np.cos(yaw_rad) * np.cos(pitch_rad)
+                ])
+                turret_dir = turret_dir / np.linalg.norm(turret_dir)
+                
+                # Calculate object direction vector directly from bbox center
+                # This bypasses the potentially incorrect theta/alpha calculation
+                # Get image dimensions
                 try:
-                    self.turret.center_object(theta_deg, alpha_deg)
+                    with self.vision.frame_lock:
+                        if self.vision.last_right_frame is not None:
+                            h, w = self.vision.last_right_frame.shape[:2]
+                        elif self.vision.last_left_frame is not None:
+                            h, w = self.vision.last_left_frame.shape[:2]
+                        else:
+                            h, w = 480, 640
+                except:
+                    h, w = 480, 640
+                
+                # Calculate bbox center
+                center_x = (bbox[0] + bbox[2]) / 2.0
+                center_y = (bbox[1] + bbox[3]) / 2.0
+                
+                # Use image center as reference (more reliable than K matrix principal point)
+                image_center_x = w / 2.0
+                image_center_y = h / 2.0
+                
+                # Calculate pixel offset from center
+                pixel_offset_x = center_x - image_center_x
+                pixel_offset_y = center_y - image_center_y
+                
+                # Convert to normalized coordinates using focal length
+                # Use a reasonable focal length estimate (or from K matrix if available)
+                if self.right_K is not None:
+                    fx = self.right_K[0, 0]
+                    fy = self.right_K[1, 1]
+                else:
+                    # Estimate focal length from image size (common for fisheye)
+                    fx = fy = w * 0.8
+                
+                x_norm = pixel_offset_x / fx
+                y_norm = -pixel_offset_y / fy  # Negative because Y points down
+                
+                # Calculate direction vector from normalized coordinates
+                # This gives us the actual direction to the object
+                object_dir = np.array([x_norm, y_norm, 1.0])
+                object_dir = object_dir / np.linalg.norm(object_dir)
+                
+                # Debug: show vector-based calculation
+                if not hasattr(self, '_vector_calc_count'):
+                    self._vector_calc_count = 0
+                self._vector_calc_count += 1
+                if self._vector_calc_count % 10 == 0:
+                    angle_between = np.degrees(np.arccos(np.clip(np.dot(turret_dir, object_dir), -1.0, 1.0)))
+                    print(f"TurretTracker: 📐 Vector-based calculation")
+                    print(f"  Bbox center: ({center_x:.1f},{center_y:.1f}), image center: ({image_center_x:.1f},{image_center_y:.1f})")
+                    print(f"  Pixel offset: ({pixel_offset_x:.1f},{pixel_offset_y:.1f})")
+                    print(f"  Normalized: ({x_norm:.4f},{y_norm:.4f})")
+                    print(f"  Turret dir: ({turret_dir[0]:.3f},{turret_dir[1]:.3f},{turret_dir[2]:.3f})")
+                    print(f"  Object dir: ({object_dir[0]:.3f},{object_dir[1]:.3f},{object_dir[2]:.3f})")
+                    print(f"  Angle between: {angle_between:.2f}°")
+                
+                # Center turret on object using vector-based correction
+                try:
+                    self.turret.center_object(theta_deg, alpha_deg, 
+                                            turret_dir_vector=turret_dir,
+                                            object_dir_vector=object_dir)
                     # Don't call get_position() here - it would deadlock since center_object() holds the lock
                     print(f"TurretTracker: ✅ center_object() returned")
                 except Exception as e:
