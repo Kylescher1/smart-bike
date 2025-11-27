@@ -1031,25 +1031,26 @@ class VISION:
             try:
                 loop_start = time.time()
                 
-                # Get latest frame from streaming camera (non-blocking, already captured in background)
+                # Get latest frames from streaming camera (non-blocking, already captured in background)
                 frame_get_start = time.time()
-                left_rect = self.camera.get_latest_frame()
+                left_rect, right_rect = self.camera.get_latest_frames()
                 frame_get_time = (time.time() - frame_get_start) * 1000  # ms
                 
-                if left_rect is None:
+                # Use right camera for turret tracking (fallback to left if right not available)
+                tracking_frame = right_rect if right_rect is not None else left_rect
+                if tracking_frame is None:
                     time.sleep(0.001)  # Very short sleep if no frame ready
                     continue
                 
                 # Store for debug (thread-safe frame storage)
                 with self.frame_lock:
-                    self.last_left_frame = left_rect.copy()
-                    # Get right frame if available (for debug visualization)
-                    _, right_rect = self.camera.get_latest_frames()
+                    self.last_left_frame = left_rect.copy() if left_rect is not None else None
                     self.last_right_frame = right_rect.copy() if right_rect is not None else None
                 
-                # Run YOLO detection on left frame (streaming - no blocking)
+                # Run YOLO detection on right frame (streaming - no blocking)
+                # Use right camera for turret tracking
                 yolo_start = time.time()
-                detections = self.yolo.detect(left_rect)
+                detections = self.yolo.detect(tracking_frame)
                 yolo_time = (time.time() - yolo_start) * 1000  # ms
                 
                 # Cache detections to avoid double YOLO call (thread-safe)
@@ -1497,8 +1498,11 @@ class VISION:
         try:
             while True:
                 # Get latest frame and detections (thread-safe copy)
+                # Use right camera for preview (matching turret tracking)
                 with self.frame_lock:
-                    if self.last_left_frame is not None:
+                    if self.last_right_frame is not None:
+                        frame = self.last_right_frame.copy()
+                    elif self.last_left_frame is not None:
                         frame = self.last_left_frame.copy()
                     else:
                         frame = None
