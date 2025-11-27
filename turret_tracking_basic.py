@@ -59,6 +59,14 @@ class SimpleTurretTracker:
         self.damping_factor = 0.5  # Multiply movement by this when close to center
         self.damping_threshold = 100  # Pixels - start damping when offset < this
         
+        # Sweep parameters
+        self.last_person_time = time.time()
+        self.sweep_interval = 30.0  # Seconds between sweeps when no person detected
+        self.sweep_active = False
+        self.sweep_start_time = 0
+        self.sweep_duration = 5.0  # Seconds for one complete sweep
+        self.sweep_range_s2 = 60  # Degrees to sweep horizontally (center ± range)
+        
         # Field of view (will use from config if available)
         self.fov_horizontal = 126.0  # degrees
         self.fov_vertical = 101.62  # degrees
@@ -213,7 +221,27 @@ class SimpleTurretTracker:
         person = self.find_person(objects)
         
         if person is None:
+            # No person detected - check if we should sweep
+            current_time = time.time()
+            time_since_person = current_time - self.last_person_time
+            
+            if not self.sweep_active and time_since_person > self.sweep_interval:
+                # Start sweep
+                self.sweep_active = True
+                self.sweep_start_time = current_time
+                return None  # Return None to indicate sweep mode
+            
+            if self.sweep_active:
+                # Continue sweep
+                return None
+            
             return False
+        
+        # Person detected - stop sweep if active
+        if self.sweep_active:
+            self.sweep_active = False
+        
+        self.last_person_time = time.time()
         
         # Calculate offset
         offset_x, offset_y = self.calculate_offset(person)
@@ -239,6 +267,158 @@ class SimpleTurretTracker:
         self.turret.move_to_absolute(new_s1, new_s2)
         
         return True
+    
+    def update_sweep(self):
+        """Perform sweep pattern when no person detected."""
+        if not self.sweep_active:
+            return False
+        
+        current_time = time.time()
+        elapsed = current_time - self.sweep_start_time
+        
+        if elapsed > self.sweep_duration:
+            # Sweep complete - return to home
+            self.sweep_active = False
+            self.turret.go_home()
+            return False
+        
+        # Calculate sweep position (sine wave)
+        progress = elapsed / self.sweep_duration  # 0 to 1
+        sweep_angle = np.sin(progress * 2 * np.pi) * self.sweep_range_s2
+        
+        # Get home position
+        s1_home = self.turret.servo1_home
+        s2_home = self.turret.servo2_home
+        
+        # Calculate new position
+        new_s1 = s1_home
+        new_s2 = s2_home + sweep_angle
+        
+        # Clamp to limits
+        new_s2 = max(self.turret.servo2_min, min(self.turret.servo2_max, new_s2))
+        
+        # Move turret
+        self.turret.move_to_absolute(new_s1, new_s2)
+        
+        return True
+    
+    def show_preview(self):
+        """Show live camera preview with YOLO detections."""
+        debug = self.vision.debug()
+        
+        # Try to get YOLO visualization first, fall back to raw camera frames
+        display_frame = debug.get('yolo_visualization')
+        
+        # If no YOLO visualization, use raw camera frame
+        if display_frame is None:
+            # Prefer right camera (matching turret tracking), fall back to left
+            display_frame = debug.get('last_right_image')
+            if display_frame is None:
+                display_frame = debug.get('last_left_image')
+        
+        if display_frame is None:
+            return False
+        
+        # Make a copy for drawing
+        display_frame = display_frame.copy()
+        
+        # Get current detections
+        vision_data = self.vision.read()
+        objects = vision_data.get('objects', [])
+        people = [obj for obj in objects if obj.get('type', '').lower() == 'person']
+        
+        # Draw detections if we're using raw frame (YOLO viz already has them)
+        if debug.get('yolo_visualization') is None:
+            # Draw bounding boxes and labels for detected objects
+            with self.vision.frame_lock:
+                if hasattr(self.vision, 'last_detections_cache') and self.vision.last_detections_cache:
+                    for det in self.vision.last_detections_cache:
+                        bbox = det.get('bbox', [])
+                        if len(bbox) != 4:
+                            continue
+                        
+                        x1, y1, x2, y2 = [int(coord) for coord in bbox]
+                        
+                        # Determine color based on type
+                        obj_type = det.get('class_name', '').lower()
+                        if obj_type == 'person':
+                            color = (0, 255, 0)  # Green for person
+                        else:
+                            color = (255, 255, 0)  # Cyan for other objects
+                        
+                        # Draw bounding box
+                        cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+                        
+                        # Draw center point
+                        center_x = int((x1 + x2) / 2)
+                        center_y = int((y1 + y2) / 2)
+                        cv2.circle(display_frame, (center_x, center_y), 5, color, -1)
+                        
+                        # Draw label
+                        class_name = det.get('class_name', 'object')
+                        score = det.get('score', 0.0)
+                        track_id = det.get('track_id') or det.get('id')
+                        
+                        if track_id is not None:
+                            label = f"ID:{track_id} {class_name} {score:.2f}"
+                        else:
+                            label = f"{class_name} {score:.2f}"
+                        
+                        # Draw label background
+                        (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                        cv2.rectangle(display_frame, (x1, y1 - label_h - 5), 
+                                    (x1 + label_w, y1), color, -1)
+                        cv2.putText(display_frame, label, (x1, y1 - 5), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+        
+        # Draw center crosshair
+        h, w = display_frame.shape[:2]
+        center_x = w // 2
+        center_y = h // 2
+        crosshair_color = (255, 0, 255)  # Magenta
+        crosshair_size = 15
+        cv2.line(display_frame, (center_x - crosshair_size, center_y), 
+                (center_x + crosshair_size, center_y), crosshair_color, 2)
+        cv2.line(display_frame, (center_x, center_y - crosshair_size), 
+                (center_x, center_y + crosshair_size), crosshair_color, 2)
+        cv2.circle(display_frame, (center_x, center_y), 3, crosshair_color, -1)
+        
+        # Add status text overlay
+        status_lines = [
+            f"FPS: {debug.get('fps', 0):.1f}",
+            f"Objects: {len(objects)}",
+            f"People: {len(people)}",
+        ]
+        
+        if self.sweep_active:
+            status_lines.append("MODE: SWEEP")
+        elif people:
+            status_lines.append("MODE: TRACKING")
+            # Show offset for tracked person
+            person = max(people, key=lambda obj: obj.get('confidence', 0.0))
+            offset_x, offset_y = self.calculate_offset(person)
+            if offset_x is not None:
+                status_lines.append(f"Offset: ({offset_x:.0f}, {offset_y:.0f})px")
+        else:
+            status_lines.append("MODE: SEARCHING")
+        
+        # Draw status overlay with background
+        y_offset = 30
+        for i, line in enumerate(status_lines):
+            # Draw background rectangle for better readability
+            (text_w, text_h), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            cv2.rectangle(display_frame, (8, y_offset + i * 25 - text_h - 5), 
+                         (12 + text_w, y_offset + i * 25 + 5), (0, 0, 0), -1)
+            cv2.putText(display_frame, line, (10, y_offset + i * 25),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Show preview
+        try:
+            cv2.imshow('Turret Tracking - Press Q to quit', display_frame)
+            return True
+        except Exception as e:
+            # Silently handle display errors
+            return False
 
 
 def load_config():
@@ -284,7 +464,16 @@ def main():
     try:
         vision.start()
         print("✅ VISION started")
+        print("   Waiting for cameras to initialize...")
         time.sleep(2)  # Wait for cameras to initialize
+        
+        # Verify camera is working
+        debug = vision.debug()
+        if debug.get('last_left_image') is None:
+            print("⚠️  Warning: Camera not providing frames yet")
+        else:
+            h, w = debug['last_left_image'].shape[:2]
+            print(f"   Camera resolution: {w}x{h}")
         
         # Initialize turret
         print("\n🎯 Initializing TurretControl...")
@@ -326,32 +515,73 @@ def main():
         
         # Main tracking loop
         print("\n🚀 Starting tracking loop...")
-        print("   Press Ctrl+C to stop\n")
+        print("   Camera preview window will open")
+        print("   Press 'Q' in preview window or Ctrl+C to stop\n")
         
         frame_count = 0
+        last_status_time = time.time()
+        no_person_count = 0
         
         try:
             while True:
-                # Update tracker
-                found = tracker.update()
+                # Show live preview
+                tracker.show_preview()
+                
+                # Check for quit key
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q') or key == ord('Q'):
+                    break
+                
+                # Update tracker or sweep
+                if tracker.sweep_active:
+                    tracker.update_sweep()
+                else:
+                    found = tracker.update()
+                    
+                    if found is False:
+                        # No person detected - return to home after a delay
+                        no_person_count += 1
+                        if no_person_count > 30:  # ~1 second
+                            current_s1, current_s2 = turret.get_position()
+                            s1_home, s2_home = turret.servo1_home, turret.servo2_home
+                            # Only go home if not already there
+                            if abs(current_s1 - s1_home) > 2 or abs(current_s2 - s2_home) > 2:
+                                turret.go_home()
+                                no_person_count = 0
+                    else:
+                        no_person_count = 0
                 
                 frame_count += 1
                 
-                # Print status every 30 frames (~1 second at 30fps)
-                if frame_count % 30 == 0:
+                # Print status every 2 seconds
+                current_time = time.time()
+                if current_time - last_status_time >= 2.0:
                     vision_data = vision.read()
                     objects = vision_data.get('objects', [])
                     people = [obj for obj in objects if obj.get('type', '').lower() == 'person']
+                    debug = vision.debug()
+                    fps = debug.get('fps', 0)
                     
-                    if people:
+                    if tracker.sweep_active:
+                        elapsed = current_time - tracker.sweep_start_time
+                        print(f"📡 Camera: {fps:.1f} FPS | SWEEPING ({elapsed:.1f}s/{tracker.sweep_duration:.1f}s)")
+                    elif people:
                         person = max(people, key=lambda obj: obj.get('confidence', 0.0))
                         offset_x, offset_y = tracker.calculate_offset(person)
                         if offset_x is not None:
-                            print(f"📊 Frame {frame_count}: Found {len(people)} person(s), "
-                                  f"offset: ({offset_x:.1f}, {offset_y:.1f}) px, "
-                                  f"conf: {person.get('confidence', 0):.2f}")
+                            s1, s2 = turret.get_position()
+                            print(f"📡 Camera: {fps:.1f} FPS | TRACKING person (conf:{person.get('confidence', 0):.2f}) | "
+                                  f"Offset: ({offset_x:.0f}, {offset_y:.0f})px | Turret: S1={s1:.1f}° S2={s2:.1f}°")
                     else:
-                        print(f"📊 Frame {frame_count}: No person detected")
+                        s1, s2 = turret.get_position()
+                        time_until_sweep = tracker.sweep_interval - (current_time - tracker.last_person_time)
+                        if time_until_sweep > 0:
+                            print(f"📡 Camera: {fps:.1f} FPS | SEARCHING | Turret: S1={s1:.1f}° S2={s2:.1f}° | "
+                                  f"Sweep in {time_until_sweep:.0f}s")
+                        else:
+                            print(f"📡 Camera: {fps:.1f} FPS | SEARCHING | Turret: S1={s1:.1f}° S2={s2:.1f}°")
+                    
+                    last_status_time = current_time
                 
                 time.sleep(0.033)  # ~30 Hz update rate
                 
@@ -377,6 +607,11 @@ def main():
         try:
             if 'vision' in locals():
                 vision.stop()
+        except:
+            pass
+        
+        try:
+            cv2.destroyAllWindows()
         except:
             pass
         
