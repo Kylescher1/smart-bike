@@ -30,8 +30,8 @@ int current_s2 = S2_HOME;
 void setup() {
   Serial.begin(115200);
   
-  servo1.attach(14, 500, 2400);
-  servo2.attach(33, 500, 2400);
+  servo1.attach(12, 500, 2400);
+  servo2.attach(13, 500, 2400);
   
   pinMode(swPin, INPUT_PULLUP);
   
