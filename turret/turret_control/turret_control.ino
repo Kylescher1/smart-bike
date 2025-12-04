@@ -5,8 +5,8 @@ Servo servo2;  // Horizontal axis (full range)
 
 // ----- Servo Limits -----
 const int S1_MIN = 15;
-const int S1_MAX = 50;
-const int S1_HOME = 35;
+const int S1_MAX = 65;
+const int S1_HOME = 41;
 
 const int S2_MIN = 0;
 const int S2_MAX = 180;

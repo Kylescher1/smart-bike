@@ -31,7 +31,7 @@ class TurretControl:
     def __init__(self, port: str = "/dev/ttyUSB0", baudrate: int = 115200, 
                  servo1_min: int = 15, servo1_max: int = 50, servo1_home: int = 35,
                  servo2_min: int = 0, servo2_max: int = 180, servo2_home: int = 90,
-                 deadzone: float = 2.0, kp: float = 0.5, max_speed: float = 5.0,
+                 deadzone: float = 0.5, kp: float = 0.75, max_speed: float = 15.0,
                  angle_scale_s1: float = 1.0, angle_scale_s2: float = 1.0):
         """
         Initialize turret control.
@@ -868,7 +868,9 @@ class TurretTracker:
 
 def load_config():
     """Load configuration from config.dill."""
-    config_path = "config.dill"
+    # Get the root directory (3 levels up from this file: src/hal/TurretControl.py -> root)
+    script_dir = Path(__file__).parent.parent.parent
+    config_path = script_dir / "config.dill"
     try:
         with open(config_path, "rb") as f:
             config = dill.load(f)
@@ -907,7 +909,9 @@ def main():
     # Use absolute import when running as script
     import sys
     from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    # Add src folder to path (consistent with main.py and other scripts)
+    root_dir = Path(__file__).parent.parent.parent
+    sys.path.insert(0, str(root_dir / "src"))
     from hal.VISION.VISION_UPGRADE import VISION
     vision = VISION(name="TurretVision", **vision_config)
     

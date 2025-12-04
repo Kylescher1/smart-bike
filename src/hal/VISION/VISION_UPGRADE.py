@@ -917,8 +917,11 @@ class VISION:
         self.camera.start()
         
         # Initialize YOLO (optional - not needed for calibration)
+        # Get project root directory (4 levels up from this file: src/hal/VISION/VISION_UPGRADE.py)
+        project_root = Path(__file__).parent.parent.parent.parent
+        
         # HARDCODED: Always use yolo11n-seg.pt first (overrides config)
-        hardcoded_seg_model = Path('yolo/models/yolo11n-seg.pt')
+        hardcoded_seg_model = project_root / 'yolo' / 'models' / 'yolo11n-seg.pt'
         if hardcoded_seg_model.exists():
             model_path = str(hardcoded_seg_model)
             print(f"✅ Using hardcoded segmentation model: {model_path} (overrides config)")
@@ -929,7 +932,7 @@ class VISION:
         # Prefer .rknn models (NPU backend - much faster), fallback to .pt if needed
         if model_path is None:
             # Try to find default .rknn model first (NPU - fast)
-            models_dir = Path('yolo/models')
+            models_dir = project_root / 'yolo' / 'models'
             if models_dir.exists():
                 rknn_models = list(models_dir.glob('yolo11n*.rknn'))
                 if rknn_models:
@@ -943,15 +946,15 @@ class VISION:
                         print(f"⚠️  No .rknn model found, using .pt model (slower): {model_path}")
                     else:
                         # Last resort: use default path
-                        default_rknn = 'yolo/models/yolo11n.rknn'
-                        default_pt = 'yolo/models/yolo11n.pt'
-                        if Path(default_rknn).exists():
-                            model_path = default_rknn
-                        elif Path(default_pt).exists():
-                            model_path = default_pt
+                        default_rknn = project_root / 'yolo' / 'models' / 'yolo11n.rknn'
+                        default_pt = project_root / 'yolo' / 'models' / 'yolo11n.pt'
+                        if default_rknn.exists():
+                            model_path = str(default_rknn)
+                        elif default_pt.exists():
+                            model_path = str(default_pt)
                             print(f"⚠️  Using default .pt model (slower): {model_path}")
                         else:
-                            model_path = default_rknn  # Will error if not found
+                            model_path = str(default_rknn)  # Will error if not found
         
         if model_path:
             # Extract RKNN-specific config if available
