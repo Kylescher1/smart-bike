@@ -30,6 +30,9 @@ class MPU6250:
             raise KeyError(f"Port not specified for {self.name}")
         if "baudrate" not in vars(self):
             raise KeyError(f"Baudrate not specified for {self.name}")
+        if 'data_out_label' not in vars(self):
+            print(f"data_out_label not setup in config.dill writing as 'IMU'")
+            self.data_out_label = 'IMU'
 
         # Default settings
         self.timeout = getattr(self, "timeout", 1)
@@ -43,6 +46,7 @@ class MPU6250:
         self.data_buffer = deque(maxlen=self.buffer_size)
         self.stop_event = threading.Event()
         self.start_time = None
+
 
     # -------------------------------------------------------------------------
     # Connection Management
@@ -128,7 +132,7 @@ class MPU6250:
 
     def read(self):
         """Return a copy of the most recent buffered IMU data."""
-        return list(self.data_buffer)
+        return {self.data_out_label:list(self.data_buffer)}
 
     # -------------------------------------------------------------------------
     # Data Logging

@@ -122,15 +122,17 @@ def main():
         for deg in range(0, 360, 30):
             rad = np.deg2rad(deg)
             ax.plot([0, max_r * np.cos(rad)], [0, max_r * np.sin(rad)], color="gray", lw=0.4, alpha=0.5)
-
         ax.plot([0, 0], [0, max_r], color="white", lw=0.4, alpha=0.9)
+
         # scatters = [ax.scatter([], [], s=10, color='cyan') for _ in sensors]
         # Assign a unique color to each sensor
         colors = plt.cm.tab10(np.linspace(0, 1, len(sensors)))
+        print(colors)
         scatters = []
 
         for color, (name, sensor) in zip(colors, sensors.items()):
-            scat = ax.scatter([], [], s=10, color=color, label=name)
+            print(color)
+            scat = ax.scatter([], [], c=[], s=10, cmap='turbo', label=name)
             scatters.append(scat)
 
         # Add legend to show which color corresponds to which sensor
@@ -145,14 +147,31 @@ def main():
             ax: matplotlib Axes
             scatters: list of scatter artists (one per sensor)
             """
-            for i, (scatter, frame) in enumerate(zip(scatters, frames)):
-                if frame.size == 0:
-                    continue
 
-                x = frame[0]
-                y = frame[1]
+            def update_scatter(scat, x,y, color_func):
+                """
+                scat       = a matplotlib PathCollection (scatter plot)
+                points     = Nx2 array of x,y coordinates
+                color_func = function(x, y) -> array of color values
+                """
+                # Update positions
+                scat.set_offsets(np.column_stack((x, y)))
 
-                scatter.set_offsets(np.column_stack([x, y]))
+
+                cvalues = color_func(x, y)
+
+                # Apply to scatter
+                scat.set_array(cvalues)
+
+            def color_fn(x, y):
+                # Example: color by quadrant
+
+                # return (x > 0).astype(int) + 2 * (y > 0).astype(int)
+                return np.sqrt((x**2)+(y+2)**2)*(2.71828182846)**(-1*((0.6*x)**2+(0.5*y)**2))
+
+
+            for scat, (name, sensor) in zip(scatters, sensors.items()):
+                update_scatter(scat, frame[0],frame[1], color_fn)
 
             plt.pause(0.05)  # adjust delay as needed
 

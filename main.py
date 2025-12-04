@@ -3,6 +3,11 @@ import importlib
 import sys
 from pathlib import Path
 import time
+
+import numpy as np
+
+
+
 # from termcolor import colored, cprint #earn this buddy
 
 # make sure src folder is on sys.path
@@ -34,6 +39,24 @@ def instantiate_sensors(config):
 
         sensors[name] = sensor
     return sensors
+def simple_point2obsticle(data):
+    obsticle_arr = None
+    #use magnitude of distance to origin
+    
+    return obsticle_arr
+
+def simple_obsticle_response(obsticle_arr):
+    if obsticle_arr is None:
+        return #escapes function if there is no obsticles
+
+    #do we vibe?
+
+    #do we play sound?
+
+    #do we activate breaks?
+
+def Plot_Obsticles(obsticle_arr):
+    return
 
 def main():
 
@@ -60,11 +83,38 @@ def main():
     print("Sensor Check Would go here")
     print("===" * 20)
     try:
+        #Runs once before main loop
+        display = True
+        if display:
+            Sonar = load_class_from_path("src.Debug_Tools.PlotTools.Sonar")()
         while True:
-            for name, sensor in sensors.items():
-                data = sensor.read()
-                print(f"{name} → {data}")
-            time.sleep(1)
+            #MAIN LOOP
+
+            #SENSOR DATA COLLECTION
+            data = {}
+            for name, sensor in sensors.items(): #make a data dict that aggreegates data by type/use
+                start = time.time()
+                this_sensor_data = sensor.read() #{data_goal:data,...}
+                if this_sensor_data is None:continue #only data thats valid gets passed
+
+                for key,key_data in this_sensor_data.items():
+                    if key not in data:
+                        data[key] = key_data
+                    else:
+                        data[key].append(key_data)
+                    # print(f"shape of data {np.shape(key_data)}")
+                # print(f"{name} took {time.time()-start} s")
+
+            #process raw sensor data into labeled groups
+            obsticle_arr = simple_point2obsticle(data)
+
+            #decide
+            simple_obsticle_response(obsticle_arr)
+
+            if display:
+                Sonar.update_plot(data)
+                # plot_sonar("data")
+            # print(f"{data.keys()} → {data}")
     except KeyboardInterrupt: #Closed file
         print("\nStopping sensors...")
         for sensor in sensors.values():

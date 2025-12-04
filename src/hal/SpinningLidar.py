@@ -16,6 +16,12 @@ import serial  # optional, for real lidar connection
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtGui, QtCore
 import numpy as np
+import importlib
+import sys
+import os
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(ROOT)
 
 class SpinningLidar:
     def __init__(self,name = "Unidentifed Sensor [bozo messed up config file]", **kwargs):
@@ -33,6 +39,9 @@ class SpinningLidar:
             raise KeyError(f"Port Not specifed for: {name}")
         if "baudrate" not in vars(self):
             raise KeyError(f"baudrate Not specifed for: {name}")
+        if 'data_out_label' not in vars(self):
+            print(f"data_out_label not setup in config.dill writing as {self.name}")
+            self.data_out_label = {self.name}
 
         # add local properties that cannot be specifed in config file
         self.connected = False
@@ -250,18 +259,42 @@ class SpinningLidar:
         Simulate or fetch a single LIDAR scan.
         Returns
         -------
-        np.ndarray
-            Array of [angle, distance] pairs.
+        np.ndarray 4xn
+            Array of [x,y,z,q]x# of samples .
         """
-        scan_data_copy = list(self.scan_buffer)
-        if scan_data_copy:#new data
-            # Extract all angle, distance, and quality values from the list of dictionaries
-            angles_deg = [(90 - d['a_deg']) for d in scan_data_copy]
-            distances_mm = [d['d_mm'] for d in scan_data_copy]
-            quality_values = [d['q'] for d in scan_data_copy]
+        if not self.scan_buffer:
+            return None
 
-            angles_rad = np.deg2rad(angles_deg)
-            return scan_data_copy
+        xs = []
+        ys = []
+        zs = []
+        qs = []
+
+        for pkt in self.scan_buffer:
+            dist_mm = pkt.get("d_mm", None)
+            if dist_mm is None:
+                continue
+
+            angle_deg = pkt.get("a_deg", 0.0)
+            q_val = pkt.get("q", 0)
+
+            angle = np.deg2rad(angle_deg)
+            dist_m = dist_mm / 1000.0
+
+            # Polar → Cartesian
+            x = dist_m * np.cos(angle)
+            y = dist_m * np.sin(angle)
+            z = 0  # definition of 2d lidar
+
+            xs.append(x)
+            ys.append(y)
+            zs.append(z)
+            qs.append(q_val)
+
+        if len(xs) == 0:
+            return {self.data_out_label:None} #No new data for this type
+
+        return {self.data_out_label:np.vstack([xs, ys, zs, qs])}
 
     def get_latest_frame(self):
         """
@@ -406,6 +439,12 @@ class SpinningLidar:
         return f"<{self.name} port={self.port}, connected={self.connected}>"
 
 
+def load_class_from_path(path: str):
+    """Load a class given its full import path"""
+    module_path, class_name = path.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
+
 def collect_all_sensors(sensors):
     """
     Collects the latest frames from all sensors.
@@ -454,7 +493,7 @@ def multi_sensor_live_plot(sensors, process_funcs=None, update_delay=0.05):
     ax.set_aspect("equal")
     ax.set_title("Live Multi-Sensor Viewer", color="white")
 
-    max_r = 10
+    max_r = 1
     ax.set_xlim(-max_r, max_r)
     ax.set_ylim(-max_r, max_r)
 
@@ -480,17 +519,20 @@ if __name__ == "__main__":
     kwargs = {"port": "COM6",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
-            "position": np.quaternion(1, 0, 0, 0),#w,x,y,z
-            "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
-            "who_to_run": "src.hal.SpinningLidar.SpinningLidar"}
-    Lidar = SpinningLidar(name= "Test Lidar",**kwargs)
+            # "orientation": np.quaternion(0.7071, 0, 0, -0.7071),#w,x,y,z
+            "orientation": np.quaternion(np.cos(-np.pi/2), 0, 0, np.sin(-np.pi/2)),#w,x,y,z
+            "sensor_location":np.array([0, 0, 0]),#x,y,z
+            "data_out_label":"point_cloud",
+            "who_to_run": "src.hal.SpinningLidar.SpinningLidar",}
+    Lidar = SpinningLidar(name= "horizontal_lidar",**kwargs)
     kwargs2 = {"port": "COM13",
-              "baudrate": 460800,
-              "BUFFER_SIZE": 600,
-              "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
-              "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
-              "who_to_run": "src.hal.SpinningLidar.SpinningLidar"}
-    Lidar2 = SpinningLidar(name="Test Lidar2", **kwargs2)
+            "baudrate" : 460800,
+            "BUFFER_SIZE" : 600,
+            "orientation": np.quaternion(np.cos(np.pi/2), 0, 0, np.sin(np.pi/2))*np.quaternion(np.cos(np.pi/2),  np.sin(np.pi/2), 0, 0),#w,x,y,z
+            "sensor_location":np.array([0, 0, 0]),#x,y,z
+            "data_out_label":"ground_edge_detect",
+            "who_to_run": "src.hal.SpinningLidar.SpinningLidar",}
+    Lidar2 = SpinningLidar(name="ground_lidar", **kwargs2)
     Lidar.start()
     Lidar2.start()
     try:
@@ -508,7 +550,19 @@ if __name__ == "__main__":
 
         process_funcs = [filter_quality, pass_go]  # first sensor filtered, second untouched
 
-        multi_sensor_live_plot(sensors, process_funcs=process_funcs, update_delay=0.05)
+        # multi_sensor_live_plot(sensors, process_funcs=process_funcs, update_delay=0.05)
+        Sonar = load_class_from_path("src.Debug_Tools.PlotTools.Sonar")()
+
+        x = 0
+        while True:
+            if x == 0:
+                print("stat")
+            x = 1
+            # print("looping")
+            for perhp in sensors:
+                Sonar.update_plot(perhp.read())
+                # print()
+        #
         # Lidar.live_plot()
         # Lidar2.live_plot()
         # print("Sample data:", Lidar.read())
