@@ -20,7 +20,6 @@ import numpy as np
 
 class Sonar:
     def __init__(self, **kwargs):
-        print("KYLE!")
         #make obj
         self.scatter = None
         self.anim = None
@@ -73,7 +72,11 @@ class Sonar:
             key = plot_ty["data_out_label"]
             scatter = self.scatters[i]
 
-            frame = data[key]
+
+            try:
+                frame = data[key]
+            except:
+                continue
             x = frame[0]
             y = frame[1]
 

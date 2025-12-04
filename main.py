@@ -86,7 +86,7 @@ def main():
         #Runs once before main loop
         display = True
         if display:
-            sonar = "init"
+            Sonar = load_class_from_path("src.Debug_Tools.PlotTools.Sonar")()
         while True:
             #MAIN LOOP
 
@@ -112,10 +112,9 @@ def main():
             simple_obsticle_response(obsticle_arr)
 
             if display:
-                Plot_Obsticles(obsticle_arr)
+                Sonar.update_plot(data)
                 # plot_sonar("data")
             # print(f"{data.keys()} → {data}")
-            time.sleep(1)
     except KeyboardInterrupt: #Closed file
         print("\nStopping sensors...")
         for sensor in sensors.values():

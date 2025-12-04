@@ -17,7 +17,11 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtGui, QtCore
 import numpy as np
 import importlib
+import sys
+import os
 
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(ROOT)
 
 class SpinningLidar:
     def __init__(self,name = "Unidentifed Sensor [bozo messed up config file]", **kwargs):
@@ -520,7 +524,7 @@ if __name__ == "__main__":
             "sensor_location":np.array([0, 0, 0]),#x,y,z
             "data_out_label":"point_cloud",
             "who_to_run": "src.hal.SpinningLidar.SpinningLidar",}
-    Lidar = SpinningLidar(name= "Test Lidar",**kwargs)
+    Lidar = SpinningLidar(name= "horizontal_lidar",**kwargs)
     kwargs2 = {"port": "COM13",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
@@ -528,7 +532,7 @@ if __name__ == "__main__":
             "sensor_location":np.array([0, 0, 0]),#x,y,z
             "data_out_label":"ground_edge_detect",
             "who_to_run": "src.hal.SpinningLidar.SpinningLidar",}
-    Lidar2 = SpinningLidar(name="Test Lidar2", **kwargs2)
+    Lidar2 = SpinningLidar(name="ground_lidar", **kwargs2)
     Lidar.start()
     Lidar2.start()
     try:
@@ -547,8 +551,18 @@ if __name__ == "__main__":
         process_funcs = [filter_quality, pass_go]  # first sensor filtered, second untouched
 
         # multi_sensor_live_plot(sensors, process_funcs=process_funcs, update_delay=0.05)
+        Sonar = load_class_from_path("src.Debug_Tools.PlotTools.Sonar")()
 
-        # Sonar = load_class_from_path("src.Debug Tools.PlotTools.Sonar")
+        x = 0
+        while True:
+            if x == 0:
+                print("stat")
+            x = 1
+            # print("looping")
+            for perhp in sensors:
+                Sonar.update_plot(perhp.read())
+                # print()
+        #
         # Lidar.live_plot()
         # Lidar2.live_plot()
         # print("Sample data:", Lidar.read())
