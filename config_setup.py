@@ -33,6 +33,7 @@ config = {
             # "orientation": np.quaternion(0.7071, 0, 0, -0.7071),#w,x,y,z
             "orientation": np.quaternion(np.cos(-np.pi/2), 0, 0, np.sin(-np.pi/2)),#w,x,y,z
             "sensor_location":np.array([0, 0, 0]),#x,y,z
+            "data_out_label":"point_cloud",
             "who_to_run": "src.hal.SpinningLidar.SpinningLidar",
          },
     "ground_lidar":
@@ -42,6 +43,7 @@ config = {
             "BUFFER_SIZE" : 600,
             "orientation": np.quaternion(np.cos(np.pi/2), 0, 0, np.sin(np.pi/2))*np.quaternion(np.cos(np.pi/2),  np.sin(np.pi/2), 0, 0),#w,x,y,z
             "sensor_location":np.array([0, 0, 0]),#x,y,z
+            "data_out_label":"ground_edge_detect",
             "who_to_run": "src.hal.SpinningLidar.SpinningLidar",
          },
     "arduino_breakout":
@@ -52,6 +54,7 @@ config = {
             "Bias":np.array([0,0,0,0,0,0,0]), # time, ax,ay,az, gx,gy,gz
             "orientation": np.quaternion(1, 0, 0, 0),  # w,x,y,z
             "sensor_location":np.array([0, 0, 0]),#x,y,z
+            "data_out_label":"IMU",
             "who_to_run": "src.hal.MPU6250.MPU6250",
         },
     "RangeFinder":
@@ -61,6 +64,7 @@ config = {
             "BUFFER_SIZE" : 200,
             "orientation": np.quaternion(1, 0, 0, 0),#w,x,y,z
             "sensor_location":np.array([0, 0, 0]),#x,y,z
+            "data_out_label":"point_cloud",
             "who_to_run": "src.hal.RangeFinder.RangeFinder",
          },
     "camera":
