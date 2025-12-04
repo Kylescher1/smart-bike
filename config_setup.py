@@ -62,6 +62,15 @@ config = {
             "z_direction":np.quaternion(0, 0, 0, 1),#w,x,y,z
             "who_to_run": "src.hal.RangeFinder.RangeFinder",
          },
+    "esp32_sensor":
+        {
+            "port": "COMX",  # User should set actual port (e.g., "COM7" or "/dev/ttyUSB0")
+            "baudrate": 115200,
+            "BUFFER_SIZE": 200,
+            "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
+            "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
+            "who_to_run": "src.hal.ESP32.ESP32",
+        },
     "camera":
         {
             "left":
