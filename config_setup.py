@@ -194,7 +194,8 @@ config = {
         },
 }
 config = {
-    'camera':config['camera']
+    'horizontal_lidar':config['horizontal_lidar'],
+    'ground_lidar':config['ground_lidar']
           }
 
 #Check you have all reqired fields

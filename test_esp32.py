@@ -213,7 +213,7 @@ def main():
     else:
         port = input("Enter ESP32 serial port (e.g., COM7 or /dev/ttyUSB0) [default: COM7]: ").strip()
         if not port:
-            port = "COM7"
+            port = "COM5"
     
     print(f"\nUsing port: {port}")
     print("Make sure the ESP32 is connected and the firmware is uploaded!")
