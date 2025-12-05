@@ -19,56 +19,67 @@ def load_class_from_path(path: str):
     module = importlib.import_module(module_path)
     return getattr(module, class_name)
 
-def instantiate_sensors(config):
-    sensors = {}
+def instantiate_Peripherals(config):
+    Peripherals = {}
     for name, params in config.items():
         print(f"Loading: {name}")
         cls = load_class_from_path(params['who_to_run'])
 
         try:#load class
-            sensor = cls(name=name,**params)
+            Peripheral = cls(name=name,**params)
         except Exception as e:
             raise KeyError(f"{name} threw an error: {e}")
         print(f"Loaded: {name}")
 
         try:#startup
-            sensor.start()
+            Peripheral.start()
             print(f"Started: {name}")
         except Exception as e:
             raise KeyError(f"{name}.start() threw an error: {e}")
 
-        sensors[name] = sensor
-    return sensors
-def simple_point2obsticle(data):
+        Peripherals[name] = Peripheral
+    return Peripherals
+def simple_point2obsticle(data,k=10):
     obsticle_arr = None
-    #use magnitude of distance to origin
 
-    for key,key_data in data.items():
-        if key in ['point_cloud']:
-            """
-            RETURN THE CLOSEST POINT
-            """
-            coords = key_data[:3, :]  # shape (3, N)
-            norms = np.linalg.norm(coords, axis=0)  # Euclidean norm per column
-            idx = np.argmin(norms)  # index of column with smallest norm
+    for key, key_data in data.items():
+        if key == 'point_cloud':
+            # point_cloud is M×N
+            coords = key_data[:3, :]  # (3, N)
+            norms = np.linalg.norm(coords, axis=0)  # (N,)
 
-            obsticle_arr = key_data[:, idx]  # the whole m×1 column
-    return obsticle_arr
+            # indices of the closest K points
+            k = min(k, norms.size)  # avoid overflow if <10 points
+            idxs = np.argpartition(norms, k)[:k]  # unsorted K closest
 
-def simple_obsticle_response(obsticle_arr):
+            # If you want them sorted from nearest → farthest:
+            idxs = idxs[np.argsort(norms[idxs])]
+
+            # Select the columns (M × K)
+            obsticle_arr = key_data[:, idxs]  # (M, K)
+
+            return obsticle_arr  # stop after processing point_cloud
+
+    return None  # if no point_cloud found
+
+def simple_obsticle_response(obsticle_arr,Peripherals):
     if obsticle_arr is None:
         return #escapes function if there is no obsticles
 
-    coords = obsticle_arr[:3, :]  # shape (3, N)
-    norms = np.linalg.norm(coords, axis=0)  # Euclidean norm per column
+    #more than 1
+    if obsticle_arr.shape[0] > 1:
+        obsticle_arr = np.atleast_2d(obsticle_arr)
+        coords = obsticle_arr[:3, :]  # shape (3, N)
+        norms = np.linalg.norm(coords, axis=0)  # Euclidean norm per column
 
-    idx = np.argmin(norms)  # index of column with smallest norm
+        idx = np.argmin(norms)  # index of column with smallest norm
 
-    closeest = obsticle_arr[:, idx]  # the whole m×1 column
+        closeest = obsticle_arr[:,idx]  # the whole m×1 column
+    else:
+        closeest = obsticle_arr
 
-    # B is shape (5, N)
-    x = closeest[0, :]
-    y = closeest[1, :]
+    x = closeest[0]
+    y = closeest[1]
 
     # Distance in XY plane
     dist = np.sqrt(x ** 2 + y ** 2)
@@ -76,6 +87,10 @@ def simple_obsticle_response(obsticle_arr):
 
     L,R = calculate_haptics(dist,angle_deg)
 
+
+    print(f"Left:{L},Right:{R},dist:{dist},angle:{angle_deg}")
+
+    Peripherals['esp32'].vibrate(L, R)
     #do we vibe?
 
     #do we play sound?
@@ -118,44 +133,24 @@ def calculate_haptics(r, theta):
     # --- CONFIGURATION ---
     MIN_DIST_M = 2.0
     MAX_DIST_M = 5.0
-    PAN_ANGLE = 25.0
     # 1. Filter: Out of range
     if r > MAX_DIST_M or r <= 0:
         return 0, 0
-    # 2. Step A: Normalize Distance (0.0 = Far, 1.0 = Close)
-    norm_dist = (MAX_DIST_M - r) / (MAX_DIST_M - MIN_DIST_M)
-    norm_dist = max(0.0, min(norm_dist, 1.0)) # Clamp
-    # 3. Step B: Determine Exponent (k)
-    abs_theta = abs(theta)
-    exponent = 1.0
-    if abs_theta <= PAN_ANGLE:
-        # Front Cone: Strict Linear Response
-        exponent = 1.0
-    else:
-        # Side Zone: Ramp from 1.0 to 8.0
-        # We map the remaining angle (25 to 90) to the range (0.0 to 1.0)
-        side_ratio = (abs_theta - PAN_ANGLE) / (90.0 - PAN_ANGLE)
-        exponent = 1.0 + (side_ratio * 7.0)
-    # 4. Step C: Calculate Base Intensity
-    base_intensity = (norm_dist ** exponent) * 255.0
-    # 5. Step D: Stereo Panning
-    if theta < 0:
-        # Object is Left
-        left_mix = 1.0
-        # Fade right motor out as we approach 25 degrees left
-        right_mix = 1.0 - (abs_theta / PAN_ANGLE)
-    else:
-        # Object is Right
-        right_mix = 1.0
-        # Fade left motor out as we approach 25 degrees right
-        left_mix = 1.0 - (abs_theta / PAN_ANGLE)
-    # Clamp mixes to 0.0 - 1.0
-    left_mix = max(0.0, min(left_mix, 1.0))
-    right_mix = max(0.0, min(right_mix, 1.0))
-    # Calculate final integer PWM
-    left_pwm = int(base_intensity * left_mix)
-    right_pwm = int(base_intensity * right_mix)
-    return left_pwm, right_pwm
+    if theta <=-80 or theta >=80:
+        return 0,0
+
+    if r <= MIN_DIST_M: #R too close
+        I = 1
+    else: #In btw use linear aprox
+        I = 1 + (MIN_DIST_M-r)/(MAX_DIST_M-MIN_DIST_M)
+
+    M = theta/90
+
+    L = I*(1-M)/2
+    R = I*(1+M)/2
+    return int(255*R),int(255*L)#we wired the motors backwords
+
+
 
 def main():
 
@@ -171,15 +166,15 @@ def main():
         raise KeyError(f"An unexpected error occurred Loading config.dill: {e}")
 
     print("==="*20)
-    print("Enabling Sensors...")
+    print("Enabling Peripherals...")
     try:
-        sensors = instantiate_sensors(config)
-        print("Sensors Enabled")
+        Peripherals = instantiate_Peripherals(config)
+        print("Peripherals Enabled")
     except Exception as e:
         raise KeyError(f"An unexpected error occurred with instantiate_sensors(), blame Damian: {e}")
 
     print("===" * 20)
-    print("Sensor Check Would go here")
+    print("Peripheral Check Would go here")
     print("===" * 20)
     try:
         #Runs once before main loop
@@ -191,16 +186,16 @@ def main():
 
             #SENSOR DATA COLLECTION
             new_data = {}
-            for name, sensor in sensors.items(): #make a data dict that aggreegates data by type/use
+            for name, Peripheral in Peripherals.items(): #make a data dict that aggreegates data by type/use
                 start = time.time()
-                this_sensor_data = sensor.read() #{data_goal:data,...}
-                if this_sensor_data is None:continue #only data thats valid gets passed
+                this_Peripheral_data = Peripheral.read() #{data_goal:data,...}
+                if this_Peripheral_data is None:continue #only data thats valid gets passed
 
-                for key,key_data in this_sensor_data.items():
+                for key,key_data in this_Peripheral_data.items():
                     if key not in new_data:
                         if key in ['point_cloud','ground_edge_detect']:#3d points
                             #data moves from sensor cords to bike cords (config dill specified)
-                            new_data[key] = transform_to_cordnate(key_data,Q=sensor.orientation,Z=sensor.sensor_location)
+                            new_data[key] = transform_to_cordnate(key_data,Q=Peripheral.orientation,Z=Peripheral.sensor_location)
                         else:
                             new_data[key] = key_data
                     else:
@@ -227,15 +222,15 @@ def main():
             obsticle_arr = simple_point2obsticle(new_data)
 
             #decide
-            simple_obsticle_response(obsticle_arr)
+            simple_obsticle_response(obsticle_arr,Peripherals)
 
             if display:
                 Sonar.update_plot(new_data)
                 # plot_sonar("data")
             # print(f"{data.keys()} → {data}")
     except KeyboardInterrupt: #Closed file
-        print("\nStopping sensors...")
-        for sensor in sensors.values():
+        print("\nStopping Peripherals...")
+        for sensor in Peripherals.values():
             sensor.stop()
 
 if __name__ == "__main__":
