@@ -157,6 +157,7 @@ class ESP32:
                 # Store in buffer
                 self.data_buffer.append(data)
                 
+                return {}
                 return data
             except ValueError as e:
                 if self.debug_mode:

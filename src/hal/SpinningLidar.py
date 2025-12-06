@@ -31,6 +31,9 @@ class SpinningLidar:
         #overwritable properties
         self.debug_mode = True #will open numpy and plot
         self.name = name
+        self.min_range = 0.25 # (m)
+        self.max_range = 20
+
         for k,v in kwargs.items():#unpack config into self
             setattr(self, k, v)
 
@@ -281,15 +284,18 @@ class SpinningLidar:
             angle = np.deg2rad(angle_deg)
             dist_m = dist_mm / 1000.0
 
-            # Polar → Cartesian
-            x = dist_m * np.cos(angle)
-            y = dist_m * np.sin(angle)
-            z = 0  # definition of 2d lidar
 
-            xs.append(x)
-            ys.append(y)
-            zs.append(z)
-            qs.append(q_val)
+            if self.min_range < dist_m and dist_m < self.max_range:
+                # Polar → Cartesian
+                x = dist_m * np.cos(angle)
+                y = dist_m * np.sin(angle)
+                z = 0  # definition of 2d lidar
+
+                #check cut off ranges
+                xs.append(x)
+                ys.append(y)
+                zs.append(z)
+                qs.append(q_val)
 
         if len(xs) == 0:
             return {self.data_out_label:None} #No new data for this type

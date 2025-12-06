@@ -31,13 +31,14 @@ class Sonar:
         self.ax.set_aspect("equal")
         self.ax.set_title("Live Multi-Sensor Viewer", color="white")
 
-        self.max_r = 1
+        self.max_r = 2
         self.ax.set_xlim(-self.max_r, self.max_r)
         self.ax.set_ylim(-self.max_r, self.max_r)
 
         # Polar-style concentric circles
-        for r in np.linspace(2, self.max_r, 5):
+        for r in np.linspace(2, self.max_r, 15):
             self.ax.add_artist(plt.Circle((0, 0), r, color="gray", fill=False, lw=0.6, alpha=0.5))
+        self.ax.add_artist(plt.Circle((0, 0), 0.25, color="red", fill=False, lw=0.6, alpha=0.5))
         # Radial lines every 30°
         for deg in range(0, 360, 30):
             rad = np.deg2rad(deg)
@@ -66,12 +67,10 @@ class Sonar:
             process_funcs: optional list of functions, one per sensor, to transform frames
             """
         #make frames from dict
-        frames = [None]*len(self.plot_types)
 
         for i,plot_ty in enumerate(self.plot_types):
             key = plot_ty["data_out_label"]
             scatter = self.scatters[i]
-
 
             try:
                 frame = data[key]
@@ -81,19 +80,6 @@ class Sonar:
             y = frame[1]
 
             scatter.set_offsets(np.column_stack([x, y]))
-
-        # for i, (scatter, frame) in enumerate(zip(self.scatters, frames)):
-        #     if frame.size == 0:
-        #         continue
-        #
-        #     # Apply processing function if provided
-        #     # if process_funcs and process_funcs[i] is not None:
-        #     #     frame = process_funcs[i](frame)
-        #
-        #     x = frame[0]
-        #     y = frame[1]
-        #
-        #     scatter.set_offsets(np.column_stack([x, y]))
 
         plt.pause(0.05)
         plt.pause(self.update_delay)

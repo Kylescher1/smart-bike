@@ -27,7 +27,7 @@ print("Writing config file as")
 config = {
     "horizontal_lidar":
         {
-            "port": "COM6",
+            "port": "COM13",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
             # "orientation": np.quaternion(0.7071, 0, 0, -0.7071),#w,x,y,z
@@ -38,7 +38,7 @@ config = {
          },
     "ground_lidar":
         {
-            "port": "COM13",
+            "port": "COM6",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
             "orientation": np.quaternion(np.cos(np.pi/2), 0, 0, np.sin(np.pi/2))*np.quaternion(np.cos(np.pi/2),  np.sin(np.pi/2), 0, 0),#w,x,y,z
@@ -67,14 +67,15 @@ config = {
             "data_out_label":"point_cloud",
             "who_to_run": "src.hal.RangeFinder.RangeFinder",
          },
-    "esp32_sensor":
+    "esp32":
         {
-            "port": "COMX",  # User should set actual port (e.g., "COM7" or "/dev/ttyUSB0")
+            "port": "COM5",
             "baudrate": 115200,
             "BUFFER_SIZE": 200,
-            "position": np.quaternion(1, 0, 0, 0),  # w,x,y,z
-            "z_direction": np.quaternion(0, 0, 0, 1),  # w,x,y,z
+            "orientation": np.quaternion(1, 0, 0, 0),#w,x,y,z
+            "sensor_location":np.array([0, 0, 0]),#x,y,z
             "who_to_run": "src.hal.ESP32.ESP32",
+            "debug_mode":False,
         },
     "camera":
         {
@@ -194,7 +195,9 @@ config = {
         },
 }
 config = {
-    'camera':config['camera']
+    'horizontal_lidar':config['horizontal_lidar'],
+    'ground_lidar':config['ground_lidar'],
+    'esp32':config['esp32'],
           }
 
 #Check you have all reqired fields
