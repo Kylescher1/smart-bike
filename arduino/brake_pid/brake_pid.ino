@@ -151,7 +151,6 @@ void runBrakeLoop() {
   unsigned long startTime = millis();
   unsigned long lastPlotTime = 0;
   const unsigned long plotInterval = 50; // Plot every 50ms
-  String csv; // Declare csv once for reuse throughout the function
   
   // Phase 1: Close motor at 1800 for 3 seconds
   sendMessage("Phase 1: Closing motor at 1800 for 3 seconds...");
@@ -241,8 +240,8 @@ void runBrakeLoop() {
   encoderPulses = encoderPosition;
   interrupts();
   
-  csv = String(encoderPulses) + "," + String(0) + "," + 
-        String(0) + "," + String(0) + "," + String(1500);
+  String csv = String(encoderPulses) + "," + String(0) + "," + 
+               String(0) + "," + String(0) + "," + String(1500);
   Serial.println(csv);
   if (SerialBT.hasClient()) {
     SerialBT.println(csv);
