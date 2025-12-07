@@ -149,7 +149,10 @@ class BrakeLED:
                 self.chip.close()
             except Exception:
                 pass
-    
+
+    def start(self):
+        #they go or they don't
+        return
     def __enter__(self):
         """Context manager entry"""
         return self

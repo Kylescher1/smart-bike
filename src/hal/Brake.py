@@ -35,14 +35,11 @@ class BrakeESC:
     FORWARD_US = 1650  # Forward
     REVERSE_US = 1350  # Reverse
     
-    def __init__(self, chip_num: int = 4, line_num: int = 11):
+    def __init__(self, name = "UnamedBrake", **kwargs):
         """
         Initialize brake ESC control
-        
-        Args:
-            chip_num: GPIO chip number (default: 4)
-            line_num: GPIO line number (default: 11)
         """
+
         try:
             import gpiod
             self.gpiod = gpiod
@@ -51,19 +48,23 @@ class BrakeESC:
                 "python3-libgpiod not installed. "
                 "Run: sudo apt-get install python3-libgpiod"
             )
-        
-        self.chip_num = chip_num
-        self.line_num = line_num
-        
+        #default parameters
+        self.chip_num = 4
+        self.line_num = 11
         # PWM parameters
-        self.frequency = self.PWM_FREQUENCY
-        self.resolution = self.PWM_RESOLUTION
+        self.frequency = 100.0  # Hz
+        self.resolution = 65536  # 16-bit (2^16)
+        # Current pulse width in microseconds
+        self.pulse_width_us = 1500  # Neutral position (top)
+
+        for k,v in kwargs.items():#unpack config into self
+            setattr(self, k, v)
+
+
+        # PWM parameters
         self.period = 1.0 / self.frequency  # 0.01 seconds (10ms)
         self.step_duration = self.period / self.resolution
-        
-        # Current pulse width in microseconds
-        self.pulse_width_us = self.NEUTRAL_US
-        
+
         # Initialize GPIO
         self.chip = None
         self.line = None
@@ -76,6 +77,9 @@ class BrakeESC:
         self.led_blink_running = False
         
         self._init_gpio()
+
+
+
     
     def _init_gpio(self):
         """Initialize GPIO chip and line."""
@@ -272,7 +276,28 @@ class BrakeESC:
                 self.chip.close()
             except Exception:
                 pass
-    
+    def start(self):
+        # Arm the ESC (send neutral for 2 seconds)
+        self.arm_esc(duration=2.0)
+
+        time.sleep(1.0)
+        self.set_neutral()
+        time.sleep(0.5)
+        self.disable()
+    def dontdie(self):
+        # print("\nTesting reverse direction (1200 us) for 0.5 seconds...")
+        self.set_pulse_width(1200)
+        time.sleep(0.5)
+
+        # print("\nBacking off in forward direction (1650 us) for 1 second...")
+        self.set_forward()
+        time.sleep(1.0)
+
+        # print("\nReturning to neutral and stopping...")
+        self.set_neutral()
+        time.sleep(0.5)
+        self.disable()
+        return
     def __enter__(self):
         """Context manager entry"""
         return self

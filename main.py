@@ -90,12 +90,22 @@ def simple_obsticle_response(obsticle_arr,Peripherals):
 
     print(f"Left:{L},Right:{R},dist:{dist},angle:{angle_deg}")
 
-    Peripherals['esp32'].vibrate(L, R)
-    #do we vibe?
 
-    #do we play sound?
+    #do we vibe?
+    if 'esp32' in Peripherals:
+        Peripherals['esp32'].vibrate(L, R)
+    else:
+        print("No esp/haptics device detected!")
+    # do we play sound?
 
     #do we activate breaks?
+    brakemindist = 1# (m)
+    if dist < brakemindist:
+        if 'BrakeESP' in Peripherals:
+            Peripherals['BrakeESP'].dontdie()
+        else:
+            print("No esp/brake device detected!")
+
 
 def Plot_Obsticles(obsticle_arr):
     return
@@ -132,7 +142,7 @@ def calculate_haptics(r, theta):
     """
     # --- CONFIGURATION ---
     MIN_DIST_M = 2.0
-    MAX_DIST_M = 5.0
+    MAX_DIST_M = 10.0
     # 1. Filter: Out of range
     if r > MAX_DIST_M or r <= 0:
         return 0, 0
@@ -188,21 +198,24 @@ def main():
             new_data = {}
             for name, Peripheral in Peripherals.items(): #make a data dict that aggreegates data by type/use
                 start = time.time()
-                this_Peripheral_data = Peripheral.read() #{data_goal:data,...}
-                if this_Peripheral_data is None:continue #only data thats valid gets passed
+                if hasattr(Peripheral, 'read') and callable(getattr(Peripheral, 'read')):
+                    this_Peripheral_data = Peripheral.read() #{data_goal:data,...}
 
-                for key,key_data in this_Peripheral_data.items():
-                    if key not in new_data:
-                        if key in ['point_cloud','ground_edge_detect']:#3d points
-                            #data moves from sensor cords to bike cords (config dill specified)
-                            new_data[key] = transform_to_cordnate(key_data,Q=Peripheral.orientation,Z=Peripheral.sensor_location)
+                    if this_Peripheral_data is None:continue #only data thats valid gets passed
+
+                    for key,key_data in this_Peripheral_data.items():
+                        if key not in new_data:
+                            if key in ['point_cloud','ground_edge_detect']:#3d points
+                                #data moves from sensor cords to bike cords (config dill specified)
+                                new_data[key] = transform_to_cordnate(key_data,Q=Peripheral.orientation,Z=Peripheral.sensor_location)
+                            else:
+                                new_data[key] = key_data
                         else:
-                            new_data[key] = key_data
-                    else:
-                        new_data[key].append(key_data)
-                    # print(f"shape of data {np.shape(key_data)}")
-                # print(f"{name} took {time.time()-start} s")
-
+                            new_data[key].append(key_data)
+                        # print(f"shape of data {np.shape(key_data)}")
+                    # print(f"{name} took {time.time()-start} s")
+                else:#No data to produce IE output only
+                    continue
             #STATE EST
             """
             here we would put the gyro/accel intergration step to find the transfrom from last measurement to now in x,y,z

@@ -77,6 +77,24 @@ config = {
             "who_to_run": "src.hal.ESP32.ESP32",
             "debug_mode":False,
         },
+    "StatusLED":
+        {
+            "port": "COM5",
+            "orientation": None,
+            "sensor_location":None,
+            "who_to_run": "src.hal.ESP32.ESP32",
+            "debug_mode":False,
+        },
+    "BrakeESP":
+        {
+            "port": "COM5",
+            "orientation": None,
+            "sensor_location":None,
+            "who_to_run": "src.hal.ESP32.ESP32",
+            "debug_mode":False,
+            "chip_num": 4,
+            "line_num": 11,
+        },
     "camera":
         {
             "left":
@@ -198,6 +216,7 @@ config = {
     'horizontal_lidar':config['horizontal_lidar'],
     'ground_lidar':config['ground_lidar'],
     'esp32':config['esp32'],
+    'BrakeESP':config['BrakeESP'],
           }
 
 #Check you have all reqired fields
