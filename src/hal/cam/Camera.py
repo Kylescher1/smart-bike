@@ -11,13 +11,15 @@ def get_default_backend():
         return cv2.CAP_V4L2
 
 # Centralized configuration
-# Using 640x480 for faster capture and processing (YOLO resizes to 640x640 anyway)
+# Using 640x480@30fps for USB 2.0 compatibility (~63 Mbps for 2 cameras)
+# Can increase to 60fps if using USB 3.0 ports (~126 Mbps for 2 cameras)
+# YOLO resizes to 640x640 anyway, so resolution is fine
 CAMERA_CONFIG: Dict[str, int | str] = {
     #"backend": cv2.CAP_V4L2,
     "backend": get_default_backend(),
     "width": 640,
     "height": 480,
-    "fps": 60,
+    "fps": 30,  # Reduced from 60 to 30 for USB 2.0 compatibility
     "fourcc": "MJPG",  # string form for clarity
 }
 

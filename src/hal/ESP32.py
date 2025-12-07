@@ -110,12 +110,17 @@ class ESP32:
                 self.ser.reset_input_buffer()
                 
                 # Send command with newline
+                if self.debug_mode:
+                    print(f"{self.name}: Sending command: '{command}'")
                 self.ser.write((command + "\n").encode('utf-8'))
                 self.ser.flush()
                 
                 if wait_for_response:
-                    # Wait for response
+                    # Wait for response with a small delay to allow ESP32 to process
+                    time.sleep(0.05)  # 50ms delay
                     response = self.ser.readline().decode('utf-8', errors='ignore').strip()
+                    if self.debug_mode:
+                        print(f"{self.name}: Received response: '{response}' (raw bytes: {repr(response.encode('utf-8'))})")
                     return response
                 return None
             except Exception as e:
@@ -138,9 +143,14 @@ class ESP32:
         try:
             response = self._send_command("READ", wait_for_response=True)
             
-            if not response or response == "ERROR":
+            if not response:
                 if self.debug_mode:
-                    print(f"{self.name}: READ command failed or returned ERROR")
+                    print(f"{self.name}: READ command returned empty response")
+                return None
+            
+            if response == "ERROR":
+                if self.debug_mode:
+                    print(f"{self.name}: READ command returned ERROR - MPU6050 may not be responding")
                 return None
             
             # Parse comma-separated values: ax,ay,az,gx,gy,gz
@@ -251,7 +261,7 @@ class ESP32:
 # Example usage
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
-    esp32 = ESP32(name="TestESP32", port="COM7", baudrate=115200, BUFFER_SIZE=200)
+    esp32 = ESP32(name="TestESP32", port="/dev/ttyUSB0", baudrate=115200, BUFFER_SIZE=200)
     esp32.start()
     try:
         time.sleep(2)
