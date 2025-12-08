@@ -101,8 +101,8 @@ def simple_obsticle_response(obsticle_arr,Peripherals):
     #do we activate breaks?
     brake_mindist = 1# (m)
     if dist < brake_mindist:
-        if 'BrakeESP' in Peripherals:
-            Peripherals['BrakeESP'].dontdie()
+        if 'Brakes' in Peripherals:
+            Peripherals['Brakes'].dontdie()
         else:
             print("No esp/brake device detected!")
 
