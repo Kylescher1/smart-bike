@@ -99,8 +99,8 @@ def simple_obsticle_response(obsticle_arr,Peripherals):
     # do we play sound?
 
     #do we activate breaks?
-    brakemindist = 1# (m)
-    if dist < brakemindist:
+    brake_mindist = 1# (m)
+    if dist < brake_mindist:
         if 'BrakeESP' in Peripherals:
             Peripherals['BrakeESP'].dontdie()
         else:

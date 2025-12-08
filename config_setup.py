@@ -79,10 +79,10 @@ config = {
         },
     "StatusLED":
         {
-            "port": "COM5",
+            "port": None,
             "orientation": None,
             "sensor_location":None,
-            "who_to_run": "src.hal.ESP32.ESP32",
+            "who_to_run": "src.hal.LED.GPIO_LED",
             "debug_mode":False,
         },
     "BrakeESP":
@@ -90,7 +90,7 @@ config = {
             "port": "COM5",
             "orientation": None,
             "sensor_location":None,
-            "who_to_run": "src.hal.ESP32.ESP32",
+            "who_to_run": "src.hal.Brake.BrakeESC",
             "debug_mode":False,
             "chip_num": 4,
             "line_num": 11,

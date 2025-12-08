@@ -9,7 +9,7 @@ import threading
 from typing import Optional
 
 
-class BrakeLED:
+class GPIO_LED:
     """
     Manages brake LED control using libgpiod
     
@@ -173,7 +173,7 @@ if __name__ == "__main__":
     
     try:
         print(f"Initializing LED on gpiochip4 line 10...")
-        brake_led = BrakeLED(chip_num=1, line_num=9)
+        brake_led = GPIO_LED(chip_num=1, line_num=9)
         
         print("Testing LED control...")
         brake_led.set_led(True)
