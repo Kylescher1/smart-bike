@@ -3,12 +3,15 @@ Brake ESC Control Module
 
 Controls brake ESC using PWM signal via libgpiod API.
 Also provides LED control on the same pin.
+Now includes ESP32 encoder stall detection via serial port.
 """
 
 import time
 import threading
-from typing import Optional
+from typing import Optional, Dict
 import math
+import serial
+from collections import deque
 
 
 class BrakeESC:
@@ -72,6 +75,7 @@ class BrakeESC:
         self.running = False
         self.armed = False
         self.pwm_thread = None
+        self._cleaned_up = False  # Track if cleanup has been called
         
         # Thread safety
         self._pulse_width_lock = threading.Lock()
@@ -89,7 +93,29 @@ class BrakeESC:
         self.led_blink_thread = None
         self.led_blink_running = False
         
+        # ESP32 encoder stall detection
+        self.encoder_port = getattr(self, 'encoder_port', None)  # e.g., '/dev/ttyUSB1' or 'ttl1'
+        self.encoder_baudrate = getattr(self, 'encoder_baudrate', 115200)
+        self.encoder_timeout = getattr(self, 'encoder_timeout', 0.1)
+        self.encoder_ser: Optional[serial.Serial] = None
+        self.encoder_connected = False
+        self.encoder_thread: Optional[threading.Thread] = None
+        self.encoder_stop_event = threading.Event()
+        
+        # Encoder data storage
+        self.encoder_data_lock = threading.Lock()
+        self.latest_encoder_data: Optional[Dict] = None
+        self.is_stalled = False
+        self.stall_check_enabled = False
+        
+        # Brake calibration
+        self.brake_actuated_position: Optional[int] = None  # Calibrated brake actuated position
+        
         self._init_gpio()
+        
+        # Initialize encoder connection if port is specified
+        if self.encoder_port:
+            self._init_encoder()
 
 
 
@@ -105,6 +131,136 @@ class BrakeESC:
             raise RuntimeError(
                 f"Failed to initialize GPIO chip {self.chip_num}, line {self.line_num}: {e}"
             )
+    
+    def _init_encoder(self):
+        """Initialize ESP32 encoder serial connection."""
+        if not self.encoder_port:
+            return
+        
+        # Convert 'ttl1' to '/dev/ttyUSB1' if needed
+        port = self.encoder_port
+        if port.startswith('ttl'):
+            port_num = port.replace('ttl', '')
+            port = f'/dev/ttyUSB{port_num}'
+        
+        # Check if port exists before trying to open
+        import os
+        if not os.path.exists(port):
+            print(f"BrakeESC: Warning - Encoder port {port} does not exist")
+            print(f"BrakeESC: Available ports: {[p for p in os.listdir('/dev') if p.startswith('ttyUSB') or p.startswith('ttyACM')]}")
+            self.encoder_connected = False
+            return
+        
+        try:
+            print(f"BrakeESC: Connecting to encoder on {port}...")
+            self.encoder_ser = serial.Serial(
+                port=port,
+                baudrate=self.encoder_baudrate,
+                timeout=self.encoder_timeout,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE
+            )
+            time.sleep(2)  # Allow ESP32 to initialize
+            self.encoder_ser.reset_input_buffer()
+            self.encoder_connected = True
+            self.encoder_stop_event.clear()
+            
+            # Start encoder reading thread
+            self.encoder_thread = threading.Thread(target=self._encoder_reader, daemon=True)
+            self.encoder_thread.start()
+            print(f"BrakeESC: Successfully connected to encoder on {port}")
+        except serial.SerialException as e:
+            print(f"BrakeESC: Warning - Serial error connecting to encoder on {port}: {e}")
+            print(f"BrakeESC: Continuing without encoder (stall detection disabled)")
+            self.encoder_connected = False
+            self.encoder_ser = None
+        except Exception as e:
+            print(f"BrakeESC: Warning - Failed to connect to encoder on {port}: {e}")
+            print(f"BrakeESC: Continuing without encoder (stall detection disabled)")
+            self.encoder_connected = False
+            self.encoder_ser = None
+    
+    def _parse_encoder_line(self, line: str) -> Optional[Dict]:
+        """
+        Parse a POS line from ESP32 encoder.
+        
+        Format: POS,<position>,<velocity>,<is_moving>,<is_stalled>,<pinA>,<pinB>
+        
+        Returns:
+            dict with keys: position, velocity, is_moving, is_stalled, pinA, pinB
+            Returns None if line cannot be parsed
+        """
+        line = line.strip()
+        if not line.startswith("POS,"):
+            return None
+        
+        try:
+            parts = line.split(",")
+            if len(parts) < 5:
+                return None
+            
+            result = {
+                "position": int(parts[1]),
+                "velocity": float(parts[2]),
+                "is_moving": bool(int(parts[3])),
+                "is_stalled": bool(int(parts[4])),
+                "timestamp": time.time()
+            }
+            
+            # Add pin states if present
+            if len(parts) >= 7:
+                result["pinA"] = int(parts[5])
+                result["pinB"] = int(parts[6])
+            
+            return result
+        except (ValueError, IndexError) as e:
+            return None
+    
+    def _encoder_reader(self):
+        """Background thread to continuously read encoder data."""
+        while not self.encoder_stop_event.is_set():
+            if not self.encoder_connected or not self.encoder_ser or not self.encoder_ser.is_open:
+                time.sleep(0.1)
+                continue
+            
+            try:
+                if self.encoder_ser.in_waiting > 0:
+                    line = self.encoder_ser.readline().decode('utf-8', errors='ignore')
+                    encoder_data = self._parse_encoder_line(line)
+                    
+                    if encoder_data:
+                        with self.encoder_data_lock:
+                            self.latest_encoder_data = encoder_data
+                            self.is_stalled = encoder_data.get('is_stalled', False)
+                else:
+                    time.sleep(0.01)  # Small delay when no data
+            except Exception as e:
+                print(f"BrakeESC: Encoder reading error: {e}")
+                time.sleep(0.1)
+    
+    def get_encoder_data(self) -> Optional[Dict]:
+        """
+        Get the latest encoder data.
+        
+        Returns:
+            dict with encoder data or None if no data available
+        """
+        with self.encoder_data_lock:
+            return self.latest_encoder_data.copy() if self.latest_encoder_data else None
+    
+    def check_stall(self) -> bool:
+        """
+        Check if motor is currently stalled.
+        
+        Returns:
+            True if stalled, False otherwise
+        """
+        if not self.stall_check_enabled:
+            return False
+        
+        with self.encoder_data_lock:
+            return self.is_stalled
     
     def _pwm_loop(self):
         """Internal PWM loop that generates servo-style PWM signal."""
@@ -187,14 +343,20 @@ class BrakeESC:
         self.smoothing_enabled = was_smoothing_enabled
         print("ESC armed and ready!")
     
-    def set_pulse_width(self, pulse_width_us: int, disable_smoothing: bool = False):
+    def set_pulse_width(self, pulse_width_us: int, disable_smoothing: bool = False, check_stall: bool = True):
         """
         Set PWM pulse width in microseconds
         
         Args:
             pulse_width_us: Pulse width in microseconds (1350-1650 typical range)
             disable_smoothing: If True, temporarily disable smoothing for exact value
+            check_stall: If True, check for stall before setting (default: True)
         """
+        # Check for stall if enabled
+        if check_stall and self.stall_check_enabled and self.check_stall():
+            print("BrakeESC: Stall detected - command ignored")
+            return False
+        
         # Clamp to reasonable range
         pulse_width_us = max(1000, min(2000, pulse_width_us))
         
@@ -207,19 +369,20 @@ class BrakeESC:
         
         # Keep old attribute for backwards compatibility
         self.pulse_width_us = pulse_width_us
+        return True
     
-    def set_neutral(self):
+    def set_neutral(self, check_stall: bool = True):
         """Set ESC to neutral position"""
         # Disable smoothing for exact neutral value
-        self.set_pulse_width(self.NEUTRAL_US, disable_smoothing=True)
+        self.set_pulse_width(self.NEUTRAL_US, disable_smoothing=True, check_stall=check_stall)
     
-    def set_forward(self):
+    def set_forward(self, check_stall: bool = True):
         """Set ESC to forward (slight movement)"""
-        self.set_pulse_width(self.FORWARD_US)
+        self.set_pulse_width(self.FORWARD_US, check_stall=check_stall)
     
-    def set_reverse(self):
+    def set_reverse(self, check_stall: bool = True):
         """Set ESC to reverse (slight movement)"""
-        self.set_pulse_width(self.REVERSE_US)
+        self.set_pulse_width(self.REVERSE_US, check_stall=check_stall)
     
     def set_smoothing(self, enabled: bool, rate: float = 0.1, min_threshold: float = 1.0):
         """
@@ -263,17 +426,23 @@ class BrakeESC:
         Args:
             state: True for ON (HIGH), False for OFF (LOW)
         """
+        if self._cleaned_up:
+            return  # Silently ignore if already cleaned up
+        
         if self.running:
             print("Warning: Cannot set LED while PWM is running. Disable PWM first.")
             return
         
         if self.line is None:
-            raise RuntimeError("GPIO not initialized")
+            return  # Silently ignore if not initialized
         
         try:
             self.line.set_value(1 if state else 0)
-        except Exception as e:
-            raise RuntimeError(f"Failed to set LED state: {e}")
+        except (ValueError, RuntimeError, OSError) as e:
+            # GPIO line is closed or invalid - silently ignore during cleanup
+            if not self._cleaned_up:
+                raise RuntimeError(f"Failed to set LED state: {e}")
+            # Otherwise silently ignore
     
     def blink_led(self, on_time: float = 0.5, off_time: float = 0.5, 
                   duration: Optional[float] = None, count: Optional[int] = None):
@@ -334,22 +503,52 @@ class BrakeESC:
         self.led_blink_running = False
         if self.led_blink_thread is not None:
             self.led_blink_thread.join(timeout=1.0)
-        self.set_led(False)
+        try:
+            self.set_led(False)
+        except Exception:
+            # Ignore errors during cleanup
+            pass
     
     def cleanup(self):
-        """Release GPIO resources"""
+        """Release GPIO resources and close encoder connection"""
+        if self._cleaned_up:
+            return  # Prevent double cleanup
+        
+        self._cleaned_up = True
+        
+        # Stop PWM first
         self.disable()
+        
+        # Stop LED blinking (before releasing GPIO)
         self.stop_led_blink()
+        
+        
+        # Close encoder connection
+        if self.encoder_connected:
+            self.encoder_stop_event.set()
+            if self.encoder_thread and self.encoder_thread.is_alive():
+                self.encoder_thread.join(timeout=1.0)
+            if self.encoder_ser and self.encoder_ser.is_open:
+                try:
+                    self.encoder_ser.close()
+                except Exception:
+                    pass
+            self.encoder_connected = False
+        
+        # Release GPIO line (do this last, after stopping LED operations)
         if self.line is not None:
             try:
                 self.line.release()
             except Exception:
                 pass
+            self.line = None
+        
         if self.chip is not None:
             try:
                 self.chip.close()
             except Exception:
                 pass
+            self.chip = None
     def start(self):
         # Arm the ESC (send neutral for 2 seconds)
         self.arm_esc(duration=2.0)
@@ -372,6 +571,303 @@ class BrakeESC:
         time.sleep(0.5)
         self.disable()
         return
+    
+    def brake_arm(self):
+        """
+        Initialize/arm brake with a simple routine.
+        
+        Process:
+        1. Run in reverse for 3 seconds
+        2. Set to neutral
+        3. Done
+        
+        Returns:
+            True if routine completed successfully, False otherwise
+        """
+        print("BrakeESC: Starting brake arm routine...")
+        
+        # Ensure PWM is enabled
+        if not self.running:
+            self.enable()
+        
+        # Run in reverse for 3 seconds
+        print("BrakeESC: Running in reverse for 3 seconds")
+        self.set_reverse(check_stall=False)
+        
+        # Monitor and print position during reverse
+        start_time = time.time()
+        last_print_time = start_time
+        while time.time() - start_time < 3.0:
+            elapsed = time.time() - start_time
+            current_data = self.get_encoder_data()
+            
+            # Print updates every 0.5 seconds
+            if elapsed - last_print_time >= 0.5:
+                if current_data:
+                    print(f"  Time: {elapsed:.1f}s | Position: {current_data['position']} | "
+                          f"Velocity: {current_data.get('velocity', 0):+.2f}")
+                else:
+                    print(f"  Time: {elapsed:.1f}s | Waiting for encoder data...")
+                last_print_time = elapsed
+            
+            time.sleep(0.05)
+        
+        # Set to neutral
+        print("BrakeESC: Setting to neutral")
+        self.set_neutral(check_stall=False)
+        
+        # Print final status
+        final_data = self.get_encoder_data()
+        if final_data:
+            print(f"BrakeESC: Arm routine complete! Final position: {final_data['position']}")
+        else:
+            print("BrakeESC: Arm routine complete!")
+        
+        return True
+    
+    def brake(self, forward_time: float = 1.0, stop_time: float = 0.1, reverse_time: float = 0.25):
+        """
+        Execute brake routine: run in reverse for 3 seconds, then set to neutral.
+        
+        Args:
+            forward_time: Not used (kept for compatibility)
+            stop_time: Not used (kept for compatibility)
+            reverse_time: Not used (kept for compatibility)
+        
+        Returns:
+            True if routine completed successfully
+        """
+        print("BrakeESC: Starting brake routine...")
+        
+        # Ensure PWM is enabled
+        if not self.running:
+            self.enable()
+        
+        # Run in reverse for 3 seconds
+        print("BrakeESC: Running in reverse for 3 seconds")
+        self.set_reverse(check_stall=False)
+        
+        # Monitor and print position during reverse
+        start_time = time.time()
+        last_print_time = start_time
+        while time.time() - start_time < 3.0:
+            elapsed = time.time() - start_time
+            current_data = self.get_encoder_data()
+            
+            # Print updates every 0.5 seconds
+            if elapsed - last_print_time >= 0.5:
+                if current_data:
+                    print(f"  Time: {elapsed:.1f}s | Position: {current_data['position']} | "
+                          f"Velocity: {current_data.get('velocity', 0):+.2f}")
+                else:
+                    print(f"  Time: {elapsed:.1f}s | Waiting for encoder data...")
+                last_print_time = elapsed
+            
+            time.sleep(0.05)
+        
+        # Set to neutral
+        print("BrakeESC: Setting to neutral")
+        self.set_neutral(check_stall=False)
+
+        # INSERT_YOUR_CODE
+        # Command to disable PWM
+        print("BrakeESC: Disabling PWM")
+        self.disable()
+        # Command to enable PWM
+        print("BrakeESC: Enabling PWM")
+        self.enable()
+
+        self.set_forward(check_stall=False)
+        time.sleep(0.075)
+
+        self.disable()
+        self.enable()
+   
+        
+        # Print final status
+        final_data = self.get_encoder_data()
+        if final_data:
+            print(f"BrakeESC: Brake routine complete! Final position: {final_data['position']}")
+        else:
+            print("BrakeESC: Brake routine complete!")
+        
+        return True
+    
+    def _brake_actuated(self):
+        """
+        Execute brake routine using calibrated actuated position.
+        Moves motor in reverse until reaching brake_actuated_position or stall,
+        then backs off forward.
+        """
+        print(f"BrakeESC: Activating brake (reverse) until position {self.brake_actuated_position} or stall...")
+        
+        # Enable stall checking
+        self.stall_check_enabled = True
+        
+        # Ensure PWM is enabled
+        if not self.running:
+            self.enable()
+        
+        # Get initial position
+        initial_data = self.get_encoder_data()
+        if not initial_data:
+            print("BrakeESC: ERROR - No encoder data available")
+            return False
+        
+        initial_position = initial_data['position']
+        print(f"BrakeESC: Starting position: {initial_position}, Target: {self.brake_actuated_position}")
+        
+        # Start moving in reverse at 1200 us
+        self.set_pulse_width(1200, check_stall=False)
+        
+        check_interval = 0.05  # Check every 50ms
+        timeout = 5.0  # Maximum 5 seconds
+        start_time = time.time()
+        last_print_time = start_time
+        
+        while time.time() - start_time < timeout:
+            # Check for stall
+            if self.check_stall():
+                print("BrakeESC: STALL DETECTED - brake engaged")
+                break
+            
+            # Get current position
+            current_data = self.get_encoder_data()
+            if not current_data:
+                time.sleep(check_interval)
+                continue
+            
+            current_position = current_data['position']
+            
+            # Check if we've reached the actuated position
+            # Since we're moving in reverse, position should decrease
+            if current_position <= self.brake_actuated_position:
+                print(f"BrakeESC: Reached actuated position! Current: {current_position}, Target: {self.brake_actuated_position}")
+                break
+            
+            # Print updates every 0.2 seconds
+            current_time = time.time()
+            if current_time - last_print_time >= 0.2:
+                print(f"  Position: {current_position}, Target: {self.brake_actuated_position}, "
+                      f"Remaining: {current_position - self.brake_actuated_position}, "
+                      f"Velocity: {current_data.get('velocity', 0):+.2f}")
+                last_print_time = current_time
+            
+            time.sleep(check_interval)
+        
+        # Stop reverse movement
+        print("BrakeESC: Stopping reverse movement")
+        self.set_neutral(check_stall=False)
+        time.sleep(0.1)
+        
+        # Back off forward at 1650 us for 0.25 seconds
+        print("BrakeESC: Backing off forward at 1650 us for 0.25 seconds")
+        self.set_pulse_width(1650, check_stall=False)
+        time.sleep(0.25)
+        
+        # Return to neutral
+        print("BrakeESC: Returning to neutral")
+        self.set_neutral(check_stall=False)
+        self.stall_check_enabled = False
+        
+        final_data = self.get_encoder_data()
+        final_position = final_data['position'] if final_data else None
+        if final_position is not None:
+            print(f"BrakeESC: Final position: {final_position}, Target: {self.brake_actuated_position}")
+        
+        return True
+    
+    def _brake_fallback(self, forward_time: float, stop_time: float, reverse_time: float):
+        """
+        Fallback brake routine: forward -> stop -> reverse.
+        """
+        print(f"BrakeESC: Starting brake routine (forward={forward_time}s, stop={stop_time}s, reverse={reverse_time}s)")
+        
+        # Enable stall checking
+        self.stall_check_enabled = True
+        
+        # Ensure PWM is enabled
+        if not self.running:
+            self.enable()
+        
+        # Get initial position
+        initial_data = self.get_encoder_data()
+        initial_position = initial_data['position'] if initial_data else None
+        print(f"BrakeESC: Initial encoder position: {initial_position}")
+        
+        # Phase 1: Forward (brake engagement)
+        print(f"BrakeESC: Phase 1 - Forward for {forward_time}s")
+        if self.check_stall():
+            print("BrakeESC: STALL DETECTED before forward phase - aborting routine")
+            self.set_neutral(check_stall=False)
+            self.stall_check_enabled = False
+            return False
+        
+        self.set_forward(check_stall=False)
+        
+        start_time = time.time()
+        last_print_time = start_time
+        while time.time() - start_time < forward_time:
+            if self.check_stall():
+                print("BrakeESC: STALL DETECTED during forward phase - stopping routine")
+                self.set_neutral(check_stall=False)
+                self.stall_check_enabled = False
+                return False
+            
+            current_time = time.time()
+            if current_time - last_print_time >= 0.2:
+                data = self.get_encoder_data()
+                if data:
+                    print(f"  Position: {data['position']}, Velocity: {data['velocity']:.2f}, Moving: {data['is_moving']}")
+                last_print_time = current_time
+            
+            time.sleep(0.05)
+        
+        # Phase 2: Stop/Neutral
+        print(f"BrakeESC: Phase 2 - Stop/Neutral for {stop_time}s")
+        self.set_neutral(check_stall=False)
+        time.sleep(stop_time)
+        
+        # Phase 3: Reverse (backoff)
+        print(f"BrakeESC: Phase 3 - Reverse (backoff) for {reverse_time}s")
+        if self.check_stall():
+            print("BrakeESC: STALL DETECTED before reverse phase - aborting routine")
+            self.set_neutral(check_stall=False)
+            self.stall_check_enabled = False
+            return False
+        
+        self.set_reverse(check_stall=False)
+        
+        start_time = time.time()
+        last_print_time = start_time
+        while time.time() - start_time < reverse_time:
+            if self.check_stall():
+                print("BrakeESC: STALL DETECTED during reverse phase - stopping routine")
+                self.set_neutral(check_stall=False)
+                self.stall_check_enabled = False
+                return False
+            
+            current_time = time.time()
+            if current_time - last_print_time >= 0.2:
+                data = self.get_encoder_data()
+                if data:
+                    print(f"  Position: {data['position']}, Velocity: {data['velocity']:.2f}, Moving: {data['is_moving']}")
+                last_print_time = current_time
+            
+            time.sleep(0.05)
+        
+        # Return to neutral
+        print("BrakeESC: Brake routine complete - returning to neutral")
+        self.set_neutral(check_stall=False)
+        self.stall_check_enabled = False
+        
+        final_data = self.get_encoder_data()
+        final_position = final_data['position'] if final_data else None
+        if initial_position is not None and final_position is not None:
+            position_delta = final_position - initial_position
+            print(f"BrakeESC: Final encoder position: {final_position} (delta: {position_delta:+d})")
+        
+        return True
     def __enter__(self):
         """Context manager entry"""
         return self
@@ -382,7 +878,11 @@ class BrakeESC:
     
     def __del__(self):
         """Destructor"""
-        self.cleanup()
+        try:
+            self.cleanup()
+        except Exception:
+            # Ignore errors during destruction
+            pass
 
 
 if __name__ == "__main__":
@@ -397,8 +897,11 @@ if __name__ == "__main__":
         """Handle Ctrl+C gracefully"""
         print("\n\nStopping...")
         if brake_esc:
-            brake_esc.set_neutral()
-            time.sleep(0.1)
+            try:
+                brake_esc.set_neutral()
+                time.sleep(0.1)
+            except Exception:
+                pass  # Ignore errors during shutdown
             brake_esc.cleanup()
         exit(0)
     
@@ -435,6 +938,17 @@ if __name__ == "__main__":
         
         # Disable command
         disable_parser = subparsers.add_parser('disable', help='Disable PWM output')
+        
+        # Brake command
+        brake_parser = subparsers.add_parser('brake', help='Execute brake routine or initialize brake')
+        brake_parser.add_argument('--arm', action='store_true',
+                                 help='Initialize/calibrate brake: find actuated position')
+        brake_parser.add_argument('--forward-time', type=float, default=1.0,
+                                 help='Forward duration in seconds (default: 1.0)')
+        brake_parser.add_argument('--stop-time', type=float, default=0.1,
+                                 help='Stop/neutral duration in seconds (default: 0.1)')
+        brake_parser.add_argument('--reverse-time', type=float, default=0.25,
+                                 help='Reverse duration in seconds (default: 0.25)')
         
         # Status command
         status_parser = subparsers.add_parser('status', help='Show current status')
@@ -509,6 +1023,43 @@ if __name__ == "__main__":
                     print(f"  PWM is ACTIVE")
                 else:
                     print(f"  PWM is INACTIVE")
+                
+                # Show encoder status if connected
+                if brake_esc.encoder_connected:
+                    encoder_data = brake_esc.get_encoder_data()
+                    if encoder_data:
+                        print(f"\nEncoder Status:")
+                        print(f"  Connected: {brake_esc.encoder_connected}")
+                        print(f"  Position: {encoder_data['position']}")
+                        print(f"  Velocity: {encoder_data['velocity']:.2f} pulses/s")
+                        print(f"  Moving: {encoder_data['is_moving']}")
+                        print(f"  Stalled: {encoder_data['is_stalled']}")
+                    else:
+                        print(f"\nEncoder Status:")
+                        print(f"  Connected: {brake_esc.encoder_connected}")
+                        print(f"  No data received yet")
+                else:
+                    print(f"\nEncoder Status: Not connected")
+            
+            elif args.command == 'brake':
+                if args.arm:
+                    print("Initializing brake calibration...")
+                    success = brake_esc.brake_arm()
+                    if success:
+                        print(f"Brake calibrated! Actuated position: {brake_esc.brake_actuated_position}")
+                    else:
+                        print("Brake calibration failed")
+                else:
+                    print("Executing brake routine...")
+                    success = brake_esc.brake(
+                        forward_time=args.forward_time,
+                        stop_time=args.stop_time,
+                        reverse_time=args.reverse_time
+                    )
+                    if success:
+                        print("Brake routine completed successfully")
+                    else:
+                        print("Brake routine stopped due to stall detection")
             
             elif args.command == 'help':
                 print("\nAvailable commands:")
@@ -519,13 +1070,19 @@ if __name__ == "__main__":
                 print("  set --reverse                - Set to reverse position (1350 us)")
                 print("  enable                       - Enable PWM output")
                 print("  disable                      - Disable PWM output")
-                print("  status                       - Show current ESC status")
+                print("  brake --arm                  - Initialize/calibrate brake (find actuated position)")
+                print("  brake [--forward-time SEC]   - Execute brake routine")
+                print("         [--stop-time SEC]      -   (uses calibrated position if available)")
+                print("         [--reverse-time SEC]   -   with stall detection")
+                print("  status                       - Show current ESC and encoder status")
                 print("  help                         - Show this help message")
                 print("  quit / exit                  - Exit the program")
                 print("\nExamples:")
                 print("  arm --duration 2.0")
                 print("  set --neutral")
                 print("  set --pulse-width 1600")
+                print("  brake                         # Run default brake routine")
+                print("  brake --forward-time 2.0      # Custom brake routine")
                 print("  status")
                 print()
             
@@ -546,6 +1103,10 @@ if __name__ == "__main__":
     init_parser = argparse.ArgumentParser(description='Brake ESC Control - Interactive mode')
     init_parser.add_argument('--chip', type=int, default=4, help='GPIO chip number (default: 4)')
     init_parser.add_argument('--line', type=int, default=11, help='GPIO line number (default: 11)')
+    init_parser.add_argument('--encoder-port', type=str, default=None, 
+                           help='ESP32 encoder serial port (e.g., ttl1 or /dev/ttyUSB1)')
+    init_parser.add_argument('--encoder-baudrate', type=int, default=115200,
+                           help='ESP32 encoder baudrate (default: 115200)')
     init_args = init_parser.parse_args()
     
     try:
@@ -555,14 +1116,54 @@ if __name__ == "__main__":
         print("Type 'help' for available commands, 'quit' or 'exit' to exit")
         print("-" * 60)
         
-        brake_esc = BrakeESC(chip_num=init_args.chip, line_num=init_args.line)
-        print(f"Brake ESC initialized (chip={init_args.chip}, line={init_args.line})")
-        print()
+        # Build kwargs for BrakeESC
+        brake_kwargs = {
+            'chip_num': init_args.chip,
+            'line_num': init_args.line
+        }
+        if init_args.encoder_port:
+            brake_kwargs['encoder_port'] = init_args.encoder_port
+            brake_kwargs['encoder_baudrate'] = init_args.encoder_baudrate
+            print(f"Brake ESC will connect to encoder on {init_args.encoder_port}")
+        
+        try:
+            brake_esc = BrakeESC(**brake_kwargs)
+            print(f"Brake ESC initialized (chip={init_args.chip}, line={init_args.line})")
+            if init_args.encoder_port:
+                print(f"Encoder port: {init_args.encoder_port} (baudrate: {init_args.encoder_baudrate})")
+                if brake_esc.encoder_connected:
+                    print("Encoder status: CONNECTED")
+                else:
+                    print("Encoder status: NOT CONNECTED (stall detection disabled)")
+            print()
+            sys.stdout.flush()  # Ensure all output is flushed before prompt
+        except Exception as e:
+            print(f"\nERROR during initialization: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
         
         # Interactive command loop
         while True:
             try:
-                cmd_line = input("brake> ").strip()
+                # Check if stdin is still open
+                if sys.stdin.closed:
+                    print("\nERROR: stdin is closed. Exiting.")
+                    break
+                
+                sys.stdout.flush()  # Flush before prompt
+                sys.stderr.flush()  # Also flush stderr
+                
+                # Use readline if available for better input handling
+                try:
+                    cmd_line = input("brake> ").strip()
+                except (EOFError, ValueError) as e:
+                    if isinstance(e, EOFError):
+                        print("\n")
+                        break
+                    else:
+                        print(f"\nERROR reading input: {e}")
+                        break
                 
                 if not cmd_line:
                     continue
@@ -579,6 +1180,11 @@ if __name__ == "__main__":
                 # Handle Ctrl+C (will be caught by signal handler, but just in case)
                 print("\n")
                 break
+            except ValueError as e:
+                if "I/O operation on closed file" in str(e):
+                    print("\nERROR: stdin was closed.")
+                    break
+                raise
         
     except ImportError as e:
         print(f"\nERROR: {e}")
