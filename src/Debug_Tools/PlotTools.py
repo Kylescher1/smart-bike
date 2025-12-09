@@ -32,7 +32,6 @@ class Sonar:
         self.update_delay = 0.05
 
         # Enable interactive mode for non-blocking plotting
-        print(f"[SONAR INIT] Using matplotlib backend: {matplotlib.get_backend()}")
         plt.ion()
         self.fig, self.ax = plt.subplots(figsize=(9, 9), facecolor="black")
         self.ax.set_facecolor("black")
@@ -47,13 +46,12 @@ class Sonar:
         self.fig.show()
         # Keep window responsive
         plt.pause(0.001)
-        print("[SONAR INIT] Plot window created in interactive mode")
+        print(f"[SONAR] Initialized with backend: {matplotlib.get_backend()}")
 
         # Start with a larger view that will auto-adjust
         self.max_r = 10  # Increased from 2 to 10 meters
         self.ax.set_xlim(-self.max_r, self.max_r)
         self.ax.set_ylim(-self.max_r, self.max_r)
-        print(f"[SONAR INIT] Initial plot limits: [{-self.max_r}, {self.max_r}]")
 
         # Polar-style concentric circles - draw more circles at different radii
         for r in [1, 2, 3, 5, 7, 10]:
@@ -86,7 +84,6 @@ class Sonar:
             self.ax.scatter([], [], s=30, c=plot_type["color"], alpha=0.8, edgecolors='white', linewidths=0.5) 
             for plot_type in self.plot_types
         ]
-        print(f"[SONAR INIT] Created {len(self.scatters)} scatter plots for: {[pt['data_out_label'] for pt in self.plot_types]}")
 
     def update_plot(self,data):#call each loop
         """
@@ -100,45 +97,26 @@ class Sonar:
             """
         #make frames from dict
         self.update_count += 1
-        print(f"\n[SONAR UPDATE_PLOT #{self.update_count}] Received data keys: {data.keys()}")
 
         for i,plot_ty in enumerate(self.plot_types):
             key = plot_ty["data_out_label"]
             scatter = self.scatters[i]
-            
-            print(f"[SONAR UPDATE_PLOT] Processing plot type {i}: '{key}'")
 
             try:
                 frame = data[key]
-                print(f"[SONAR UPDATE_PLOT] Got frame for '{key}', id: {id(frame)}, shape: {np.shape(frame)}")
-            except Exception as e:
-                print(f"[SONAR UPDATE_PLOT] No data for '{key}': {e}")
+            except Exception:
                 continue
             
             if frame is None:
-                print(f"[SONAR UPDATE_PLOT] Frame is None for '{key}', skipping")
                 continue
-                
-            print(f"[SONAR UPDATE_PLOT] Frame for '{key}' - shape: {frame.shape}, dtype: {frame.dtype}")
-            print(f"[SONAR UPDATE_PLOT] Frame id: {id(frame)}, frame.base: {frame.base}")
             
             x = frame[0]
             y = frame[1]
             
-            print(f"[SONAR UPDATE_PLOT] Extracted x (id={id(x)}), y (id={id(y)})")
-            print(f"[SONAR UPDATE_PLOT] x shape: {x.shape}, x is view: {x.base is not None}")
-            print(f"[SONAR UPDATE_PLOT] y shape: {y.shape}, y is view: {y.base is not None}")
-            print(f"[SONAR UPDATE_PLOT] x stats: len={len(x)}, min={np.min(x) if len(x) > 0 else 'N/A'}, max={np.max(x) if len(x) > 0 else 'N/A'}")
-            print(f"[SONAR UPDATE_PLOT] y stats: len={len(y)}, min={np.min(y) if len(y) > 0 else 'N/A'}, max={np.max(y) if len(y) > 0 else 'N/A'}")
-            
             offsets = np.column_stack([x, y])
-            print(f"[SONAR UPDATE_PLOT] Created offsets, shape: {offsets.shape}, id: {id(offsets)}")
-            print(f"[SONAR UPDATE_PLOT] Offsets stats: min={np.min(offsets)}, max={np.max(offsets)}")
             
             scatter.set_offsets(offsets)
-            # Force scatter to be visible
             scatter.set_visible(True)
-            print(f"[SONAR UPDATE_PLOT] Updated scatter plot for '{key}' with {len(offsets)} points")
             
             # Update title with frame count to verify updates are happening
             self.ax.set_title(f"Live Multi-Sensor Viewer (LIDAR) - Frame {self.update_count} - {len(offsets)} points", 
@@ -153,9 +131,6 @@ class Sonar:
                 margin = 0.2
                 x_range = max(abs(x_max - x_min), 1.0)  # at least 1m
                 y_range = max(abs(y_max - y_min), 1.0)
-                
-                x_center = (x_max + x_min) / 2
-                y_center = (y_max + y_min) / 2
                 
                 half_x = x_range * (1 + margin) / 2
                 half_y = y_range * (1 + margin) / 2
@@ -173,15 +148,11 @@ class Sonar:
                 if abs(current_xlim[0] - new_xlim[0]) > 0.5 or abs(current_xlim[1] - new_xlim[1]) > 0.5:
                     self.ax.set_xlim(new_xlim)
                     self.ax.set_ylim(new_ylim)
-                    print(f"[SONAR UPDATE_PLOT] Adjusted limits to: x={new_xlim}, y={new_ylim}")
 
-        print(f"[SONAR UPDATE_PLOT] Forcing display redraw...")
-        # Force immediate redraw - draw_idle() wasn't working
+        # Force immediate redraw
         try:
-            self.fig.canvas.draw()  # Force immediate draw (not idle)
-            self.fig.canvas.flush_events()  # Process any pending GUI events
-            plt.pause(0.001)  # Small pause to let GUI process the update
-            print(f"[SONAR UPDATE_PLOT] Redraw successful")
+            self.fig.canvas.draw()
+            self.fig.canvas.flush_events()
+            plt.pause(0.001)
         except Exception as e:
-            print(f"[SONAR UPDATE_PLOT] WARNING: Draw failed: {e}")
-        print(f"[SONAR UPDATE_PLOT] Update complete")
+            print(f"[SONAR] WARNING: Draw failed: {e}")

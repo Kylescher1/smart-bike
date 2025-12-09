@@ -41,33 +41,22 @@ def instantiate_Peripherals(config):
     return Peripherals
 def simple_point2obsticle(data,k=10):
     obsticle_arr = None
-    
-    print(f"[POINT2OBSTICLE] Processing data with keys: {data.keys()}")
 
     for key, key_data in data.items():
         if key == 'point_cloud':
-            print(f"[POINT2OBSTICLE] Found point_cloud, id: {id(key_data)}, shape: {key_data.shape}")
-            print(f"[POINT2OBSTICLE] point_cloud is view: {key_data.base is not None}")
-            
             # point_cloud is M×N
             coords = key_data[:3, :]  # (3, N)
-            print(f"[POINT2OBSTICLE] Extracted coords (view), id: {id(coords)}, shape: {coords.shape}")
-            
             norms = np.linalg.norm(coords, axis=0)  # (N,)
-            print(f"[POINT2OBSTICLE] Computed norms, shape: {norms.shape}, min: {np.min(norms)}, max: {np.max(norms)}")
 
             # indices of the closest K points
             k = min(k, norms.size)  # avoid overflow if <10 points
             idxs = np.argpartition(norms, k)[:k]  # unsorted K closest
-            print(f"[POINT2OBSTICLE] Selected top {k} closest points")
 
             # If you want them sorted from nearest → farthest:
             idxs = idxs[np.argsort(norms[idxs])]
 
-            # Select the columns (M × K) - THIS IS A VIEW, so make a COPY!
-            obsticle_arr = key_data[:, idxs].copy()  # (M, K) - COPY to prevent mutation
-            print(f"[POINT2OBSTICLE] Created obsticle_arr (COPY), id: {id(obsticle_arr)}, shape: {obsticle_arr.shape}")
-            print(f"[POINT2OBSTICLE] obsticle_arr.base is None (independent): {obsticle_arr.base is None}")
+            # Select the columns (M × K) - make a COPY to prevent mutation
+            obsticle_arr = key_data[:, idxs].copy()  # (M, K)
 
             return obsticle_arr  # stop after processing point_cloud
 
@@ -75,10 +64,7 @@ def simple_point2obsticle(data,k=10):
 
 def simple_obsticle_response(obsticle_arr,Peripherals):
     if obsticle_arr is None:
-        print(f"[OBSTICLE RESPONSE] No obstacles detected")
         return #escapes function if there is no obsticles
-
-    print(f"[OBSTICLE RESPONSE] Processing obstacles, shape: {obsticle_arr.shape}, id: {id(obsticle_arr)}")
 
     #more than 1
     if obsticle_arr.shape[0] > 1:
@@ -87,7 +73,6 @@ def simple_obsticle_response(obsticle_arr,Peripherals):
         norms = np.linalg.norm(coords, axis=0)  # Euclidean norm per column
 
         idx = np.argmin(norms)  # index of column with smallest norm
-        print(f"[OBSTICLE RESPONSE] Closest obstacle at index {idx}, distance: {norms[idx]:.3f}m")
 
         closeest = obsticle_arr[:,idx]  # the whole m×1 column
     else:
@@ -102,8 +87,7 @@ def simple_obsticle_response(obsticle_arr,Peripherals):
 
     L,R = calculate_haptics(dist,angle_deg)
 
-
-    print(f"[OBSTICLE RESPONSE] Left:{L},Right:{R},dist:{dist:.3f}m,angle:{angle_deg:.1f}°")
+    print(f"Obstacle: {dist:.2f}m @ {angle_deg:.0f}° | Haptics L:{L} R:{R}")
 
 
     #do we vibe?
@@ -133,11 +117,7 @@ def transform_to_cordnate(arr,Q=np.quaternion(1,0,0,0),Z=np.array([0,0,0])):
     Q: matplotlib quats of new WCS
     Z: offset vector in new wcs of old origin
     """
-    print(f"[TRANSFORM] Input arr id: {id(arr)}, shape: {arr.shape}, dtype: {arr.dtype}")
-    print(f"[TRANSFORM] Input arr is C-contiguous: {arr.flags['C_CONTIGUOUS']}, arr.base is: {arr.base}")
-    
     V = arr[:3].T # shape (N,3)
-    print(f"[TRANSFORM] V shape: {V.shape}, V is view: {V.base is not None}")
 
     # Convert vectors to quaternion array (0, x, y, z) efficiently
     Vq = quaternion.from_vector_part(V)  # shape (N,) dtype=quaternion
@@ -150,9 +130,7 @@ def transform_to_cordnate(arr,Q=np.quaternion(1,0,0,0),Z=np.array([0,0,0])):
 
     # Make a DEEP copy to ensure no mutation
     out = arr.copy()
-    print(f"[TRANSFORM] Output arr id: {id(out)}, is same as input: {id(out) == id(arr)}")
     out[:3] = (V_rot + Z).T
-    print(f"[TRANSFORM] After modification, output arr stats: min={np.min(out[:2])}, max={np.max(out[:2])}")
     return out
 
 def calculate_haptics(r, theta):
@@ -220,9 +198,6 @@ def main():
         while True:
             #MAIN LOOP
             loop_count += 1
-            print(f"\n{'='*60}")
-            print(f"[MAIN LOOP {loop_count}] Starting new iteration")
-            print(f"{'='*60}")
 
             #SENSOR DATA COLLECTION
             new_data = {}
@@ -230,35 +205,22 @@ def main():
                 start = time.time()
                 if hasattr(Peripheral, 'read') and callable(getattr(Peripheral, 'read')):
                     this_Peripheral_data = Peripheral.read() #{data_goal:data,...}
-                    
-                    print(f"[{name}] Read data: {this_Peripheral_data.keys() if this_Peripheral_data else 'None'}")
 
                     if this_Peripheral_data is None:continue #only data thats valid gets passed
 
                     for key,key_data in this_Peripheral_data.items():
                         if key_data is None:
-                            print(f"[{name}] Key '{key}' has None value, skipping")
                             continue
-                        
-                        print(f"[{name}] Processing key '{key}', data shape: {np.shape(key_data)}, data id: {id(key_data)}")
                         
                         if key not in new_data:
                             if key in ['point_cloud','ground_edge_detect']:#3d points
-                                print(f"[{name}] Transforming '{key}' data")
-                                print(f"[{name}] BEFORE transform - data stats: min={np.min(key_data[:2]) if key_data.size > 0 else 'N/A'}, max={np.max(key_data[:2]) if key_data.size > 0 else 'N/A'}, shape={key_data.shape}")
                                 #data moves from sensor cords to bike cords (config dill specified)
                                 transformed_data = transform_to_cordnate(key_data,Q=Peripheral.orientation,Z=Peripheral.sensor_location)
-                                print(f"[{name}] AFTER transform - data stats: min={np.min(transformed_data[:2]) if transformed_data.size > 0 else 'N/A'}, max={np.max(transformed_data[:2]) if transformed_data.size > 0 else 'N/A'}, shape={transformed_data.shape}, id={id(transformed_data)}")
                                 new_data[key] = transformed_data
                             else:
                                 new_data[key] = key_data
-                                print(f"[{name}] Added '{key}' directly (not point cloud)")
                         else:
-                            print(f"[{name}] WARNING: Key '{key}' already exists in new_data! Attempting to append...")
-                            print(f"[{name}] Current new_data['{key}'] type: {type(new_data[key])}, shape: {np.shape(new_data[key])}")
-                            # This is problematic - can't append to numpy array like this!
-                            # new_data[key].append(key_data)
-                            print(f"[{name}] ERROR: Cannot append to numpy array! Skipping this data.")
+                            print(f"[{name}] WARNING: Key '{key}' already exists in new_data! Skipping duplicate.")
                         # print(f"shape of data {np.shape(key_data)}")
                     # print(f"{name} took {time.time()-start} s")
                 else:#No data to produce IE output only
@@ -279,42 +241,17 @@ def main():
 
 
             #process raw sensor data into labeled groups
-            print(f"\n[OBSTICLE DETECTION] Processing new_data keys: {new_data.keys()}")
-            for key, val in new_data.items():
-                if val is not None:
-                    print(f"[OBSTICLE DETECTION] '{key}' shape: {np.shape(val)}, id: {id(val)}")
-                    if isinstance(val, np.ndarray) and val.size > 0:
-                        print(f"[OBSTICLE DETECTION] '{key}' stats: min={np.min(val[:2] if len(val) >= 2 else val)}, max={np.max(val[:2] if len(val) >= 2 else val)}")
-            
             obsticle_arr = simple_point2obsticle(new_data)
-            
-            if obsticle_arr is not None:
-                print(f"[OBSTICLE DETECTION] Found obstacles, shape: {obsticle_arr.shape}")
 
             #decide
             simple_obsticle_response(obsticle_arr,Peripherals)
 
             if display:
-                print(f"\n[PLOTTING] Calling Sonar.update_plot with data keys: {new_data.keys()}")
-                for key, val in new_data.items():
-                    if val is not None and isinstance(val, np.ndarray):
-                        print(f"[PLOTTING] Before plot - '{key}' id: {id(val)}, shape: {val.shape}")
-                        if val.size > 0:
-                            print(f"[PLOTTING] Before plot - '{key}' stats: min={np.min(val[:2])}, max={np.max(val[:2])}")
-                
                 Sonar.update_plot(new_data)
-                
-                print(f"[PLOTTING] After plot - checking if data was mutated:")
-                for key, val in new_data.items():
-                    if val is not None and isinstance(val, np.ndarray) and val.size > 0:
-                        print(f"[PLOTTING] After plot - '{key}' id: {id(val)}, stats: min={np.min(val[:2])}, max={np.max(val[:2])}")
-                
                 # Small sleep to control loop rate and prevent overwhelming the system
                 time.sleep(0.01)
             else:
                 time.sleep(0.05)
-                # plot_sonar("data")
-            # print(f"{data.keys()} → {data}")
     except KeyboardInterrupt: #Closed file
         print("\nStopping Peripherals...")
         for sensor in Peripherals.values():

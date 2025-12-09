@@ -306,13 +306,11 @@ class SpinningLidar:
             Array of [x,y,z,q]x# of samples .
         """
         if not self.scan_buffer:
-            print(f"[{self.name} READ] No data in scan_buffer")
             return None
 
         # CRITICAL FIX: Make a snapshot to avoid "deque mutated during iteration"
         # The background thread is continuously adding to scan_buffer
         buffer_snapshot = list(self.scan_buffer)
-        print(f"[{self.name} READ] Processing {len(buffer_snapshot)} packets from scan_buffer snapshot")
         
         xs = []
         ys = []
@@ -344,13 +342,9 @@ class SpinningLidar:
                 qs.append(q_val)
 
         if len(xs) == 0:
-            print(f"[{self.name} READ] No valid points after filtering")
             return {self.data_out_label:None} #No new data for this type
 
         result = np.vstack([xs, ys, zs, qs])
-        print(f"[{self.name} READ] Created new array, id: {id(result)}, shape: {result.shape}")
-        print(f"[{self.name} READ] Data stats: x range=[{np.min(xs):.3f}, {np.max(xs):.3f}], y range=[{np.min(ys):.3f}, {np.max(ys):.3f}]")
-        print(f"[{self.name} READ] Returning data with label '{self.data_out_label}'")
         
         return {self.data_out_label:result}
 
