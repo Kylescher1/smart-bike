@@ -45,6 +45,10 @@ def simple_point2obsticle(data,k=10):
     
     for key, key_data in data.items():
         if key == 'point_cloud':
+            # Check if point cloud is empty after filtering
+            if key_data is None or key_data.size == 0 or key_data.shape[1] == 0:
+                return None  # No points to process
+            
             t0 = time.time()
             # point_cloud is M×N
             coords = key_data[:3, :]  # (3, N)
@@ -57,6 +61,8 @@ def simple_point2obsticle(data,k=10):
             t0 = time.time()
             # indices of the closest K points
             k = min(k, norms.size)  # avoid overflow if <10 points
+            if k == 0:
+                return None  # No points to process
             idxs = np.argpartition(norms, k)[:k]  # unsorted K closest
             timings['argpartition'] = (time.time() - t0) * 1000
 
@@ -80,6 +86,10 @@ def simple_point2obsticle(data,k=10):
 def simple_obsticle_response(obsticle_arr,Peripherals):
     if obsticle_arr is None:
         return #escapes function if there is no obsticles
+    
+    # Check if array is empty or has no columns
+    if obsticle_arr.size == 0 or obsticle_arr.shape[1] == 0:
+        return #escapes function if there is no obsticles after filtering
 
     timings = {}
     t0 = time.time()
@@ -138,6 +148,7 @@ def simple_obsticle_response(obsticle_arr,Peripherals):
 def Plot_Obsticles(obsticle_arr):
     return
 
+
 def transform_to_cordnate(arr,Q=np.quaternion(1,0,0,0),Z=np.array([0,0,0])):
     """
     arr: list of MxN arrays [x, y, z, ...]
@@ -177,16 +188,16 @@ def transform_to_cordnate(arr,Q=np.quaternion(1,0,0,0),Z=np.array([0,0,0])):
     
     return out
 
-def filter_rear_cone(arr):
+def filter_forward_cone(arr):
     """
-    Filters out data points within a 90-degree cone (±45°) from the negative y direction.
-    This removes data behind the bike that isn't relevant for obstacle detection.
+    Filters to only keep data points within a 90-degree cone (±45°) from the forward direction.
+    This keeps only relevant data in front of the bike for obstacle detection.
     
     Args:
         arr: MxN array where first 3 rows are [x, y, z, ...]
     
     Returns:
-        MxN array with filtered columns (points outside the rear cone)
+        MxN array with filtered columns (points within the forward cone)
     """
     if arr is None or arr.size == 0:
         return arr
@@ -202,12 +213,12 @@ def filter_rear_cone(arr):
     #   -90° or 270° = negative y (backward)
     angles = np.degrees(np.arctan2(y, x))
     
-    # Define the rear cone: ±45° from negative y direction (-90°)
-    # This means angles between -135° and -45°
-    # Keep points OUTSIDE this range
-    mask = ((angles >= -135) & (angles <= -135))
+    # Define the forward cone: ±45° from positive y direction (90°)
+    # This means angles between 45° and 135°
+    # Keep points WITHIN this range
+    mask = (angles >= 45) & (angles <= 135)
     
-    # Filter the array to keep only points outside the rear cone
+    # Filter the array to keep only points within the forward cone
     filtered_arr = arr[:, mask]
     
     return filtered_arr
@@ -269,9 +280,13 @@ def main():
     print("===" * 20)
     try:
         #Runs once before main loop
-        display = True
+        display = False
+        last_plot_data = None
+        plot_skip_counter = 0
+        
         if display:
             Sonar = load_class_from_path("src.Debug_Tools.PlotTools.Sonar")()
+            print("[PLOT] Sonar display initialized")
         
         loop_count = 0
         timing_stats = {
@@ -315,8 +330,8 @@ def main():
                                 transform_start = time.time()
                                 #data moves from sensor cords to bike cords (config dill specified)
                                 transformed_data = transform_to_cordnate(key_data,Q=Peripheral.orientation,Z=Peripheral.sensor_location)
-                                # Filter out rear cone data (±45° from negative y direction)
-                                filtered_data = filter_rear_cone(transformed_data)
+                                # Filter to keep only forward cone data (±45° from positive y direction)
+                                filtered_data = filter_forward_cone(transformed_data)
                                 transform_time = (time.time() - transform_start) * 1000
                                 transform_times[f"{name}.{key}"] = transform_time
                                 new_data[key] = filtered_data
@@ -362,8 +377,14 @@ def main():
 
             if display:
                 plot_start = time.time()
-                Sonar.update_plot(new_data)
-                plot_time = (time.time() - plot_start) * 1000
+                # Update plot every 3rd frame to reduce overhead
+                plot_skip_counter += 1
+                if plot_skip_counter >= 3:
+                    plot_skip_counter = 0
+                    Sonar.update_plot(new_data)
+                    plot_time = (time.time() - plot_start) * 1000
+                else:
+                    plot_time = 0  # Skipped this frame
                 timing_stats['plot'].append(plot_time)
                 
                 sleep_start = time.time()
