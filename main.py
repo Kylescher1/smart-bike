@@ -177,6 +177,41 @@ def transform_to_cordnate(arr,Q=np.quaternion(1,0,0,0),Z=np.array([0,0,0])):
     
     return out
 
+def filter_rear_cone(arr):
+    """
+    Filters out data points within a 90-degree cone (±45°) from the negative y direction.
+    This removes data behind the bike that isn't relevant for obstacle detection.
+    
+    Args:
+        arr: MxN array where first 3 rows are [x, y, z, ...]
+    
+    Returns:
+        MxN array with filtered columns (points outside the rear cone)
+    """
+    if arr is None or arr.size == 0:
+        return arr
+    
+    # Extract x, y coordinates
+    x = arr[0, :]  # shape (N,)
+    y = arr[1, :]  # shape (N,)
+    
+    # Calculate angle from positive x-axis in degrees
+    # arctan2(y, x) gives angle where:
+    #   0° = positive x (right)
+    #   90° = positive y (forward)
+    #   -90° or 270° = negative y (backward)
+    angles = np.degrees(np.arctan2(y, x))
+    
+    # Define the rear cone: ±45° from negative y direction (-90°)
+    # This means angles between -135° and -45°
+    # Keep points OUTSIDE this range
+    mask = ((angles >= -135) & (angles <= -135))
+    
+    # Filter the array to keep only points outside the rear cone
+    filtered_arr = arr[:, mask]
+    
+    return filtered_arr
+
 def calculate_haptics(r, theta):
     """
     Calculates Left and Right PWM (0-255) based on Front Cone Priority logic.
@@ -280,9 +315,11 @@ def main():
                                 transform_start = time.time()
                                 #data moves from sensor cords to bike cords (config dill specified)
                                 transformed_data = transform_to_cordnate(key_data,Q=Peripheral.orientation,Z=Peripheral.sensor_location)
+                                # Filter out rear cone data (±45° from negative y direction)
+                                filtered_data = filter_rear_cone(transformed_data)
                                 transform_time = (time.time() - transform_start) * 1000
                                 transform_times[f"{name}.{key}"] = transform_time
-                                new_data[key] = transformed_data
+                                new_data[key] = filtered_data
                             else:
                                 new_data[key] = key_data
                         else:
