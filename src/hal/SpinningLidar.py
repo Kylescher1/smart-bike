@@ -71,10 +71,38 @@ class SpinningLidar:
         """Attempt to connect to the LIDAR hardware."""
         print(f"{self.name} Connecting to {self.port} at {self.baudrate}...")
         try:
+            # First, try to open the serial port directly and reset it
+            print(f"{self.name} Attempting to reset LIDAR before connection...")
+            try:
+                import serial
+                # Open serial port temporarily to send reset
+                temp_serial = serial.Serial(self.port, self.baudrate, timeout=1)
+                temp_serial.reset_input_buffer()
+                temp_serial.reset_output_buffer()
+                time.sleep(0.1)
+                temp_serial.close()
+                time.sleep(0.5)  # Give LIDAR time to reset
+                print(f"{self.name} Serial buffers cleared")
+            except Exception as e:
+                print(f"{self.name} Warning: Could not pre-clear serial buffers: {e}")
+            
             try:
                 self.Lidar = RPLidar(self.port, self.baudrate, timeout=3)
+                print(f"{self.name} RPLidar object created successfully")
             except Exception as e:
                 raise KeyError(f"{self.name} Failed to create rplidar: {e}")
+            
+            # Try to stop any previous scan and reset
+            try:
+                print(f"{self.name} Sending stop and reset commands...")
+                self.Lidar.stop()
+                time.sleep(0.2)
+                self.Lidar.reset()
+                time.sleep(0.5)
+                print(f"{self.name} LIDAR reset successful")
+            except Exception as e:
+                print(f"{self.name} Warning: Could not reset LIDAR (might be ok): {e}")
+            
             self.connected = True
             try:
                 self.data_thread = threading.Thread(target=self.lidar_data_collector, daemon=True)
@@ -278,14 +306,20 @@ class SpinningLidar:
             Array of [x,y,z,q]x# of samples .
         """
         if not self.scan_buffer:
+            print(f"[{self.name} READ] No data in scan_buffer")
             return None
 
+        # CRITICAL FIX: Make a snapshot to avoid "deque mutated during iteration"
+        # The background thread is continuously adding to scan_buffer
+        buffer_snapshot = list(self.scan_buffer)
+        print(f"[{self.name} READ] Processing {len(buffer_snapshot)} packets from scan_buffer snapshot")
+        
         xs = []
         ys = []
         zs = []
         qs = []
 
-        for pkt in self.scan_buffer:
+        for pkt in buffer_snapshot:
             dist_mm = pkt.get("d_mm", None)
             if dist_mm is None:
                 continue
@@ -310,9 +344,15 @@ class SpinningLidar:
                 qs.append(q_val)
 
         if len(xs) == 0:
+            print(f"[{self.name} READ] No valid points after filtering")
             return {self.data_out_label:None} #No new data for this type
 
-        return {self.data_out_label:np.vstack([xs, ys, zs, qs])}
+        result = np.vstack([xs, ys, zs, qs])
+        print(f"[{self.name} READ] Created new array, id: {id(result)}, shape: {result.shape}")
+        print(f"[{self.name} READ] Data stats: x range=[{np.min(xs):.3f}, {np.max(xs):.3f}], y range=[{np.min(ys):.3f}, {np.max(ys):.3f}]")
+        print(f"[{self.name} READ] Returning data with label '{self.data_out_label}'")
+        
+        return {self.data_out_label:result}
 
     def get_latest_frame(self):
         """
