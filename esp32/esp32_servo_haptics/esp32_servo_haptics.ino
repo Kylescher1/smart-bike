@@ -1,15 +1,15 @@
 /*
- * ESP32 MPU6050 Servo and Vibration Motor Controller
+ * ESP32 MPU6050 Servo Controller
  * 
  * Hardware:
- * - MPU6050 accelerometer/gyroscope (I2C address 0x68)
- * - Two servos: Top (GPIO 25), Bottom (GPIO 26)
- * - Two vibration motors: Left (PWM 14, DIR 27), Right (PWM 32, DIR 33)
+ * - MPU6050 accelerometer/gyroscope (I2C address 0x68, SDA=GPIO4, SCL=GPIO15)
+ * - Top servo: GPIO 32, range 5-60°, home position 35°
+ * - Bottom servo: GPIO 33, range 0-180°, home position 90°
+ * - Vibration motors: Disabled
  * 
  * Serial Protocol (115200 baud):
  * - READ: Returns accelerometer and gyro data as "ax,ay,az,gx,gy,gz"
- * - MOVE,B,ang,T,angle: Moves bottom servo to ang degrees, top servo to angle degrees
- * - VIBRATE,L,R: Sets vibration intensity (0-255) for left and right motors
+ * - MOVE,B,ang,T,angle: Moves bottom servo (GPIO33) to ang degrees, top servo (GPIO32) to angle degrees
  */
 
  #include <Wire.h>
@@ -17,19 +17,19 @@
  
  // --- PIN DEFINITIONS ---
  // Servos
- #define SERVO_TOP_PIN 25
- #define SERVO_BOTTOM_PIN 26
+ #define SERVO_TOP_PIN 32
+ #define SERVO_BOTTOM_PIN 33
  
-// Vibration Motors
-#define L_PWM 14
-#define L_DIR 27
-#define R_PWM 32
-#define R_DIR 33
+// Vibration Motors (COMMENTED OUT - servos are on pins 32/33)
+// #define L_PWM 14
+// #define L_DIR 27
+// #define R_PWM 32
+// #define R_DIR 33
 
-// LEDC PWM configuration for vibration motors
+// LEDC PWM configuration for vibration motors (COMMENTED OUT)
 // Using ledcAttach API to avoid conflicts with ESP32Servo library
-#define PWM_FREQ 20000    // 20kHz PWM frequency for motors (above human hearing, smooth vibration)
-#define PWM_RESOLUTION 8  // 8-bit resolution (0-255)
+// #define PWM_FREQ 20000    // 20kHz PWM frequency for motors (above human hearing, smooth vibration)
+// #define PWM_RESOLUTION 8  // 8-bit resolution (0-255)
  
  // MPU6050/MPU6500/MPU9250 I2C Address
  // Standard address is 0x68, but can be 0x69 if AD0 pin is high
@@ -44,11 +44,15 @@
  #define I2C_SDA_PIN 4
  #define I2C_SCL_PIN 15
  
- // ----- Servo Limits (Preserved to protect hardware) -----
- const int S1_MIN = 15;  // Bottom servo minimum
- const int S1_MAX = 75;  // Bottom servo maximum
- const int S2_MIN = 0;   // Top servo minimum
- const int S2_MAX = 180; // Top servo maximum
+ // ----- Servo Limits -----
+ // Pin 32 = Top servo: range 5-60°, home at 35°
+ const int S2_MIN = 5;   // Top servo (GPIO 32) minimum
+ const int S2_MAX = 60;  // Top servo (GPIO 32) maximum
+ const int S2_HOME = 35; // Top servo (GPIO 32) home position
+ // Pin 33 = Bottom servo: range 0-180°, home at 90°
+ const int S1_MIN = 0;   // Bottom servo (GPIO 33) minimum
+ const int S1_MAX = 180; // Bottom servo (GPIO 33) maximum
+ const int S1_HOME = 90; // Bottom servo (GPIO 33) home position
  
  // Servo objects
  Servo servoTop;
@@ -58,31 +62,32 @@
 String inputString = "";
 bool stringComplete = false;
 
-// Store current vibration motor intensities (to reapply after servo operations)
-int currentLeftIntensity = 0;
-int currentRightIntensity = 0;
+// Store current vibration motor intensities (COMMENTED OUT - vibration motors disabled)
+// int currentLeftIntensity = 0;
+// int currentRightIntensity = 0;
 
 // Store detected MPU address
 byte detectedMPUAddress = MPU6050_ADDR;
  
 void setup() {
+  // VIBRATION MOTOR INITIALIZATION (COMMENTED OUT - vibration motors disabled)
   // CRITICAL: Initialize vibration motor pins FIRST to prevent unwanted vibration on boot
   // Set as outputs immediately (before any delays that might allow motors to run)
-  pinMode(L_DIR, OUTPUT);
-  pinMode(R_DIR, OUTPUT);
+  // pinMode(L_DIR, OUTPUT);
+  // pinMode(R_DIR, OUTPUT);
   
   // Set direction pins to safe state
-  digitalWrite(L_DIR, LOW);
-  digitalWrite(R_DIR, LOW);
+  // digitalWrite(L_DIR, LOW);
+  // digitalWrite(R_DIR, LOW);
   
   // Initialize PWM channels explicitly for vibration motors using LEDC
   // This prevents conflicts with ESP32Servo library which also uses LEDC channels
-  ledcAttach(L_PWM, PWM_FREQ, PWM_RESOLUTION);
-  ledcAttach(R_PWM, PWM_FREQ, PWM_RESOLUTION);
+  // ledcAttach(L_PWM, PWM_FREQ, PWM_RESOLUTION);
+  // ledcAttach(R_PWM, PWM_FREQ, PWM_RESOLUTION);
   
   // Immediately set to safe state (0 PWM) - do this before any delays
-  ledcWrite(L_PWM, 0);
-  ledcWrite(R_PWM, 0);
+  // ledcWrite(L_PWM, 0);
+  // ledcWrite(R_PWM, 0);
   
   // Initialize serial communication
   Serial.begin(115200);
@@ -238,19 +243,36 @@ void setup() {
  Serial.println("=== Setup Complete ===\n");
    
   // Initialize servos
+  Serial.println("\n=== Servo Initialization ===");
+  Serial.print("Attaching servos: Top=GPIO");
+  Serial.print(SERVO_TOP_PIN);
+  Serial.print(", Bottom=GPIO");
+  Serial.println(SERVO_BOTTOM_PIN);
+  
   servoTop.attach(SERVO_TOP_PIN);
   servoBottom.attach(SERVO_BOTTOM_PIN);
   
-  // Set servos to initial positions (middle of range)
-  servoBottom.write((S1_MIN + S1_MAX) / 2);
-  servoTop.write((S2_MIN + S2_MAX) / 2);
+  Serial.println("Servos attached successfully");
   
+  // Set servos to home positions
+  Serial.print("Setting home positions: Bottom (GPIO33)=");
+  Serial.print(S1_HOME);
+  Serial.print("°, Top (GPIO32)=");
+  Serial.print(S2_HOME);
+  Serial.println("°");
+  
+  servoBottom.write(S1_HOME);  // GPIO 33: Bottom servo, home at 90°
+  servoTop.write(S2_HOME);      // GPIO 32: Top servo, home at 35°
+  
+  Serial.println("✓ Servos initialized and set to center position");
+  
+  // VIBRATION MOTOR STATE RE-ASSERTION (COMMENTED OUT - vibration motors disabled)
   // CRITICAL: Re-assert vibration motor state after servo initialization
   // ESP32Servo may reconfigure LEDC channels, so we need to ensure motors stay off
-  ledcWrite(L_PWM, 0);
-  ledcWrite(R_PWM, 0);
-  digitalWrite(L_DIR, LOW);
-  digitalWrite(R_DIR, LOW);
+  // ledcWrite(L_PWM, 0);
+  // ledcWrite(R_PWM, 0);
+  // digitalWrite(L_DIR, LOW);
+  // digitalWrite(R_DIR, LOW);
   
   delay(500);
 }
@@ -278,10 +300,10 @@ void setup() {
    else if (cmd.startsWith("MOVE,")) {
      handleMoveCommand(cmd);
    }
-   // VIBRATE command: VIBRATE,L,R
-   else if (cmd.startsWith("VIBRATE,")) {
-     handleVibrateCommand(cmd);
-   }
+  // VIBRATE command (COMMENTED OUT - vibration motors disabled)
+  // else if (cmd.startsWith("VIBRATE,")) {
+  //   handleVibrateCommand(cmd);
+  // }
    else {
      Serial.println("ERROR");
    }
@@ -383,46 +405,48 @@ void readMPU6050() {
    servoBottom.write(bottomAngle);
    servoTop.write(topAngle);
    
+   // VIBRATION MOTOR STATE RE-ASSERTION (COMMENTED OUT - vibration motors disabled)
    // CRITICAL: Re-assert vibration motor state after servo write
    // ESP32Servo.write() may reconfigure LEDC channels, causing motors to activate
    // Reapply the current vibration state to ensure motors stay at intended level
-   ledcWrite(L_PWM, currentLeftIntensity);
-   ledcWrite(R_PWM, currentRightIntensity);
+   // ledcWrite(L_PWM, currentLeftIntensity);
+   // ledcWrite(R_PWM, currentRightIntensity);
    
    Serial.println("OK");
  }
  
- void handleVibrateCommand(String cmd) {
-   // Parse: VIBRATE,L,R
-   int firstComma = cmd.indexOf(',');
-   int secondComma = cmd.indexOf(',', firstComma + 1);
-   
-   if (firstComma == -1 || secondComma == -1) {
-     Serial.println("ERROR");
-     return;
-   }
-   
-   int leftIntensity = cmd.substring(firstComma + 1, secondComma).toInt();
-   int rightIntensity = cmd.substring(secondComma + 1).toInt();
-   
-   // Clamp to 0-255
-   leftIntensity = constrain(leftIntensity, 0, 255);
-   rightIntensity = constrain(rightIntensity, 0, 255);
-   
-   // Store intensity values for reapplication after servo operations
-   currentLeftIntensity = leftIntensity;
-   currentRightIntensity = rightIntensity;
-   
-   // Set vibration motors using LEDC (not analogWrite to avoid conflicts)
-   ledcWrite(L_PWM, leftIntensity);
-   ledcWrite(R_PWM, rightIntensity);
-   
-   // Set direction (LOW = one direction, HIGH = reverse)
-   // Adjust based on your motor driver requirements
-   digitalWrite(L_DIR, leftIntensity > 0 ? LOW : LOW);
-   digitalWrite(R_DIR, rightIntensity > 0 ? LOW : LOW);
-   
-   Serial.println("OK");
- }
+ // VIBRATION COMMAND HANDLER (COMMENTED OUT - vibration motors disabled)
+ // void handleVibrateCommand(String cmd) {
+ //   // Parse: VIBRATE,L,R
+ //   int firstComma = cmd.indexOf(',');
+ //   int secondComma = cmd.indexOf(',', firstComma + 1);
+ //   
+ //   if (firstComma == -1 || secondComma == -1) {
+ //     Serial.println("ERROR");
+ //     return;
+ //   }
+ //   
+ //   int leftIntensity = cmd.substring(firstComma + 1, secondComma).toInt();
+ //   int rightIntensity = cmd.substring(secondComma + 1).toInt();
+ //   
+ //   // Clamp to 0-255
+ //   leftIntensity = constrain(leftIntensity, 0, 255);
+ //   rightIntensity = constrain(rightIntensity, 0, 255);
+ //   
+ //   // Store intensity values for reapplication after servo operations
+ //   currentLeftIntensity = leftIntensity;
+ //   currentRightIntensity = rightIntensity;
+ //   
+ //   // Set vibration motors using LEDC (not analogWrite to avoid conflicts)
+ //   ledcWrite(L_PWM, leftIntensity);
+ //   ledcWrite(R_PWM, rightIntensity);
+ //   
+ //   // Set direction (LOW = one direction, HIGH = reverse)
+ //   // Adjust based on your motor driver requirements
+ //   digitalWrite(L_DIR, leftIntensity > 0 ? LOW : LOW);
+ //   digitalWrite(R_DIR, rightIntensity > 0 ? LOW : LOW);
+ //   
+ //   Serial.println("OK");
+ // }
  
  
