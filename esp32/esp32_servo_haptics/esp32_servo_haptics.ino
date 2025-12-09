@@ -5,11 +5,12 @@
  * - MPU6050 accelerometer/gyroscope (I2C address 0x68, SDA=GPIO4, SCL=GPIO15)
  * - Top servo: GPIO 32, range 5-60°, home position 35°
  * - Bottom servo: GPIO 33, range 0-180°, home position 90°
- * - Vibration motors: Disabled
+ * - Haptic motors: IN1=GPIO25, IN2=GPIO26 (Left), IN3=GPIO27, IN4=GPIO14 (Right)
  * 
  * Serial Protocol (115200 baud):
  * - READ: Returns accelerometer and gyro data as "ax,ay,az,gx,gy,gz"
  * - MOVE,B,ang,T,angle: Moves bottom servo (GPIO33) to ang degrees, top servo (GPIO32) to angle degrees
+ * - VIBRATE,L,R: Sets haptic intensity (0-255) for left and right motors
  */
 
  #include <Wire.h>
@@ -20,16 +21,17 @@
  #define SERVO_TOP_PIN 32
  #define SERVO_BOTTOM_PIN 33
  
-// Vibration Motors (COMMENTED OUT - servos are on pins 32/33)
-// #define L_PWM 14
-// #define L_DIR 27
-// #define R_PWM 32
-// #define R_DIR 33
+// Haptic/Vibration Motors - Dual H-bridge control (IN1-4)
+// Motor 1 (Left): IN1=GPIO25, IN2=GPIO26
+// Motor 2 (Right): IN3=GPIO27, IN4=GPIO14
+#define HAPTIC_IN1 25  // Left motor forward
+#define HAPTIC_IN2 26  // Left motor reverse
+#define HAPTIC_IN3 27  // Right motor forward
+#define HAPTIC_IN4 14  // Right motor reverse
 
-// LEDC PWM configuration for vibration motors (COMMENTED OUT)
-// Using ledcAttach API to avoid conflicts with ESP32Servo library
-// #define PWM_FREQ 20000    // 20kHz PWM frequency for motors (above human hearing, smooth vibration)
-// #define PWM_RESOLUTION 8  // 8-bit resolution (0-255)
+// LEDC PWM configuration for haptic motors
+#define PWM_FREQ 20000    // 20kHz PWM frequency (above human hearing, smooth vibration)
+#define PWM_RESOLUTION 8  // 8-bit resolution (0-255)
  
  // MPU6050/MPU6500/MPU9250 I2C Address
  // Standard address is 0x68, but can be 0x69 if AD0 pin is high
@@ -62,32 +64,39 @@
 String inputString = "";
 bool stringComplete = false;
 
-// Store current vibration motor intensities (COMMENTED OUT - vibration motors disabled)
-// int currentLeftIntensity = 0;
-// int currentRightIntensity = 0;
+// Store current haptic motor intensities (0-255)
+int currentLeftIntensity = 0;
+int currentRightIntensity = 0;
 
 // Store detected MPU address
 byte detectedMPUAddress = MPU6050_ADDR;
  
 void setup() {
-  // VIBRATION MOTOR INITIALIZATION (COMMENTED OUT - vibration motors disabled)
-  // CRITICAL: Initialize vibration motor pins FIRST to prevent unwanted vibration on boot
+  // CRITICAL: Initialize haptic motor pins FIRST to prevent unwanted vibration on boot
   // Set as outputs immediately (before any delays that might allow motors to run)
-  // pinMode(L_DIR, OUTPUT);
-  // pinMode(R_DIR, OUTPUT);
+  pinMode(HAPTIC_IN1, OUTPUT);
+  pinMode(HAPTIC_IN2, OUTPUT);
+  pinMode(HAPTIC_IN3, OUTPUT);
+  pinMode(HAPTIC_IN4, OUTPUT);
   
-  // Set direction pins to safe state
-  // digitalWrite(L_DIR, LOW);
-  // digitalWrite(R_DIR, LOW);
+  // Set all pins to LOW (motors stopped) - do this before any delays
+  digitalWrite(HAPTIC_IN1, LOW);
+  digitalWrite(HAPTIC_IN2, LOW);
+  digitalWrite(HAPTIC_IN3, LOW);
+  digitalWrite(HAPTIC_IN4, LOW);
   
-  // Initialize PWM channels explicitly for vibration motors using LEDC
-  // This prevents conflicts with ESP32Servo library which also uses LEDC channels
-  // ledcAttach(L_PWM, PWM_FREQ, PWM_RESOLUTION);
-  // ledcAttach(R_PWM, PWM_FREQ, PWM_RESOLUTION);
+  // Initialize PWM channels for haptic motors using LEDC
+  // IN1 and IN3 use PWM for speed control
+  // IN2 and IN4 are used as digital outputs (direction control)
+  ledcAttach(HAPTIC_IN1, PWM_FREQ, PWM_RESOLUTION);  // Left motor PWM
+  ledcAttach(HAPTIC_IN3, PWM_FREQ, PWM_RESOLUTION);  // Right motor PWM
+  // IN2 and IN4 are digital outputs, no PWM needed
   
-  // Immediately set to safe state (0 PWM) - do this before any delays
-  // ledcWrite(L_PWM, 0);
-  // ledcWrite(R_PWM, 0);
+  // Immediately set to safe state (0 PWM, all LOW) - do this before any delays
+  ledcWrite(HAPTIC_IN1, 0);
+  ledcWrite(HAPTIC_IN3, 0);
+  digitalWrite(HAPTIC_IN2, LOW);
+  digitalWrite(HAPTIC_IN4, LOW);
   
   // Initialize serial communication
   Serial.begin(115200);
@@ -266,13 +275,9 @@ void setup() {
   
   Serial.println("✓ Servos initialized and set to center position");
   
-  // VIBRATION MOTOR STATE RE-ASSERTION (COMMENTED OUT - vibration motors disabled)
-  // CRITICAL: Re-assert vibration motor state after servo initialization
+  // CRITICAL: Re-assert haptic motor state after servo initialization
   // ESP32Servo may reconfigure LEDC channels, so we need to ensure motors stay off
-  // ledcWrite(L_PWM, 0);
-  // ledcWrite(R_PWM, 0);
-  // digitalWrite(L_DIR, LOW);
-  // digitalWrite(R_DIR, LOW);
+  setHapticMotors(0, 0);
   
   delay(500);
 }
@@ -300,10 +305,10 @@ void setup() {
    else if (cmd.startsWith("MOVE,")) {
      handleMoveCommand(cmd);
    }
-  // VIBRATE command (COMMENTED OUT - vibration motors disabled)
-  // else if (cmd.startsWith("VIBRATE,")) {
-  //   handleVibrateCommand(cmd);
-  // }
+  // VIBRATE command: VIBRATE,L,R
+  else if (cmd.startsWith("VIBRATE,")) {
+    handleVibrateCommand(cmd);
+  }
    else {
      Serial.println("ERROR");
    }
@@ -405,48 +410,62 @@ void readMPU6050() {
    servoBottom.write(bottomAngle);
    servoTop.write(topAngle);
    
-   // VIBRATION MOTOR STATE RE-ASSERTION (COMMENTED OUT - vibration motors disabled)
-   // CRITICAL: Re-assert vibration motor state after servo write
+   // CRITICAL: Re-assert haptic motor state after servo write
    // ESP32Servo.write() may reconfigure LEDC channels, causing motors to activate
-   // Reapply the current vibration state to ensure motors stay at intended level
-   // ledcWrite(L_PWM, currentLeftIntensity);
-   // ledcWrite(R_PWM, currentRightIntensity);
+   // Reapply the current haptic state to ensure motors stay at intended level
+   setHapticMotors(currentLeftIntensity, currentRightIntensity);
    
    Serial.println("OK");
  }
  
- // VIBRATION COMMAND HANDLER (COMMENTED OUT - vibration motors disabled)
- // void handleVibrateCommand(String cmd) {
- //   // Parse: VIBRATE,L,R
- //   int firstComma = cmd.indexOf(',');
- //   int secondComma = cmd.indexOf(',', firstComma + 1);
- //   
- //   if (firstComma == -1 || secondComma == -1) {
- //     Serial.println("ERROR");
- //     return;
- //   }
- //   
- //   int leftIntensity = cmd.substring(firstComma + 1, secondComma).toInt();
- //   int rightIntensity = cmd.substring(secondComma + 1).toInt();
- //   
- //   // Clamp to 0-255
- //   leftIntensity = constrain(leftIntensity, 0, 255);
- //   rightIntensity = constrain(rightIntensity, 0, 255);
- //   
- //   // Store intensity values for reapplication after servo operations
- //   currentLeftIntensity = leftIntensity;
- //   currentRightIntensity = rightIntensity;
- //   
- //   // Set vibration motors using LEDC (not analogWrite to avoid conflicts)
- //   ledcWrite(L_PWM, leftIntensity);
- //   ledcWrite(R_PWM, rightIntensity);
- //   
- //   // Set direction (LOW = one direction, HIGH = reverse)
- //   // Adjust based on your motor driver requirements
- //   digitalWrite(L_DIR, leftIntensity > 0 ? LOW : LOW);
- //   digitalWrite(R_DIR, rightIntensity > 0 ? LOW : LOW);
- //   
- //   Serial.println("OK");
- // }
+// Helper function to set haptic motors using H-bridge control
+void setHapticMotors(int leftIntensity, int rightIntensity) {
+  // Clamp intensities to 0-255
+  leftIntensity = constrain(leftIntensity, 0, 255);
+  rightIntensity = constrain(rightIntensity, 0, 255);
+  
+  // Store current intensities
+  currentLeftIntensity = leftIntensity;
+  currentRightIntensity = rightIntensity;
+  
+  // Left motor (IN1/IN2): Use PWM for speed control
+  // IN1 = PWM control, IN2 = digital direction (LOW for forward)
+  if (leftIntensity > 0) {
+    ledcWrite(HAPTIC_IN1, leftIntensity);  // Forward PWM (0-255)
+    digitalWrite(HAPTIC_IN2, LOW);          // Reverse off (LOW = forward direction)
+  } else {
+    ledcWrite(HAPTIC_IN1, 0);                // Forward off (PWM = 0)
+    digitalWrite(HAPTIC_IN2, LOW);          // Keep LOW when stopped
+  }
+  
+  // Right motor (IN3/IN4): Use PWM for speed control
+  // IN3 = PWM control, IN4 = digital direction (LOW for forward)
+  if (rightIntensity > 0) {
+    ledcWrite(HAPTIC_IN3, rightIntensity);  // Forward PWM (0-255)
+    digitalWrite(HAPTIC_IN4, LOW);          // Reverse off (LOW = forward direction)
+  } else {
+    ledcWrite(HAPTIC_IN3, 0);                // Forward off (PWM = 0)
+    digitalWrite(HAPTIC_IN4, LOW);          // Keep LOW when stopped
+  }
+}
+
+void handleVibrateCommand(String cmd) {
+  // Parse: VIBRATE,L,R
+  int firstComma = cmd.indexOf(',');
+  int secondComma = cmd.indexOf(',', firstComma + 1);
+  
+  if (firstComma == -1 || secondComma == -1) {
+    Serial.println("ERROR");
+    return;
+  }
+  
+  int leftIntensity = cmd.substring(firstComma + 1, secondComma).toInt();
+  int rightIntensity = cmd.substring(secondComma + 1).toInt();
+  
+  // Set haptic motors
+  setHapticMotors(leftIntensity, rightIntensity);
+  
+  Serial.println("OK");
+}
  
  
