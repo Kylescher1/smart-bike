@@ -3,6 +3,11 @@ numpy==1.26.4
 opencv-contrib-python==4.8.1.78
 scipy
 matplotlib  # For plotting and visualization (used by SpinningLidar)
+# Optional: For debug plotting (requires Qt backend)
+# pyqtgraph  # For real-time plotting (used by SpinningLidar.start_debug_plot())
+# PyQt5 or PySide2  # Qt backend required by pyqtgraph
+# Install system package: sudo apt install python3-pyqt5
+# Or install via pip: pip install pyqtgraph PyQt5 (requires Qt dev libraries)
 dill  # For serializing configuration and functions
 numpy-quaternion  # For quaternion math (used in sensor configuration) - install via: pip install numpy-quaternion
 

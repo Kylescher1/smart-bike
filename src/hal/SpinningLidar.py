@@ -13,8 +13,15 @@ import quaternion
 import numpy as np
 import time
 import serial  # optional, for real lidar connection
-import pyqtgraph as pg
-from pyqtgraph.Qt import QtGui, QtCore
+try:
+    import pyqtgraph as pg
+    from pyqtgraph.Qt import QtGui, QtCore
+    PYQTPGRAPH_AVAILABLE = True
+except ImportError:
+    PYQTPGRAPH_AVAILABLE = False
+    pg = None
+    QtGui = None
+    QtCore = None
 import numpy as np
 import importlib
 import sys
@@ -117,6 +124,11 @@ class SpinningLidar:
         Opens a PyQtGraph window and live-plots LIDAR points from self.debug_buffer.
         Assumes each entry: {"a_deg": float, "d_mm": float, "q": int}
         """
+        if not PYQTPGRAPH_AVAILABLE:
+            raise ImportError(
+                "pyqtgraph and Qt backend (PyQt5/PyQt6/PySide2/PySide6) are required for debug plotting. "
+                "Install with: pip install pyqtgraph PyQt5 (or use system package: apt install python3-pyqt5)"
+            )
 
         # ---- Qt App ----
         self._app = QtGui.QApplication.instance() or QtGui.QApplication([])
@@ -522,7 +534,7 @@ def multi_sensor_live_plot(sensors, process_funcs=None, update_delay=0.05):
 
 
 if __name__ == "__main__":
-    kwargs = {"port": "COM6",
+    kwargs = {"port": "/dev/ttyUSB1",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
             # "orientation": np.quaternion(0.7071, 0, 0, -0.7071),#w,x,y,z
@@ -531,7 +543,7 @@ if __name__ == "__main__":
             "data_out_label":"point_cloud",
             "who_to_run": "src.hal.SpinningLidar.SpinningLidar",}
     Lidar = SpinningLidar(name= "horizontal_lidar",**kwargs)
-    kwargs2 = {"port": "COM13",
+    kwargs2 = {"port": "/dev/ttyUSB1",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
             "orientation": np.quaternion(np.cos(np.pi/2), 0, 0, np.sin(np.pi/2))*np.quaternion(np.cos(np.pi/2),  np.sin(np.pi/2), 0, 0),#w,x,y,z
@@ -540,9 +552,9 @@ if __name__ == "__main__":
             "who_to_run": "src.hal.SpinningLidar.SpinningLidar",}
     Lidar2 = SpinningLidar(name="ground_lidar", **kwargs2)
     Lidar.start()
-    Lidar2.start()
+    # Lidar2.start()
     try:
-        sensors = [Lidar, Lidar2]
+        sensors = [Lidar]
 
 
         # Optional: define a processing function per sensor

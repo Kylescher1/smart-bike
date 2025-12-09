@@ -27,7 +27,7 @@ print("Writing config file as")
 config = {
     "horizontal_lidar":
         {
-            "port": "COM13",
+            "port": "/dev/ttyUSB1",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
             # "orientation": np.quaternion(0.7071, 0, 0, -0.7071),#w,x,y,z
@@ -38,7 +38,7 @@ config = {
          },
     "ground_lidar":
         {
-            "port": "COM6",
+            "port": "/dev/ttyUSB0",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
             "orientation": np.quaternion(np.cos(np.pi/2), 0, 0, np.sin(np.pi/2))*np.quaternion(np.cos(np.pi/2),  np.sin(np.pi/2), 0, 0),#w,x,y,z
@@ -69,7 +69,7 @@ config = {
          },
     "esp32":
         {
-            "port": "COM5",
+            "port": "/dev/ttyUSB1",
             "baudrate": 115200,
             "BUFFER_SIZE": 200,
             "orientation": np.quaternion(1, 0, 0, 0),#w,x,y,z
@@ -90,8 +90,9 @@ config = {
             "port": None,
             "orientation": None,
             "sensor_location":None,
-            "who_to_run": "src.hal.BrakeRoutines.BrakeESC",
+            "who_to_run": "src.hal.BrakeRoutines.BrakeRoutines",
             "debug_mode":False,
+            "abs_enabled":True,
             "chip_num": 4,
             "line_num": 11,
         },
@@ -214,9 +215,8 @@ config = {
 }
 config = {
     'horizontal_lidar':config['horizontal_lidar'],
-    'ground_lidar':config['ground_lidar'],
-    'esp32':config['esp32'],
-    'BrakeESP':config['BrakeESP'],
+    # 'esp32':config['esp32'],
+    # 'Brakes':config['Brakes'],
           }
 
 #Check you have all reqired fields

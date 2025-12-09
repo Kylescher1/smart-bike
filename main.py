@@ -101,8 +101,10 @@ def simple_obsticle_response(obsticle_arr,Peripherals):
     #do we activate breaks?
     brake_mindist = 1# (m)
     if dist < brake_mindist:
+        print(f" I am seeing {dist} meters away, activating brakes")
         if 'Brakes' in Peripherals:
-            Peripherals['Brakes'].dontdie()
+            #Peripherals['Brakes'].dontdie()
+            print("Brakes are not enabled ")
         else:
             print("No esp/brake device detected!")
 
@@ -239,6 +241,8 @@ def main():
 
             if display:
                 Sonar.update_plot(new_data)
+            else:
+                time.sleep(0.05)
                 # plot_sonar("data")
             # print(f"{data.keys()} → {data}")
     except KeyboardInterrupt: #Closed file

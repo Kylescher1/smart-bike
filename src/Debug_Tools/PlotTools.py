@@ -13,8 +13,15 @@ import quaternion
 import numpy as np
 import time
 import serial  # optional, for real lidar connection
-import pyqtgraph as pg
-from pyqtgraph.Qt import QtGui, QtCore
+try:
+    import pyqtgraph as pg
+    from pyqtgraph.Qt import QtGui, QtCore
+    PYQTPGRAPH_AVAILABLE = True
+except ImportError:
+    PYQTPGRAPH_AVAILABLE = False
+    pg = None
+    QtGui = None
+    QtCore = None
 import numpy as np
 
 

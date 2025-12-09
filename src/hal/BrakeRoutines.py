@@ -6,6 +6,7 @@ Provides start and dont_die methods for brake control.
 
 import time
 import sys
+import threading
 from pathlib import Path
 
 # Add src folder to path
@@ -20,9 +21,6 @@ class BrakeRoutines:
     """
     def __init__(self,brake: BrakeESC,name = "Dawg the Brake Routines", **kwargs):
 
-        for k,v in kwargs.items():#unpack config into self
-            setattr(self, k, v)
-
         """
         Initialize with a BrakeESC instance.
         
@@ -33,13 +31,16 @@ class BrakeRoutines:
         
         # Check if ABS is enabled (if abs is in kwargs and is True or not None)
         # ABS is enabled if 'abs' is in kwargs and its value is True, or if set to any non-None value
-        abs_value = kwargs.get('abs', None)
-        self.abs_enabled = abs_value is True  # Only True if explicitly set to True
+        self.abs_enabled = True  # Only True if explicitly set to True
+
         
+        for k,v in kwargs.items():#unpack config into self
+            setattr(self, k, v)
+
         if self.abs_enabled:
             print(f"BrakeRoutines: ABS braking enabled")
     
-    def start(self):
+    def _start_routine(self):
         """
         Start routine:
         - brake.set(1300)
@@ -90,11 +91,20 @@ class BrakeRoutines:
 
 
         self.brake.disable()
+        print("BrakeRoutines: Start routine complete!")
 
-        
+    def start(self):
+        """
+        Start routine in a separate thread.
+        """
+        print("BrakeRoutines: Creating thread for start routine...")
+        start_thread = threading.Thread(target=self._start_routine, name="start_thread")
+        start_thread.start()
+        start_thread.join()
+        print("BrakeRoutines: Start thread completed")
 
     
-    def dont_die(self):
+    def _dont_die_routine(self):
         print(f"BrakeRoutines: dont_die called, abs_enabled = {self.abs_enabled}")
 
         if self.abs_enabled:
@@ -187,6 +197,16 @@ class BrakeRoutines:
 
         
         print("BrakeRoutines: Dont_die routine complete!")
+
+    def dont_die(self):
+        """
+        Dont_die routine in a separate thread.
+        """
+        print("BrakeRoutines: Creating thread for dont_die routine...")
+        dont_die_thread = threading.Thread(target=self._dont_die_routine, name="dont_die_thread")
+        dont_die_thread.start()
+        dont_die_thread.join()
+        print("BrakeRoutines: Dont_die thread completed")
 
 
 if __name__ == "__main__":
