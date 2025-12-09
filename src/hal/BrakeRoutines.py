@@ -149,34 +149,34 @@ class BrakeRoutines:
             
             while time.time() - start_time < abs_duration:
                 if self._stop_requested.is_set():
-                    print("BrakeRoutines: ABS routine stopped early")
+                   
                     break
                     
                 cycle_count += 1
                 # Apply brake
-                print(f"BrakeRoutines: ABS cycle {cycle_count} - Applying brake")
+               
                 self.brake.set_pulse_width(1200, check_stall=False)
                 time.sleep(abs_apply_time)
                 
                 # Release brake briefly
-                print(f"BrakeRoutines: ABS cycle {cycle_count} - Releasing brake")
+               
                 self.brake.set_pulse_width(1500, check_stall=False)
                 time.sleep(abs_release_time)
             
-            print(f"BrakeRoutines: ABS braking complete ({cycle_count} cycles)")
+            
         else:
-            print("BrakeRoutines: Using standard (non-ABS) braking mode")
+
             self.brake.disable()
             self.brake.enable()
             self.brake.set_pulse_width(1500, check_stall=False)
             time.sleep(0.1)
 
             # brake.set(1200)
-            print("BrakeRoutines: Setting brake to 1200 us")
+       
             self.brake.set_pulse_width(1200, check_stall=False)
             
             # sleep(2)
-            print("BrakeRoutines: Brake Applied for 2.5 seconds")
+            
             time.sleep(2.5)
         
 
@@ -185,19 +185,19 @@ class BrakeRoutines:
             time.sleep(0.5)
 
             # brake.disable
-            print("BrakeRoutines: Disabling brake")
+            
             self.brake.disable()
             
             # brake.enable
-            print("BrakeRoutines: Enabling brake")
+            
             self.brake.enable()
             
             # release
-            print("BrakeRoutines: Setting brake to 1600 us")
+            
             self.brake.set_pulse_width(1600, check_stall=False)
             
             # sleep(0.1)
-            print("BrakeRoutines: Sleeping for 0.1 seconds")
+            
             time.sleep(0.1)
 
             # stopping brake
@@ -205,22 +205,20 @@ class BrakeRoutines:
             time.sleep(0.5)
             
             # disable
-            print("BrakeRoutines: Disabling brake")
+            
             self.brake.disable()
             
-            print("BrakeRoutines: Sleeping for 2 seconds")
             time.sleep(1.5)
         
 
 
             # brake.disable
-            print("BrakeRoutines: Disabling brake")
             self.brake.disable()
             
 
         
         # disable
-        print("BrakeRoutines: Disabling brake")
+        
         self.brake.disable()
         
 

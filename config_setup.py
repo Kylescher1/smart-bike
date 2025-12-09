@@ -27,7 +27,7 @@ print("Writing config file as")
 config = {
     "horizontal_lidar":
         {
-            "port": "/dev/ttyUSB0",
+            "port": "/dev/ttyUSB1",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
             # "orientation": np.quaternion(0.7071, 0, 0, -0.7071),#w,x,y,z

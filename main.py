@@ -313,6 +313,7 @@ def main():
             #process raw sensor data into labeled groups
             obsticle_start = time.time()
             obsticle_arr = simple_point2obsticle(new_data)
+            # print(f"Obsticle array: {obsticle_arr}")
             obsticle_time = (time.time() - obsticle_start) * 1000
             timing_stats['obstacle_detection'].append(obsticle_time)
 
