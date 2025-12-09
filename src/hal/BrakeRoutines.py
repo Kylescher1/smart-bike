@@ -19,23 +19,38 @@ class BrakeRoutines:
     """
     Brake control routines for start and dont_die operations.
     """
-    def __init__(self,brake: BrakeESC,name = "Dawg the Brake Routines", **kwargs):
-
+    def __init__(self, name="Dawg the Brake Routines", brake=None, **kwargs):
         """
         Initialize with a BrakeESC instance.
         
         Args:
-            brake: BrakeESC instance to control
+            name: Name for this BrakeRoutines instance
+            brake: Optional BrakeESC instance. If not provided, one will be created from kwargs.
+            **kwargs: Configuration parameters. Brake-specific params will be passed to BrakeESC.
+                     Routine-specific params (like abs_enabled) will be used by BrakeRoutines.
         """
-        self.brake = brake
+        # Track running threads for stop() method
+        self._start_thread = None
+        self._dont_die_thread = None
+        self._stop_requested = threading.Event()
         
         # Check if ABS is enabled (if abs is in kwargs and is True or not None)
         # ABS is enabled if 'abs' is in kwargs and its value is True, or if set to any non-None value
-        self.abs_enabled = True  # Only True if explicitly set to True
-
+        self.abs_enabled = kwargs.pop('abs_enabled', True)
         
-        for k,v in kwargs.items():#unpack config into self
-            setattr(self, k, v)
+        # If brake instance provided, use it; otherwise create one from kwargs
+        if brake is not None:
+            self.brake = brake
+        else:
+            # Filter out routine-specific kwargs before creating BrakeESC
+            brake_kwargs = {k: v for k, v in kwargs.items() 
+                          if k not in ['abs_enabled']}
+            self.brake = BrakeESC(name=f"{name}_BrakeESC", **brake_kwargs)
+        
+        # Unpack remaining config into self
+        for k, v in kwargs.items():
+            if k != 'abs_enabled':  # Already handled
+                setattr(self, k, v)
 
         if self.abs_enabled:
             print(f"BrakeRoutines: ABS braking enabled")
@@ -53,6 +68,10 @@ class BrakeRoutines:
         - enable
         """
         print("BrakeRoutines: Starting start routine...")
+        
+        if self._stop_requested.is_set():
+            print("BrakeRoutines: Start routine cancelled")
+            return
 
 
         #disable and enable brake
@@ -98,14 +117,20 @@ class BrakeRoutines:
         Start routine in a separate thread.
         """
         print("BrakeRoutines: Creating thread for start routine...")
-        start_thread = threading.Thread(target=self._start_routine, name="start_thread")
-        start_thread.start()
-        start_thread.join()
+        self._stop_requested.clear()
+        self._start_thread = threading.Thread(target=self._start_routine, name="start_thread")
+        self._start_thread.start()
+        self._start_thread.join()
+        self._start_thread = None
         print("BrakeRoutines: Start thread completed")
 
     
     def _dont_die_routine(self):
         print(f"BrakeRoutines: dont_die called, abs_enabled = {self.abs_enabled}")
+        
+        if self._stop_requested.is_set():
+            print("BrakeRoutines: Dont_die routine cancelled")
+            return
 
         if self.abs_enabled:
             self.brake.disable()
@@ -123,6 +148,10 @@ class BrakeRoutines:
             cycle_count = 0
             
             while time.time() - start_time < abs_duration:
+                if self._stop_requested.is_set():
+                    print("BrakeRoutines: ABS routine stopped early")
+                    break
+                    
                 cycle_count += 1
                 # Apply brake
                 print(f"BrakeRoutines: ABS cycle {cycle_count} - Applying brake")
@@ -203,10 +232,42 @@ class BrakeRoutines:
         Dont_die routine in a separate thread.
         """
         print("BrakeRoutines: Creating thread for dont_die routine...")
-        dont_die_thread = threading.Thread(target=self._dont_die_routine, name="dont_die_thread")
-        dont_die_thread.start()
-        dont_die_thread.join()
+        self._stop_requested.clear()
+        self._dont_die_thread = threading.Thread(target=self._dont_die_routine, name="dont_die_thread")
+        self._dont_die_thread.start()
+        self._dont_die_thread.join()
+        self._dont_die_thread = None
         print("BrakeRoutines: Dont_die thread completed")
+    
+    def stop(self):
+        """
+        Stop any running brake routines and disable the brake.
+        """
+        print("BrakeRoutines: Stop requested")
+        self._stop_requested.set()
+        
+        # Stop the brake
+        if self.brake is not None:
+            try:
+                self.brake.set_pulse_width(1500, check_stall=False)  # Return to neutral
+                time.sleep(0.1)
+                self.brake.disable()
+                print("BrakeRoutines: Brake stopped and disabled")
+            except Exception as e:
+                print(f"BrakeRoutines: Error stopping brake: {e}")
+        
+        # Wait for threads to finish (with timeout)
+        if self._start_thread is not None and self._start_thread.is_alive():
+            self._start_thread.join(timeout=1.0)
+            if self._start_thread.is_alive():
+                print("BrakeRoutines: Warning: start_thread did not stop in time")
+        
+        if self._dont_die_thread is not None and self._dont_die_thread.is_alive():
+            self._dont_die_thread.join(timeout=1.0)
+            if self._dont_die_thread.is_alive():
+                print("BrakeRoutines: Warning: dont_die_thread did not stop in time")
+        
+        print("BrakeRoutines: Stop complete")
 
 
 if __name__ == "__main__":
@@ -236,8 +297,8 @@ if __name__ == "__main__":
     # Create routines instance with ABS option
     routines_kwargs = {}
     if args.abs:
-        routines_kwargs["abs"] = True
-    routines = BrakeRoutines(brake, **routines_kwargs)
+        routines_kwargs["abs_enabled"] = True
+    routines = BrakeRoutines(name="BrakeRoutine", brake=brake, **routines_kwargs)
     
     # Execute requested routine
     try:

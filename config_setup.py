@@ -27,7 +27,7 @@ print("Writing config file as")
 config = {
     "horizontal_lidar":
         {
-            "port": "/dev/ttyUSB1",
+            "port": "/dev/ttyUSB0",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
             # "orientation": np.quaternion(0.7071, 0, 0, -0.7071),#w,x,y,z
@@ -216,7 +216,7 @@ config = {
 config = {
     'horizontal_lidar':config['horizontal_lidar'],
     # 'esp32':config['esp32'],
-    # 'Brakes':config['Brakes'],
+    'Brakes':config['Brakes'],
           }
 
 #Check you have all reqired fields
