@@ -149,7 +149,7 @@ def simple_obsticle_response(obsticle_arr,Peripherals,brake_state):
     # do we play sound?
 
     #do we activate breaks?
-    brake_mindist = 2# (m)
+    brake_mindist = 0.75# (m)
     if dist < brake_mindist:
         # Only engage brakes if not already engaged or running
         if 'Brakes' in Peripherals:
