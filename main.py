@@ -5,6 +5,7 @@ from pathlib import Path
 import time
 import quaternion
 import numpy as np
+import threading
 
 
 
@@ -150,11 +151,22 @@ def simple_obsticle_response(obsticle_arr,Peripherals,brake_state):
     #do we activate breaks?
     brake_mindist = 2# (m)
     if dist < brake_mindist:
-        # Only engage brakes if not already engaged
-        if 'Brakes' in Peripherals and not brake_state.get('engaged', False):
-            print(f"DANGER! Obstacle at {dist:.2f}m - ENGAGING BRAKES")
-            Peripherals['Brakes'].dont_die()
-            brake_state['engaged'] = True
+        # Only engage brakes if not already engaged or running
+        if 'Brakes' in Peripherals:
+            # Check if brake thread is not running
+            brake_thread_running = (hasattr(Peripherals['Brakes'], '_dont_die_thread') and 
+                                   Peripherals['Brakes']._dont_die_thread is not None and 
+                                   Peripherals['Brakes']._dont_die_thread.is_alive())
+            
+            if not brake_state.get('engaged', False) and not brake_thread_running:
+                print(f"DANGER! Obstacle at {dist:.2f}m - ENGAGING BRAKES")
+                # Start dont_die in a non-blocking thread
+                def start_brakes():
+                    Peripherals['Brakes'].dont_die()
+                    brake_state['engaged'] = False  # Reset when routine completes
+                brake_thread = threading.Thread(target=start_brakes, daemon=True)
+                brake_thread.start()
+                brake_state['engaged'] = True
         elif 'Brakes' not in Peripherals:
             print("No brake device detected!")
     else:
