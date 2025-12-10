@@ -220,6 +220,7 @@ class BrakeRoutines:
         # disable
         
         self.brake.disable()
+        self.brake.enable()
         
 
         
