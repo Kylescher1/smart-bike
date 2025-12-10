@@ -29,6 +29,13 @@
 #define HAPTIC_IN3 27  // Right motor forward
 #define HAPTIC_IN4 14  // Right motor reverse
 
+// L298N Enable pins (if not jumpered to 5V)
+// ENA enables channels 1/2, ENB enables channels 3/4
+// If your L298N has enable pins connected, uncomment and set these:
+// #define HAPTIC_ENA 0   // Enable pin for channels 1/2 (set to 0 if jumpered)
+// #define HAPTIC_ENB 0   // Enable pin for channels 3/4 (set to 0 if jumpered)
+// If enable pins are jumpered to 5V on the board, leave as 0 (not used)
+
 // LEDC PWM configuration for haptic motors
 #define PWM_FREQ 20000    // 20kHz PWM frequency (above human hearing, smooth vibration)
 #define PWM_RESOLUTION 8  // 8-bit resolution (0-255)
@@ -78,6 +85,16 @@ void setup() {
   pinMode(HAPTIC_IN2, OUTPUT);
   pinMode(HAPTIC_IN3, OUTPUT);
   pinMode(HAPTIC_IN4, OUTPUT);
+  
+  // Initialize enable pins if defined (L298N ENA/ENB)
+  #if defined(HAPTIC_ENA) && HAPTIC_ENA > 0
+    pinMode(HAPTIC_ENA, OUTPUT);
+    digitalWrite(HAPTIC_ENA, HIGH);  // Enable channels 1/2
+  #endif
+  #if defined(HAPTIC_ENB) && HAPTIC_ENB > 0
+    pinMode(HAPTIC_ENB, OUTPUT);
+    digitalWrite(HAPTIC_ENB, HIGH);  // Enable channels 3/4
+  #endif
   
   // Set all pins to LOW (motors stopped) - do this before any delays
   digitalWrite(HAPTIC_IN1, LOW);
@@ -258,8 +275,9 @@ void setup() {
   Serial.print(", Bottom=GPIO");
   Serial.println(SERVO_BOTTOM_PIN);
   
-  servoTop.attach(SERVO_TOP_PIN);
-  servoBottom.attach(SERVO_BOTTOM_PIN);
+  servoTop.attach(SERVO_TOP_PIN, 500, 2500);
+  servoBottom.attach(SERVO_BOTTOM_PIN, 500, 2500);
+
   
   Serial.println("Servos attached successfully");
   
@@ -309,9 +327,13 @@ void setup() {
   else if (cmd.startsWith("VIBRATE,")) {
     handleVibrateCommand(cmd);
   }
-   else {
-     Serial.println("ERROR");
-   }
+  // TEST command: TESTPIN,pin,value - Test individual pin (for diagnostics)
+  else if (cmd.startsWith("TESTPIN,")) {
+    handleTestPinCommand(cmd);
+  }
+  else {
+    Serial.println("ERROR");
+  }
  }
  
 void readMPU6050() {
@@ -466,6 +488,47 @@ void handleVibrateCommand(String cmd) {
   setHapticMotors(leftIntensity, rightIntensity);
   
   Serial.println("OK");
+}
+
+void handleTestPinCommand(String cmd) {
+  // Parse: TESTPIN,pin,value
+  // Example: TESTPIN,27,255 (set pin 27 to PWM 255)
+  // Example: TESTPIN,14,0 (set pin 14 to LOW)
+  int firstComma = cmd.indexOf(',');
+  int secondComma = cmd.indexOf(',', firstComma + 1);
+  
+  if (firstComma == -1 || secondComma == -1) {
+    Serial.println("ERROR");
+    return;
+  }
+  
+  int pin = cmd.substring(firstComma + 1, secondComma).toInt();
+  int value = cmd.substring(secondComma + 1).toInt();
+  
+  // Validate pin is one of our haptic pins
+  if (pin != HAPTIC_IN1 && pin != HAPTIC_IN2 && pin != HAPTIC_IN3 && pin != HAPTIC_IN4) {
+    Serial.println("ERROR: Invalid pin");
+    return;
+  }
+  
+  // Set pin value
+  if (pin == HAPTIC_IN1 || pin == HAPTIC_IN3) {
+    // PWM pins
+    value = constrain(value, 0, 255);
+    ledcWrite(pin, value);
+    Serial.print("OK: Pin ");
+    Serial.print(pin);
+    Serial.print(" set to PWM ");
+    Serial.println(value);
+  } else {
+    // Digital pins
+    value = (value > 0) ? HIGH : LOW;
+    digitalWrite(pin, value);
+    Serial.print("OK: Pin ");
+    Serial.print(pin);
+    Serial.print(" set to ");
+    Serial.println(value == HIGH ? "HIGH" : "LOW");
+  }
 }
  
  
