@@ -140,9 +140,9 @@ class BrakeRoutines:
             # ABS braking: rapid pulsing to prevent wheel lockup
             print("BrakeRoutines: Using ABS braking mode")
             abs_duration = 3  # Total ABS braking duration
-            abs_cycle_time = 0.3  # Time for each pulse cycle (apply + release)
-            abs_apply_time = 0.075  # Time to apply brake in each cycle
-            abs_release_time = 0.15  # Time to release brake in each cycle
+            abs_cycle_time = 0.25  # Time for each pulse cycle (apply + release)
+            abs_apply_time = 0.2  # Time to apply brake in each cycle
+            abs_release_time = 0.05  # Time to release brake in each cycle
             
             start_time = time.time()
             cycle_count = 0

@@ -83,12 +83,25 @@ def simple_point2obsticle(data,k=10):
 
     return None  # if no point_cloud found
 
-def simple_obsticle_response(obsticle_arr,Peripherals):
+def simple_obsticle_response(obsticle_arr,Peripherals,brake_state):
+    """
+    brake_state: dict with 'engaged' key to track if brakes are currently engaged
+    """
     if obsticle_arr is None:
+        # No obstacles detected - release brakes if engaged
+        if 'Brakes' in Peripherals and brake_state.get('engaged', False):
+            print("No obstacles - releasing brakes")
+            Peripherals['Brakes'].stop()
+            brake_state['engaged'] = False
         return #escapes function if there is no obsticles
     
     # Check if array is empty or has no columns
     if obsticle_arr.size == 0 or obsticle_arr.shape[1] == 0:
+        # No obstacles after filtering - release brakes if engaged
+        if 'Brakes' in Peripherals and brake_state.get('engaged', False):
+            print("No obstacles in AOI - releasing brakes")
+            Peripherals['Brakes'].stop()
+            brake_state['engaged'] = False
         return #escapes function if there is no obsticles after filtering
 
     timings = {}
@@ -135,14 +148,21 @@ def simple_obsticle_response(obsticle_arr,Peripherals):
     # do we play sound?
 
     #do we activate breaks?
-    brake_mindist = 1# (m)
+    brake_mindist = 2# (m)
     if dist < brake_mindist:
-        print(f" I am seeing {dist} meters away, activating brakes")
-        if 'Brakes' in Peripherals:
+        # Only engage brakes if not already engaged
+        if 'Brakes' in Peripherals and not brake_state.get('engaged', False):
+            print(f"DANGER! Obstacle at {dist:.2f}m - ENGAGING BRAKES")
             Peripherals['Brakes'].dont_die()
-            # print("Brakes are not enabled ")
-        else:
-            print("No esp/brake device detected!")
+            brake_state['engaged'] = True
+        elif 'Brakes' not in Peripherals:
+            print("No brake device detected!")
+    else:
+        # Obstacle beyond brake distance - release brakes if they were engaged
+        if 'Brakes' in Peripherals and brake_state.get('engaged', False):
+            print(f"Obstacle at safe distance ({dist:.2f}m) - releasing brakes")
+            Peripherals['Brakes'].stop()
+            brake_state['engaged'] = False
 
 
 def Plot_Obsticles(obsticle_arr):
@@ -280,7 +300,7 @@ def main():
     print("===" * 20)
     try:
         #Runs once before main loop
-        display = False
+        display = True
         last_plot_data = None
         plot_skip_counter = 0
         
@@ -289,6 +309,7 @@ def main():
             print("[PLOT] Sonar display initialized")
         
         loop_count = 0
+        brake_state = {'engaged': False}  # Track brake engagement state
         timing_stats = {
             'read_sensors': [],
             'transform': [],
@@ -371,7 +392,7 @@ def main():
 
             #decide
             response_start = time.time()
-            simple_obsticle_response(obsticle_arr,Peripherals)
+            simple_obsticle_response(obsticle_arr,Peripherals,brake_state)
             response_time = (time.time() - response_start) * 1000
             timing_stats['response'].append(response_time)
 
