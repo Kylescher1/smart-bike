@@ -92,6 +92,7 @@ class TurretController:
         self.top_max = 120
         self.bottom_min = 0
         self.bottom_max = 180
+        # Limits will be updated from Arduino on connect
         
     def connect(self) -> bool:
         try:
@@ -193,7 +194,7 @@ class YOLOGimbal:
     def __init__(self, camera_index: int, turret_port: str, 
                  target_class: Optional[str] = None, conf_threshold: float = 0.5,
                  kp: float = 0.5, ki: float = 0.01, kd: float = 0.1,
-                 deadzone: float = 10.0,
+                 deadzone: float = 1.0,
                  invert_x: bool = False, invert_y: bool = False,
                  swap_servos: bool = False):
         self.camera_index = camera_index
@@ -258,6 +259,21 @@ class YOLOGimbal:
             raise RuntimeError(f"Failed to connect to turret on {self.turret_port}")
         print("Turret connected")
         
+        # Update status to get current positions and limits
+        self.turret.update_status()
+        
+        # Print current limits
+        print(f"\nServo Limits:")
+        print(f"  Top: {self.turret.top_min}° - {self.turret.top_max}°")
+        print(f"  Bottom: {self.turret.bottom_min}° - {self.turret.bottom_max}°")
+        print(f"  Current positions: Top={self.turret.top_pos}°, Bottom={self.turret.bottom_pos}°")
+        
+        # Check if bottom servo limits are too restrictive
+        if self.turret.bottom_max <= 90:
+            print(f"\nWARNING: Bottom servo max limit is {self.turret.bottom_max}° (should be 180°)")
+            print("  This will prevent tracking to the right side!")
+            print("  Fix by running: SET_BOTTOM_MAX:180 on Arduino or reset limits")
+        
         # Move to home position
         self.turret.send_command("HOME", read_response=False)
         time.sleep(1)
@@ -302,8 +318,11 @@ class YOLOGimbal:
     
     def calculate_error(self, target_x: float, target_y: float) -> Tuple[float, float]:
         """Calculate error from center"""
-        error_x = target_x - self.center_x  # Positive = target is right, need to move right
-        error_y = target_y - self.center_y  # Positive = target is down, need to move down
+        # Error: how far target is from center
+        # Positive error_x = target is RIGHT of center, need to move turret RIGHT (increase bottom servo)
+        # Positive error_y = target is BELOW center, need to move turret DOWN (increase top servo)
+        error_x = target_x - self.center_x
+        error_y = target_y - self.center_y
         
         # Normalize error (convert to servo movement units)
         # Scale by frame dimensions
@@ -373,6 +392,10 @@ class YOLOGimbal:
                         dt = max(0.01, min(dt, 0.1))  # Clamp dt
                         output_x, output_y = self.pid.update(error_x_norm, error_y_norm, dt)
                         
+                        # Debug: Print PID output if significant
+                        if abs(error_x_norm) > 0.05:
+                            print(f"DEBUG: error_x_norm={error_x_norm:.3f}, PID_output_x={output_x:.3f}, bottom_pos={self.turret.bottom_pos}")
+                        
                         # Convert PID output to servo movement
                         # Scale appropriately (adjust these multipliers as needed)
                         move_x = output_x * 2.0  # Horizontal movement sensitivity
@@ -384,6 +407,32 @@ class YOLOGimbal:
                         if self.invert_y:
                             move_y = -move_y
                         
+                        # Debug output for direction checking
+                        if abs(error_x_norm) > 0.1:  # Significant horizontal error
+                            direction = "RIGHT" if error_x_norm > 0 else "LEFT"
+                            move_dir = "RIGHT" if move_x > 0 else "LEFT"
+                            print(f"Target {direction} of center (error={error_x_norm:.3f}), moving turret {move_dir} (move_x={move_x:.2f}deg, bottom_pos={self.turret.bottom_pos}->{self.turret.bottom_pos + move_x:.1f})")
+                        
+                        # Check if movement would hit limits (before applying)
+                        new_bottom = self.turret.bottom_pos + move_x
+                        new_top = self.turret.top_pos + move_y
+                        at_limit_x = False
+                        at_limit_y = False
+                        
+                        if new_bottom <= self.turret.bottom_min:
+                            at_limit_x = True
+                            move_x = self.turret.bottom_min - self.turret.bottom_pos
+                        elif new_bottom >= self.turret.bottom_max:
+                            at_limit_x = True
+                            move_x = self.turret.bottom_max - self.turret.bottom_pos
+                        
+                        if new_top <= self.turret.top_min:
+                            at_limit_y = True
+                            move_y = self.turret.top_min - self.turret.top_pos
+                        elif new_top >= self.turret.top_max:
+                            at_limit_y = True
+                            move_y = self.turret.top_max - self.turret.top_pos
+                        
                         # Apply servo swap if needed
                         if self.swap_servos:
                             # Swap: move_x goes to top, move_y goes to bottom
@@ -393,10 +442,18 @@ class YOLOGimbal:
                             self.turret.move_relative(move_x, move_y)
                         
                         # Display info
+                        limit_text = ""
+                        if at_limit_x:
+                            limit_text += " [X LIMIT]"
+                        if at_limit_y:
+                            limit_text += " [Y LIMIT]"
+                        
                         cv2.putText(frame, f"Error: X={error_x_pixels:.1f}px Y={error_y_pixels:.1f}px", 
                                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                        cv2.putText(frame, f"Move: X={move_x:.2f}deg Y={move_y:.2f}deg", 
+                        cv2.putText(frame, f"Move: X={move_x:.2f}deg Y={move_y:.2f}deg{limit_text}", 
                                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                        cv2.putText(frame, f"Pos: Bottom={self.turret.bottom_pos}deg Top={self.turret.top_pos}deg", 
+                                   (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                     else:
                         cv2.putText(frame, "LOCKED", (10, 30), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
@@ -429,6 +486,14 @@ class YOLOGimbal:
                     self.turret.update_status()
                     self.pid.reset()
                     print("Moved to home")
+                elif key == ord('l'):
+                    # Reset limits to full range
+                    print("Resetting bottom servo limits to 0-180...")
+                    self.turret.send_command("SET_BOTTOM_MIN:0", read_response=False)
+                    self.turret.send_command("SET_BOTTOM_MAX:180", read_response=False)
+                    time.sleep(0.1)
+                    self.turret.update_status()
+                    print(f"Limits reset: Bottom now {self.turret.bottom_min}-{self.turret.bottom_max}°")
         
         except KeyboardInterrupt:
             print("\nInterrupted by user")
