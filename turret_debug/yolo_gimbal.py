@@ -193,12 +193,17 @@ class YOLOGimbal:
     def __init__(self, camera_index: int, turret_port: str, 
                  target_class: Optional[str] = None, conf_threshold: float = 0.5,
                  kp: float = 0.5, ki: float = 0.01, kd: float = 0.1,
-                 deadzone: float = 10.0):
+                 deadzone: float = 10.0,
+                 invert_x: bool = False, invert_y: bool = False,
+                 swap_servos: bool = False):
         self.camera_index = camera_index
         self.turret_port = turret_port
         self.target_class = target_class
         self.conf_threshold = conf_threshold
         self.deadzone = deadzone  # Pixels - don't move if error is smaller
+        self.invert_x = invert_x  # Invert horizontal movement
+        self.invert_y = invert_y  # Invert vertical movement
+        self.swap_servos = swap_servos  # Swap top and bottom servos
         
         # Initialize components
         self.camera = None
@@ -373,8 +378,19 @@ class YOLOGimbal:
                         move_x = output_x * 2.0  # Horizontal movement sensitivity
                         move_y = output_y * 2.0  # Vertical movement sensitivity
                         
-                        # Move turret
-                        self.turret.move_relative(move_x, move_y)
+                        # Apply direction inversions
+                        if self.invert_x:
+                            move_x = -move_x
+                        if self.invert_y:
+                            move_y = -move_y
+                        
+                        # Apply servo swap if needed
+                        if self.swap_servos:
+                            # Swap: move_x goes to top, move_y goes to bottom
+                            self.turret.move_relative(move_y, move_x)
+                        else:
+                            # Normal: move_x goes to bottom (horizontal), move_y goes to top (vertical)
+                            self.turret.move_relative(move_x, move_y)
                         
                         # Display info
                         cv2.putText(frame, f"Error: X={error_x_pixels:.1f}px Y={error_y_pixels:.1f}px", 
@@ -461,6 +477,11 @@ Examples:
   python yolo_gimbal.py --camera 1 --turret /dev/ttyUSB0 --class 0
   python yolo_gimbal.py --camera 0 --turret COM3 --class "bottle" --kp 0.8 --ki 0.02
   
+  # Fix flipped directions:
+  python yolo_gimbal.py --camera 0 --turret COM3 --invert-x  # Flip horizontal
+  python yolo_gimbal.py --camera 0 --turret COM3 --invert-y  # Flip vertical
+  python yolo_gimbal.py --camera 0 --turret COM3 --swap-servos  # Swap top/bottom
+  
 Note: To find your camera index, run: python find_camera.py
         """
     )
@@ -480,6 +501,12 @@ Note: To find your camera index, run: python find_camera.py
                        help='PID derivative gain (default: 0.1)')
     parser.add_argument('--deadzone', type=float, default=10.0,
                        help='Deadzone in pixels (default: 10.0)')
+    parser.add_argument('--invert-x', action='store_true',
+                       help='Invert horizontal movement direction')
+    parser.add_argument('--invert-y', action='store_true',
+                       help='Invert vertical movement direction')
+    parser.add_argument('--swap-servos', action='store_true',
+                       help='Swap top and bottom servos (if they are wired backwards)')
     parser.add_argument('--list-ports', '-l', action='store_true',
                        help='List available serial ports')
     
@@ -503,7 +530,10 @@ Note: To find your camera index, run: python find_camera.py
             kp=args.kp,
             ki=args.ki,
             kd=args.kd,
-            deadzone=args.deadzone
+            deadzone=args.deadzone,
+            invert_x=args.invert_x,
+            invert_y=args.invert_y,
+            swap_servos=args.swap_servos
         )
         
         gimbal.initialize()
