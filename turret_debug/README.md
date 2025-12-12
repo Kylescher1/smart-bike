@@ -7,6 +7,8 @@ This folder contains debugging tools for the turret system, allowing safe servo 
 - `turret_debug.ino` - Arduino sketch for ESP32 that provides serial command interface
 - `turret_control.py` - Python script to control the turret via serial commands
 - `turret_game.py` - **🎮 VIDEO GAME STYLE** real-time keyboard control interface
+- `turret_gui.py` - **🖥️ GRAPHICAL UI** modern GUI interface (recommended!)
+- `yolo_gimbal.py` - **🎯 AUTOMATIC GIMBAL** YOLO-based object tracking with PID control
 - `requirements.txt` - Python dependencies
 - `README.md` - This file
 
@@ -55,7 +57,81 @@ HELP                   - Show help
 
 ### Python Script Usage
 
-#### 🎮 **GAME MODE** (Recommended - Most Fun!)
+#### 🖥️ **GUI MODE** (Recommended - Best Experience!)
+
+Modern graphical interface with buttons, visualizations, and real-time updates:
+
+```bash
+python turret_gui.py COM3
+# or on Linux:
+python turret_gui.py /dev/ttyUSB0
+```
+
+**Features:**
+- Visual turret representation
+- Real-time position displays with progress bars
+- Button controls + keyboard shortcuts
+- Motor speed sliders
+- Status log
+- Preset positions (1-9)
+- Automatic status updates
+
+**Keyboard Shortcuts:**
+- `W/S` or `↑/↓` - Move top servo
+- `A/D` or `←/→` - Move bottom servo
+- `Q/E` - Fine adjust top servo
+- `Z/X` - Fine adjust bottom servo
+- `SPACE` or `H` - Home position
+- `1-9` - Preset positions
+
+#### 🎯 **AUTOMATIC GIMBAL MODE** (YOLO Tracking)
+
+Automatic object tracking using YOLO detection with PID servo control:
+
+```bash
+python yolo_gimbal.py --camera 0 --turret COM3 --class person
+# or on Linux:
+python yolo_gimbal.py --camera 0 --turret /dev/ttyUSB0 --class person
+```
+
+**Features:**
+- Automatic object detection and tracking
+- PID control for smooth servo movement
+- Keeps detected object centered in frame
+- Visual feedback with bounding boxes and crosshair
+- Configurable PID gains and deadzone
+
+**Arguments:**
+- `--camera` / `-c` - Camera index (0, 1, 2, etc.)
+- `--turret` / `-t` - Turret serial port (COM3, /dev/ttyUSB0, etc.)
+- `--class` / `-cls` - Target class to track (e.g., "person", "0", "bottle")
+- `--conf` - Confidence threshold (default: 0.5)
+- `--kp` - PID proportional gain (default: 0.5)
+- `--ki` - PID integral gain (default: 0.01)
+- `--kd` - PID derivative gain (default: 0.1)
+- `--deadzone` - Deadzone in pixels (default: 10.0)
+
+**Controls:**
+- `q` - Quit
+- `r` - Reset PID controller
+- `h` - Move to home position
+
+**Examples:**
+```bash
+# Track person with default settings
+python yolo_gimbal.py --camera 0 --turret COM3 --class person
+
+# Track bottle with higher sensitivity
+python yolo_gimbal.py --camera 0 --turret COM3 --class bottle --kp 0.8 --ki 0.02
+
+# Track any object (no class filter)
+python yolo_gimbal.py --camera 0 --turret COM3
+
+# Track class ID 0 (person in COCO dataset)
+python yolo_gimbal.py --camera 0 --turret COM3 --class 0
+```
+
+#### 🎮 **GAME MODE** (Terminal-based)
 
 Real-time keyboard controls with visual feedback:
 
