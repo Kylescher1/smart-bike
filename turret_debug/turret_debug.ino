@@ -91,6 +91,8 @@ void setup() {
   bottomServo.write(servo_home);
   topPos = servo_home;
   bottomPos = servo_home;
+  topLastMove = millis();
+  bottomLastMove = millis();
   
   // Status LED
   digitalWrite(PIN_LED_1, HIGH);
@@ -128,6 +130,19 @@ void loop() {
       }
       inputBuffer[bufferIndex++] = c;
     }
+  }
+  
+  // Detach servos after idle time to reduce buzzing
+  unsigned long currentTime = millis();
+  
+  if (topAttached && (currentTime - topLastMove) > SERVO_IDLE_TIME) {
+    topServo.detach();
+    topAttached = false;
+  }
+  
+  if (bottomAttached && (currentTime - bottomLastMove) > SERVO_IDLE_TIME) {
+    bottomServo.detach();
+    bottomAttached = false;
   }
   
   // Small delay to prevent overwhelming the serial buffer
@@ -345,8 +360,16 @@ void setTopServo(int angle) {
   
   // Only update if position actually changed (prevents buzzing)
   if (angle != topPos) {
+    // Re-attach if detached
+    if (!topAttached) {
+      topServo.attach(PIN_SERVO_TOP, 500, 2500);
+      topAttached = true;
+      delay(50);  // Give servo time to initialize
+    }
+    
     topServo.write(angle);
     topPos = angle;
+    topLastMove = millis();  // Update last move time
     delay(50); // Give servo time to move
   }
 }
@@ -357,8 +380,16 @@ void setBottomServo(int angle) {
   
   // Only update if position actually changed (prevents buzzing)
   if (angle != bottomPos) {
+    // Re-attach if detached
+    if (!bottomAttached) {
+      bottomServo.attach(PIN_SERVO_BOTTOM, 500, 2500);
+      bottomAttached = true;
+      delay(50);  // Give servo time to initialize
+    }
+    
     bottomServo.write(angle);
     bottomPos = angle;
+    bottomLastMove = millis();  // Update last move time
     delay(50); // Give servo time to move
   }
 }
@@ -395,12 +426,26 @@ void testLimit(bool isTop, bool isMin) {
     }
     
     if (isTop) {
+      // Re-attach if needed
+      if (!topAttached) {
+        topServo.attach(PIN_SERVO_TOP, 500, 2500);
+        topAttached = true;
+        delay(50);
+      }
       topServo.write(pos);
       topPos = pos;
+      topLastMove = millis();
       Serial.print("TOP: ");
     } else {
+      // Re-attach if needed
+      if (!bottomAttached) {
+        bottomServo.attach(PIN_SERVO_BOTTOM, 500, 2500);
+        bottomAttached = true;
+        delay(50);
+      }
       bottomServo.write(pos);
       bottomPos = pos;
+      bottomLastMove = millis();
       Serial.print("BOTTOM: ");
     }
     Serial.println(pos);
