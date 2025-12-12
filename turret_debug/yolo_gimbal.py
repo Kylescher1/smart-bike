@@ -524,9 +524,9 @@ class YOLOGimbal:
     
     def __init__(self, camera_index: int, turret_port: str, 
                  target_class: Optional[str] = None, conf_threshold: float = 0.5,
-                 kp: float = 0.5, ki: float = 0.01, kd: float = 0.1,
-                 deadzone: float = 10.0, deadzone_degrees: float = 1.0,
-                 movement_scale: float = 30.0, min_step: float = 1.0,
+                 kp: float = 0.3, ki: float = 0.005, kd: float = 0.05,
+                 deadzone: float = 15.0, deadzone_degrees: float = 0.5,
+                 movement_scale: float = 15.0, min_step: float = 0.5,
                  control_rate: float = 30.0,
                  invert_x: bool = False, invert_y: bool = False,
                  swap_servos: bool = False, enable_3d_viz: bool = False):
@@ -549,7 +549,7 @@ class YOLOGimbal:
         self.camera = None
         self.yolo = None
         self.turret = TurretController(turret_port)
-        self.pid = PIDController(kp=kp, ki=ki, kd=kd, max_output=10.0)
+        self.pid = PIDController(kp=kp, ki=ki, kd=kd, max_output=5.0)  # Reduced from 10.0 for smoother movement
         self.visualizer = None
         
         # State
@@ -692,11 +692,12 @@ class YOLOGimbal:
         self.running = True
         print("\n=== YOLO Gimbal Tracking Started ===")
         print("Press 'q' to quit, 'r' to reset PID, 'h' to home, 'l' to reset limits")
-        print("Press 'c' to enter calibration mode")
+        print("Press 'c' to enter calibration mode, 's' to force status update")
         print(f"Tracking: {self.target_class or 'all classes'}")
-        print(f"Deadzone: {self.deadzone} pixels, {self.deadzone_degrees} degrees")
-        print(f"Control rate: {self.control_rate} Hz")
-        print(f"Movement scale: {self.movement_scale}\n")
+        print(f"PID gains: Kp={self.pid.kp}, Ki={self.pid.ki}, Kd={self.pid.kd}")
+        print(f"Deadzone: {self.deadzone}px, {self.deadzone_degrees}°")
+        print(f"Movement scale: {self.movement_scale} (lower = smoother)")
+        print(f"Control rate: {self.control_rate} Hz\n")
         
         self.last_control_time = time.time()
         self.last_fps_time = time.time()
@@ -1060,13 +1061,22 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Basic usage:
   python yolo_gimbal.py --camera 0 --turret COM3 --class person
   python yolo_gimbal.py --camera 1 --turret /dev/ttyUSB0 --class 0
-  python yolo_gimbal.py --camera 0 --turret COM3 --class "bottle" --kp 0.8 --ki 0.02
   
   # With 3D visualization:
   python yolo_gimbal.py --camera 0 --turret COM3 --3d-viz
   python yolo_gimbal.py --camera 0 --turret COM3 --class person --viz
+  
+  # Tuning movement (if too fast/jerky):
+  python yolo_gimbal.py --camera 0 --turret COM3 --movement-scale 10  # Slower
+  python yolo_gimbal.py --camera 0 --turret COM3 --kp 0.2  # Less aggressive
+  python yolo_gimbal.py --camera 0 --turret COM3 --deadzone 20  # Less sensitive
+  
+  # Tuning movement (if too slow/sluggish):
+  python yolo_gimbal.py --camera 0 --turret COM3 --movement-scale 25  # Faster
+  python yolo_gimbal.py --camera 0 --turret COM3 --kp 0.5 --ki 0.01  # More aggressive
   
   # Fix flipped directions:
   python yolo_gimbal.py --camera 0 --turret COM3 --invert-x  # Flip horizontal
@@ -1084,20 +1094,20 @@ Note: To find your camera index, run: python find_camera.py
                        help='Target class name or ID to track (e.g., "person", "0", "bottle")')
     parser.add_argument('--conf', type=float, default=0.5,
                        help='Confidence threshold (default: 0.5)')
-    parser.add_argument('--kp', type=float, default=0.5,
-                       help='PID proportional gain (default: 0.5)')
-    parser.add_argument('--ki', type=float, default=0.01,
-                       help='PID integral gain (default: 0.01)')
-    parser.add_argument('--kd', type=float, default=0.1,
-                       help='PID derivative gain (default: 0.1)')
-    parser.add_argument('--deadzone', type=float, default=10.0,
-                       help='Deadzone in pixels (default: 10.0)')
-    parser.add_argument('--deadzone-degrees', type=float, default=1.0,
-                       help='Deadzone in degrees (default: 1.0)')
-    parser.add_argument('--movement-scale', type=float, default=30.0,
-                       help='Movement scale factor (default: 30.0)')
-    parser.add_argument('--min-step', type=float, default=1.0,
-                       help='Minimum step size to overcome servo deadband (default: 1.0)')
+    parser.add_argument('--kp', type=float, default=0.3,
+                       help='PID proportional gain (default: 0.3, higher = more aggressive)')
+    parser.add_argument('--ki', type=float, default=0.005,
+                       help='PID integral gain (default: 0.005)')
+    parser.add_argument('--kd', type=float, default=0.05,
+                       help='PID derivative gain (default: 0.05)')
+    parser.add_argument('--deadzone', type=float, default=15.0,
+                       help='Deadzone in pixels (default: 15.0, smaller = more sensitive)')
+    parser.add_argument('--deadzone-degrees', type=float, default=0.5,
+                       help='Deadzone in degrees (default: 0.5)')
+    parser.add_argument('--movement-scale', type=float, default=15.0,
+                       help='Movement scale factor (default: 15.0, lower = slower/smoother)')
+    parser.add_argument('--min-step', type=float, default=0.5,
+                       help='Minimum step size to overcome servo deadband (default: 0.5)')
     parser.add_argument('--control-rate', type=float, default=30.0,
                        help='Control loop rate in Hz (default: 30.0)')
     parser.add_argument('--invert-x', action='store_true',
