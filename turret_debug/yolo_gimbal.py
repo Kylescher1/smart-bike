@@ -31,10 +31,11 @@ from src.hal.cam.Camera import Camera, CAMERA_CONFIG
 class PIDController:
     """PID controller for servo positioning"""
     
-    def __init__(self, kp: float = 0.5, ki: float = 0.01, kd: float = 0.1):
+    def __init__(self, kp: float = 0.5, ki: float = 0.01, kd: float = 0.1, max_output: float = 10.0):
         self.kp = kp  # Proportional gain
         self.ki = ki  # Integral gain
         self.kd = kd  # Derivative gain
+        self.max_output = max_output  # Maximum output per cycle (degrees)
         
         self.integral_x = 0.0
         self.integral_y = 0.0
@@ -64,6 +65,10 @@ class PIDController:
                         self.ki * self.integral_y + 
                         self.kd * derivative_y)
         
+        # Clamp outputs to prevent large spikes (FIX #10)
+        self.output_x = np.clip(self.output_x, -self.max_output, self.max_output)
+        self.output_y = np.clip(self.output_y, -self.max_output, self.max_output)
+        
         self.last_error_x = error_x
         self.last_error_y = error_y
         
@@ -86,12 +91,20 @@ class TurretController:
         self.port = port
         self.baudrate = baudrate
         self.ser: Optional[serial.Serial] = None
-        self.top_pos = 90
-        self.bottom_pos = 90
+        
+        # Use float positions internally (FIX #1)
+        self.top_pos = 90.0
+        self.bottom_pos = 90.0
         self.top_min = 60
         self.top_max = 120
         self.bottom_min = 0
         self.bottom_max = 180
+        
+        # Rate limiting (FIX #9)
+        self.last_command_time = 0.0
+        self.command_interval = 0.05  # 20 Hz max command rate
+        self.min_angle_change = 0.5  # Don't send if change < 0.5 degrees
+        
         # Limits will be updated from Arduino on connect
         
     def connect(self) -> bool:
@@ -140,18 +153,18 @@ class TurretController:
             return None
     
     def update_status(self):
-        """Update internal status from Arduino"""
+        """Update internal status from Arduino (FIX #8)"""
         resp = self.send_command("STATUS", read_response=True)
         if resp:
             for line in resp.split('\n'):
                 if 'Top servo position:' in line:
                     try:
-                        self.top_pos = int(line.split(':')[1].strip())
+                        self.top_pos = float(line.split(':')[1].strip())
                     except:
                         pass
                 elif 'Bottom servo position:' in line:
                     try:
-                        self.bottom_pos = int(line.split(':')[1].strip())
+                        self.bottom_pos = float(line.split(':')[1].strip())
                     except:
                         pass
                 elif 'Top limits' in line:
@@ -169,23 +182,45 @@ class TurretController:
                     except:
                         pass
     
-    def move_relative(self, delta_x: float, delta_y: float):
-        """Move servos relative to current position"""
-        new_bottom = self.bottom_pos + delta_x
-        new_top = self.top_pos + delta_y
+    def move_to(self, target_bottom: float, target_top: float, force: bool = False):
+        """Move servos to absolute positions (FIX #7)
         
-        # Clamp to limits
-        new_bottom = max(self.bottom_min, min(self.bottom_max, int(new_bottom)))
-        new_top = max(self.top_min, min(self.top_max, int(new_top)))
+        Args:
+            target_bottom: Target angle for bottom servo (float)
+            target_top: Target angle for top servo (float)
+            force: If True, bypass rate limiting
+        """
+        # Rate limiting (FIX #9)
+        current_time = time.time()
+        if not force and (current_time - self.last_command_time) < self.command_interval:
+            return  # Too soon, skip this command
         
-        # Only send if changed
-        if new_bottom != self.bottom_pos:
-            self.send_command(f"BOTTOM:{new_bottom}", read_response=False)
-            self.bottom_pos = new_bottom
+        # Clamp to limits (keep as float until sending)
+        target_bottom = max(self.bottom_min, min(self.bottom_max, target_bottom))
+        target_top = max(self.top_min, min(self.top_max, target_top))
         
-        if new_top != self.top_pos:
-            self.send_command(f"TOP:{new_top}", read_response=False)
-            self.top_pos = new_top
+        # Check if change is significant enough (FIX #9)
+        bottom_change = abs(target_bottom - self.bottom_pos)
+        top_change = abs(target_top - self.top_pos)
+        
+        commands_sent = False
+        
+        if bottom_change >= self.min_angle_change or force:
+            # Round to integer for sending (FIX #1)
+            bottom_int = round(target_bottom)
+            self.send_command(f"BOTTOM:{bottom_int}", read_response=False)
+            self.bottom_pos = target_bottom  # Keep float internally
+            commands_sent = True
+        
+        if top_change >= self.min_angle_change or force:
+            # Round to integer for sending (FIX #1)
+            top_int = round(target_top)
+            self.send_command(f"TOP:{top_int}", read_response=False)
+            self.top_pos = target_top  # Keep float internally
+            commands_sent = True
+        
+        if commands_sent:
+            self.last_command_time = current_time
 
 
 class YOLOGimbal:
@@ -194,14 +229,21 @@ class YOLOGimbal:
     def __init__(self, camera_index: int, turret_port: str, 
                  target_class: Optional[str] = None, conf_threshold: float = 0.5,
                  kp: float = 0.5, ki: float = 0.01, kd: float = 0.1,
-                 deadzone: float = 1.0,
+                 deadzone: float = 10.0, deadzone_degrees: float = 1.0,
+                 movement_scale: float = 30.0, min_step: float = 1.0,
+                 control_rate: float = 30.0,
                  invert_x: bool = False, invert_y: bool = False,
                  swap_servos: bool = False):
         self.camera_index = camera_index
         self.turret_port = turret_port
         self.target_class = target_class
         self.conf_threshold = conf_threshold
-        self.deadzone = deadzone  # Pixels - don't move if error is smaller
+        self.deadzone = deadzone  # Pixels - don't move if error is smaller (FIX #12)
+        self.deadzone_degrees = deadzone_degrees  # Degrees - minimum movement (FIX #12)
+        self.movement_scale = movement_scale  # Scale for normalized error to degrees (FIX #3)
+        self.min_step = min_step  # Minimum step to overcome deadband (FIX #2)
+        self.control_rate = control_rate  # Control loop rate in Hz (FIX #11)
+        self.control_dt = 1.0 / control_rate  # Fixed dt for PID
         self.invert_x = invert_x  # Invert horizontal movement
         self.invert_y = invert_y  # Invert vertical movement
         self.swap_servos = swap_servos  # Swap top and bottom servos
@@ -210,7 +252,7 @@ class YOLOGimbal:
         self.camera = None
         self.yolo = None
         self.turret = TurretController(turret_port)
-        self.pid = PIDController(kp=kp, ki=ki, kd=kd)
+        self.pid = PIDController(kp=kp, ki=ki, kd=kd, max_output=10.0)
         
         # State
         self.running = False
@@ -218,6 +260,15 @@ class YOLOGimbal:
         self.frame_height = 480
         self.center_x = self.frame_width // 2
         self.center_y = self.frame_height // 2
+        
+        # Timing (FIX #4)
+        self.last_control_time = 0.0
+        self.last_fps_time = 0.0
+        self.frame_count = 0
+        self.current_fps = 0.0
+        
+        # Calibration mode (FIX #6)
+        self.calibration_mode = False
         
     def initialize(self):
         """Initialize camera, YOLO, and turret"""
@@ -316,46 +367,68 @@ class YOLOGimbal:
         
         return center_x, center_y, width, height
     
-    def calculate_error(self, target_x: float, target_y: float) -> Tuple[float, float]:
-        """Calculate error from center"""
+    def calculate_error(self, target_x: float, target_y: float) -> Tuple[float, float, float, float]:
+        """Calculate error from center in both pixels and normalized (FIX #3)"""
         # Error: how far target is from center
         # Positive error_x = target is RIGHT of center, need to move turret RIGHT (increase bottom servo)
         # Positive error_y = target is BELOW center, need to move turret DOWN (increase top servo)
-        error_x = target_x - self.center_x
-        error_y = target_y - self.center_y
+        error_x_px = target_x - self.center_x
+        error_y_px = target_y - self.center_y
         
-        # Normalize error (convert to servo movement units)
+        # Normalize error (for PID)
         # Scale by frame dimensions
-        error_x_norm = error_x / self.frame_width  # -0.5 to 0.5
-        error_y_norm = error_y / self.frame_height  # -0.5 to 0.5
+        error_x_norm = error_x_px / self.frame_width  # -0.5 to 0.5
+        error_y_norm = error_y_px / self.frame_height  # -0.5 to 0.5
         
-        return error_x_norm, error_y_norm
+        return error_x_px, error_y_px, error_x_norm, error_y_norm
     
     def run(self):
-        """Main tracking loop"""
+        """Main tracking loop with all fixes applied"""
         self.running = True
         print("\n=== YOLO Gimbal Tracking Started ===")
-        print("Press 'q' to quit, 'r' to reset PID")
+        print("Press 'q' to quit, 'r' to reset PID, 'h' to home, 'l' to reset limits")
+        print("Press 'c' to enter calibration mode")
         print(f"Tracking: {self.target_class or 'all classes'}")
-        print(f"Deadzone: {self.deadzone} pixels\n")
+        print(f"Deadzone: {self.deadzone} pixels, {self.deadzone_degrees} degrees")
+        print(f"Control rate: {self.control_rate} Hz")
+        print(f"Movement scale: {self.movement_scale}\n")
         
-        last_time = time.time()
+        self.last_control_time = time.time()
+        self.last_fps_time = time.time()
         no_target_count = 0
+        status_update_counter = 0
         
         try:
             while self.running:
-                # Read frame
+                # Fixed control rate (FIX #11)
+                current_time = time.time()
+                dt_since_last = current_time - self.last_control_time
+                
+                # Sleep to maintain control rate
+                if dt_since_last < self.control_dt:
+                    time.sleep(self.control_dt - dt_since_last)
+                    current_time = time.time()
+                
+                # Read frame (FIX #5 - read fresh frame)
                 frame = self.camera.read_frame()
                 if frame is None:
                     continue
                 
-                # Run YOLO detection
+                # Run YOLO detection on THIS frame (FIX #5 - sync detection with frame)
+                # Note: For true sync, we'd need to modify YOLODetector to process this frame
+                # For now, we ensure we read the most recent result
                 result = self.yolo.read()
                 if result is None:
                     continue
                 
                 # Find target
                 target = self.find_target_detection(result.detections)
+                
+                # Periodic status re-sync (FIX #8)
+                status_update_counter += 1
+                if status_update_counter >= 30:  # Every 30 frames (~1 sec at 30Hz)
+                    self.turret.update_status()
+                    status_update_counter = 0
                 
                 # Draw center crosshair
                 cv2.line(frame, (self.center_x - 20, self.center_y), 
@@ -379,27 +452,17 @@ class YOLOGimbal:
                     cv2.line(frame, (self.center_x, self.center_y), 
                             (int(target_x), int(target_y)), (255, 0, 0), 2)
                     
-                    # Calculate error
-                    error_x_norm, error_y_norm = self.calculate_error(target_x, target_y)
+                    # Calculate error (FIX #3 - now returns pixels and normalized)
+                    error_x_px, error_y_px, error_x_norm, error_y_norm = self.calculate_error(target_x, target_y)
                     
-                    # Check deadzone
-                    error_x_pixels = abs(error_x_norm * self.frame_width)
-                    error_y_pixels = abs(error_y_norm * self.frame_height)
-                    
-                    if error_x_pixels > self.deadzone or error_y_pixels > self.deadzone:
-                        # Update PID
-                        dt = time.time() - last_time
-                        dt = max(0.01, min(dt, 0.1))  # Clamp dt
-                        output_x, output_y = self.pid.update(error_x_norm, error_y_norm, dt)
+                    # Check pixel deadzone (FIX #12)
+                    if abs(error_x_px) > self.deadzone or abs(error_y_px) > self.deadzone:
+                        # Update PID with fixed dt (FIX #11)
+                        output_x, output_y = self.pid.update(error_x_norm, error_y_norm, self.control_dt)
                         
-                        # Debug: Print PID output if significant
-                        if abs(error_x_norm) > 0.05:
-                            print(f"DEBUG: error_x_norm={error_x_norm:.3f}, PID_output_x={output_x:.3f}, bottom_pos={self.turret.bottom_pos}")
-                        
-                        # Convert PID output to servo movement
-                        # Scale appropriately (adjust these multipliers as needed)
-                        move_x = output_x * 2.0  # Horizontal movement sensitivity
-                        move_y = output_y * 2.0  # Vertical movement sensitivity
+                        # Convert PID output to servo movement (FIX #3 - better scaling)
+                        move_x = output_x * self.movement_scale
+                        move_y = output_y * self.movement_scale
                         
                         # Apply direction inversions
                         if self.invert_x:
@@ -407,39 +470,41 @@ class YOLOGimbal:
                         if self.invert_y:
                             move_y = -move_y
                         
-                        # Debug output for direction checking
-                        if abs(error_x_norm) > 0.1:  # Significant horizontal error
-                            direction = "RIGHT" if error_x_norm > 0 else "LEFT"
-                            move_dir = "RIGHT" if move_x > 0 else "LEFT"
-                            print(f"Target {direction} of center (error={error_x_norm:.3f}), moving turret {move_dir} (move_x={move_x:.2f}deg, bottom_pos={self.turret.bottom_pos}->{self.turret.bottom_pos + move_x:.1f})")
+                        # Apply minimum step to overcome deadband (FIX #2)
+                        if 0 < abs(move_x) < self.min_step:
+                            move_x = self.min_step if move_x > 0 else -self.min_step
+                        if 0 < abs(move_y) < self.min_step:
+                            move_y = self.min_step if move_y > 0 else -self.min_step
                         
-                        # Check if movement would hit limits (before applying)
-                        new_bottom = self.turret.bottom_pos + move_x
-                        new_top = self.turret.top_pos + move_y
-                        at_limit_x = False
-                        at_limit_y = False
+                        # Check degree deadzone (FIX #12)
+                        if abs(move_x) < self.deadzone_degrees:
+                            move_x = 0
+                        if abs(move_y) < self.deadzone_degrees:
+                            move_y = 0
                         
-                        if new_bottom <= self.turret.bottom_min:
-                            at_limit_x = True
-                            move_x = self.turret.bottom_min - self.turret.bottom_pos
-                        elif new_bottom >= self.turret.bottom_max:
-                            at_limit_x = True
-                            move_x = self.turret.bottom_max - self.turret.bottom_pos
+                        # Calculate target absolute positions (FIX #7)
+                        target_bottom = self.turret.bottom_pos + move_x
+                        target_top = self.turret.top_pos + move_y
                         
-                        if new_top <= self.turret.top_min:
-                            at_limit_y = True
-                            move_y = self.turret.top_min - self.turret.top_pos
-                        elif new_top >= self.turret.top_max:
-                            at_limit_y = True
-                            move_y = self.turret.top_max - self.turret.top_pos
+                        # Check limits
+                        at_limit_x = (target_bottom <= self.turret.bottom_min or 
+                                     target_bottom >= self.turret.bottom_max)
+                        at_limit_y = (target_top <= self.turret.top_min or 
+                                     target_top >= self.turret.top_max)
                         
-                        # Apply servo swap if needed
+                        # Apply servo swap if needed and move (FIX #7 - absolute positioning)
                         if self.swap_servos:
-                            # Swap: move_x goes to top, move_y goes to bottom
-                            self.turret.move_relative(move_y, move_x)
+                            self.turret.move_to(target_top, target_bottom)
                         else:
-                            # Normal: move_x goes to bottom (horizontal), move_y goes to top (vertical)
-                            self.turret.move_relative(move_x, move_y)
+                            self.turret.move_to(target_bottom, target_top)
+                        
+                        # Better logging (FIX #13)
+                        if abs(error_x_px) > 50:  # Significant horizontal error
+                            direction = "RIGHT" if error_x_px > 0 else "LEFT"
+                            move_dir = "RIGHT" if move_x > 0 else "LEFT"
+                            print(f"Target {direction} of center (error={error_x_px:.1f}px), "
+                                  f"PID_out={output_x:.3f}, moving turret {move_dir} "
+                                  f"(move={move_x:.2f}deg, pos={self.turret.bottom_pos:.1f}°)")
                         
                         # Display info
                         limit_text = ""
@@ -448,17 +513,17 @@ class YOLOGimbal:
                         if at_limit_y:
                             limit_text += " [Y LIMIT]"
                         
-                        cv2.putText(frame, f"Error: X={error_x_pixels:.1f}px Y={error_y_pixels:.1f}px", 
+                        cv2.putText(frame, f"Error: X={error_x_px:.1f}px Y={error_y_px:.1f}px", 
                                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                         cv2.putText(frame, f"Move: X={move_x:.2f}deg Y={move_y:.2f}deg{limit_text}", 
                                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                        cv2.putText(frame, f"Pos: Bottom={self.turret.bottom_pos}deg Top={self.turret.top_pos}deg", 
+                        cv2.putText(frame, f"Pos: Bottom={self.turret.bottom_pos:.1f}deg Top={self.turret.top_pos:.1f}deg", 
                                    (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                     else:
                         cv2.putText(frame, "LOCKED", (10, 30), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                     
-                    last_time = time.time()
+                    self.last_control_time = current_time
                 else:
                     no_target_count += 1
                     if no_target_count > 30:  # Reset PID after 1 second of no target
@@ -466,9 +531,15 @@ class YOLOGimbal:
                     cv2.putText(frame, "NO TARGET", (10, 30), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                 
-                # Display FPS
-                fps = 1.0 / max(0.001, time.time() - last_time) if target else 0
-                cv2.putText(frame, f"FPS: {fps:.1f}", (10, frame.shape[0] - 10), 
+                # Calculate FPS properly (FIX #4)
+                self.frame_count += 1
+                fps_elapsed = current_time - self.last_fps_time
+                if fps_elapsed >= 1.0:  # Update FPS every second
+                    self.current_fps = self.frame_count / fps_elapsed
+                    self.frame_count = 0
+                    self.last_fps_time = current_time
+                
+                cv2.putText(frame, f"FPS: {self.current_fps:.1f}", (10, frame.shape[0] - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                 
                 # Show frame
@@ -494,11 +565,121 @@ class YOLOGimbal:
                     time.sleep(0.1)
                     self.turret.update_status()
                     print(f"Limits reset: Bottom now {self.turret.bottom_min}-{self.turret.bottom_max}°")
+                elif key == ord('c'):
+                    # Calibration mode (FIX #6)
+                    self.run_calibration()
+                elif key == ord('s'):
+                    # Force status update
+                    self.turret.update_status()
+                    print(f"Status: Bottom={self.turret.bottom_pos:.1f}° Top={self.turret.top_pos:.1f}°")
         
         except KeyboardInterrupt:
             print("\nInterrupted by user")
         finally:
             self.cleanup()
+    
+    def run_calibration(self):
+        """Calibration mode to determine correct axis directions (FIX #6)"""
+        print("\n=== CALIBRATION MODE ===")
+        print("This will help determine correct servo directions")
+        print("Place a target in view and press any key to continue...")
+        
+        while True:
+            frame = self.camera.read_frame()
+            if frame is None:
+                continue
+            cv2.putText(frame, "CALIBRATION: Place target in view", (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            cv2.imshow("YOLO Gimbal Tracking", frame)
+            if cv2.waitKey(1) != -1:
+                break
+        
+        # Test horizontal movement
+        print("\nTesting HORIZONTAL (bottom servo)...")
+        print("Moving servo +10° - observe if camera moves RIGHT")
+        
+        # Get initial target position
+        result = self.yolo.read()
+        if result and result.detections:
+            target = self.find_target_detection(result.detections)
+            if target:
+                initial_x, _, _, _ = target
+                print(f"Initial target X: {initial_x:.1f}")
+                
+                # Move +10 degrees
+                original_bottom = self.turret.bottom_pos
+                self.turret.move_to(original_bottom + 10, self.turret.top_pos, force=True)
+                time.sleep(1.5)
+                
+                # Check new position
+                result = self.yolo.read()
+                if result and result.detections:
+                    target = self.find_target_detection(result.detections)
+                    if target:
+                        new_x, _, _, _ = target
+                        print(f"New target X: {new_x:.1f}")
+                        delta_x = new_x - initial_x
+                        
+                        if abs(delta_x) > 20:
+                            if delta_x > 0:
+                                print("✓ Camera moved RIGHT (target moved right in frame)")
+                                print("  -> X axis is CORRECT (no inversion needed)")
+                            else:
+                                print("✗ Camera moved LEFT (target moved left in frame)")
+                                print("  -> X axis is INVERTED! Use --invert-x flag")
+                        else:
+                            print("! Movement too small to determine direction")
+                
+                # Return to original
+                self.turret.move_to(original_bottom, self.turret.top_pos, force=True)
+                time.sleep(1.0)
+        
+        # Test vertical movement
+        print("\nTesting VERTICAL (top servo)...")
+        print("Moving servo +5° - observe if camera moves DOWN")
+        
+        result = self.yolo.read()
+        if result and result.detections:
+            target = self.find_target_detection(result.detections)
+            if target:
+                _, initial_y, _, _ = target
+                print(f"Initial target Y: {initial_y:.1f}")
+                
+                # Move +5 degrees
+                original_top = self.turret.top_pos
+                self.turret.move_to(self.turret.bottom_pos, original_top + 5, force=True)
+                time.sleep(1.5)
+                
+                # Check new position
+                result = self.yolo.read()
+                if result and result.detections:
+                    target = self.find_target_detection(result.detections)
+                    if target:
+                        _, new_y, _, _ = target
+                        print(f"New target Y: {new_y:.1f}")
+                        delta_y = new_y - initial_y
+                        
+                        if abs(delta_y) > 20:
+                            if delta_y > 0:
+                                print("✓ Camera moved DOWN (target moved down in frame)")
+                                print("  -> Y axis is CORRECT (no inversion needed)")
+                            else:
+                                print("✗ Camera moved UP (target moved up in frame)")
+                                print("  -> Y axis is INVERTED! Use --invert-y flag")
+                        else:
+                            print("! Movement too small to determine direction")
+                
+                # Return to original
+                self.turret.move_to(self.turret.bottom_pos, original_top, force=True)
+                time.sleep(1.0)
+        
+        print("\nCalibration complete! Press any key to continue tracking...")
+        while cv2.waitKey(1) == -1:
+            frame = self.camera.read_frame()
+            if frame is not None:
+                cv2.putText(frame, "Calibration complete - press any key", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.imshow("YOLO Gimbal Tracking", frame)
     
     def cleanup(self):
         """Cleanup resources"""
@@ -566,6 +747,14 @@ Note: To find your camera index, run: python find_camera.py
                        help='PID derivative gain (default: 0.1)')
     parser.add_argument('--deadzone', type=float, default=10.0,
                        help='Deadzone in pixels (default: 10.0)')
+    parser.add_argument('--deadzone-degrees', type=float, default=1.0,
+                       help='Deadzone in degrees (default: 1.0)')
+    parser.add_argument('--movement-scale', type=float, default=30.0,
+                       help='Movement scale factor (default: 30.0)')
+    parser.add_argument('--min-step', type=float, default=1.0,
+                       help='Minimum step size to overcome servo deadband (default: 1.0)')
+    parser.add_argument('--control-rate', type=float, default=30.0,
+                       help='Control loop rate in Hz (default: 30.0)')
     parser.add_argument('--invert-x', action='store_true',
                        help='Invert horizontal movement direction')
     parser.add_argument('--invert-y', action='store_true',
@@ -596,6 +785,10 @@ Note: To find your camera index, run: python find_camera.py
             ki=args.ki,
             kd=args.kd,
             deadzone=args.deadzone,
+            deadzone_degrees=args.deadzone_degrees,
+            movement_scale=args.movement_scale,
+            min_step=args.min_step,
+            control_rate=args.control_rate,
             invert_x=args.invert_x,
             invert_y=args.invert_y,
             swap_servos=args.swap_servos
