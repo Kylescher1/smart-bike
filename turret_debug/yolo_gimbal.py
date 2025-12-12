@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """
-YOLO-Based Automatic Camera Gimbal
-Tracks detected objects and keeps them centered using PID servo control
+Automatic Camera Gimbal with Object Detection and Hand Tracking
+Tracks detected objects or hand gestures and keeps them centered using PID servo control
+
+Supports two tracking modes:
+  1. YOLO object detection (default) - tracks any object class
+  2. Hand tracking with MediaPipe - tracks specific fingers
 
 Usage:
+    # Object detection:
     python yolo_gimbal.py --camera 0 --turret COM3 --class person
     python yolo_gimbal.py --camera 1 --turret /dev/ttyUSB0 --class 0
-    python yolo_gimbal.py --camera 0 --turret COM3 --3d-viz  # With 3D visualization
+    
+    # Hand tracking:
+    python yolo_gimbal.py --camera 0 --turret COM3 --hand-tracking
+    python yolo_gimbal.py --camera 0 --turret COM3 --hand --finger index --3d-viz
 """
 
 import serial
@@ -27,6 +35,14 @@ from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
+# MediaPipe for hand tracking (optional)
+try:
+    import mediapipe as mp
+    MEDIAPIPE_AVAILABLE = True
+except ImportError:
+    MEDIAPIPE_AVAILABLE = False
+    print("MediaPipe not available. Install with: pip install mediapipe")
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -34,6 +50,158 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from yolo.live_demo import YOLODetector
 from src.hal.cam.Camera import Camera, CAMERA_CONFIG
+
+
+class HandTracker:
+    """Hand and finger tracking using MediaPipe"""
+    
+    # MediaPipe hand landmark indices
+    WRIST = 0
+    THUMB_TIP = 4
+    INDEX_TIP = 8
+    MIDDLE_TIP = 12
+    RING_TIP = 16
+    PINKY_TIP = 20
+    
+    def __init__(self, min_detection_confidence: float = 0.7, 
+                 min_tracking_confidence: float = 0.5,
+                 max_num_hands: int = 1,
+                 track_finger: str = "index"):
+        """
+        Initialize hand tracker
+        
+        Args:
+            min_detection_confidence: Minimum confidence for hand detection
+            min_tracking_confidence: Minimum confidence for hand tracking
+            max_num_hands: Maximum number of hands to track
+            track_finger: Which finger to track ("index", "thumb", "middle", "ring", "pinky")
+        """
+        if not MEDIAPIPE_AVAILABLE:
+            raise ImportError("MediaPipe not installed. Run: pip install mediapipe")
+        
+        self.mp_hands = mp.solutions.hands
+        self.mp_drawing = mp.solutions.drawing_utils
+        self.mp_drawing_styles = mp.solutions.drawing_styles
+        
+        self.hands = self.mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=max_num_hands,
+            min_detection_confidence=min_detection_confidence,
+            min_tracking_confidence=min_tracking_confidence
+        )
+        
+        # Determine which fingertip to track
+        self.track_finger = track_finger.lower()
+        self.finger_tip_map = {
+            "thumb": self.THUMB_TIP,
+            "index": self.INDEX_TIP,
+            "middle": self.MIDDLE_TIP,
+            "ring": self.RING_TIP,
+            "pinky": self.PINKY_TIP
+        }
+        
+        if self.track_finger not in self.finger_tip_map:
+            raise ValueError(f"Invalid finger: {track_finger}. Choose from: {list(self.finger_tip_map.keys())}")
+        
+        self.fingertip_index = self.finger_tip_map[self.track_finger]
+    
+    def detect(self, frame: np.ndarray) -> Optional[Tuple[float, float, float, float]]:
+        """
+        Detect hand and return fingertip position
+        
+        Args:
+            frame: Input BGR image from camera
+            
+        Returns:
+            Tuple of (center_x, center_y, width, height) or None if no hand detected
+            - center_x, center_y: fingertip position in pixels
+            - width, height: bounding box size of the hand
+        """
+        # Convert BGR to RGB
+        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Process the image
+        results = self.hands.process(image_rgb)
+        
+        if not results.multi_hand_landmarks:
+            return None
+        
+        # Get the first hand
+        hand_landmarks = results.multi_hand_landmarks[0]
+        
+        # Get frame dimensions
+        h, w = frame.shape[:2]
+        
+        # Get fingertip position
+        fingertip = hand_landmarks.landmark[self.fingertip_index]
+        finger_x = fingertip.x * w
+        finger_y = fingertip.y * h
+        
+        # Calculate hand bounding box for size information
+        x_coords = [lm.x * w for lm in hand_landmarks.landmark]
+        y_coords = [lm.y * h for lm in hand_landmarks.landmark]
+        
+        x_min, x_max = min(x_coords), max(x_coords)
+        y_min, y_max = min(y_coords), max(y_coords)
+        
+        bbox_width = x_max - x_min
+        bbox_height = y_max - y_min
+        
+        return finger_x, finger_y, bbox_width, bbox_height
+    
+    def draw_landmarks(self, frame: np.ndarray, draw_all: bool = True) -> np.ndarray:
+        """
+        Draw hand landmarks on the frame
+        
+        Args:
+            frame: Input BGR image
+            draw_all: If True, draw all landmarks. If False, only draw tracked fingertip
+            
+        Returns:
+            Frame with landmarks drawn
+        """
+        # Convert BGR to RGB
+        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Process the image
+        results = self.hands.process(image_rgb)
+        
+        if not results.multi_hand_landmarks:
+            return frame
+        
+        # Draw landmarks
+        for hand_landmarks in results.multi_hand_landmarks:
+            if draw_all:
+                # Draw all hand landmarks and connections
+                self.mp_drawing.draw_landmarks(
+                    frame,
+                    hand_landmarks,
+                    self.mp_hands.HAND_CONNECTIONS,
+                    self.mp_drawing_styles.get_default_hand_landmarks_style(),
+                    self.mp_drawing_styles.get_default_hand_connections_style()
+                )
+            
+            # Highlight the tracked fingertip
+            h, w = frame.shape[:2]
+            fingertip = hand_landmarks.landmark[self.fingertip_index]
+            finger_x = int(fingertip.x * w)
+            finger_y = int(fingertip.y * h)
+            
+            # Draw a larger circle on the tracked fingertip
+            cv2.circle(frame, (finger_x, finger_y), 15, (0, 255, 0), 3)
+            cv2.circle(frame, (finger_x, finger_y), 5, (0, 255, 0), -1)
+            
+            # Add label
+            finger_name = self.track_finger.upper()
+            cv2.putText(frame, f"{finger_name} TIP", (finger_x + 20, finger_y - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        return frame
+    
+    def close(self):
+        """Release resources"""
+        if hasattr(self, 'hands'):
+            self.hands.close()
 
 
 class Turret3DVisualizer:
@@ -529,7 +697,8 @@ class YOLOGimbal:
                  movement_scale: float = 15.0, min_step: float = 0.5,
                  control_rate: float = 30.0,
                  invert_x: bool = False, invert_y: bool = False,
-                 swap_servos: bool = False, enable_3d_viz: bool = False):
+                 swap_servos: bool = False, enable_3d_viz: bool = False,
+                 hand_tracking: bool = False, track_finger: str = "index"):
         self.camera_index = camera_index
         self.turret_port = turret_port
         self.target_class = target_class
@@ -544,10 +713,13 @@ class YOLOGimbal:
         self.invert_y = invert_y  # Invert vertical movement
         self.swap_servos = swap_servos  # Swap top and bottom servos
         self.enable_3d_viz = enable_3d_viz  # Enable 3D visualization
+        self.hand_tracking = hand_tracking  # Use hand tracking instead of YOLO
+        self.track_finger = track_finger  # Which finger to track
         
         # Initialize components
         self.camera = None
         self.yolo = None
+        self.hand_tracker = None
         self.turret = TurretController(turret_port)
         self.pid = PIDController(kp=kp, ki=ki, kd=kd, max_output=5.0)  # Reduced from 10.0 for smoother movement
         self.visualizer = None
@@ -569,7 +741,7 @@ class YOLOGimbal:
         self.calibration_mode = False
         
     def initialize(self):
-        """Initialize camera, YOLO, and turret"""
+        """Initialize camera, detection system (YOLO or hand tracking), and turret"""
         print("Initializing camera...")
         camera_config = CAMERA_CONFIG.copy()
         camera_config.update({
@@ -591,17 +763,30 @@ class YOLOGimbal:
         self.center_y = self.frame_height // 2
         print(f"Camera initialized: {self.frame_width}x{self.frame_height}")
         
-        print("Initializing YOLO...")
-        yolo_weights = Path(PROJECT_ROOT) / "yolo" / "models" / "yolo11n.pt"
-        self.yolo = YOLODetector(
-            name="GimbalTracker",
-            camera=self.camera,
-            weights=str(yolo_weights),
-            conf=self.conf_threshold,
-            imgsz=640
-        )
-        self.yolo.start()
-        print("YOLO initialized")
+        # Initialize detection system
+        if self.hand_tracking:
+            print(f"Initializing Hand Tracker (tracking {self.track_finger} finger)...")
+            if not MEDIAPIPE_AVAILABLE:
+                raise RuntimeError("MediaPipe not installed. Run: pip install mediapipe")
+            self.hand_tracker = HandTracker(
+                min_detection_confidence=0.7,
+                min_tracking_confidence=0.5,
+                max_num_hands=1,
+                track_finger=self.track_finger
+            )
+            print("Hand tracker initialized")
+        else:
+            print("Initializing YOLO...")
+            yolo_weights = Path(PROJECT_ROOT) / "yolo" / "models" / "yolo11n.pt"
+            self.yolo = YOLODetector(
+                name="GimbalTracker",
+                camera=self.camera,
+                weights=str(yolo_weights),
+                conf=self.conf_threshold,
+                imgsz=640
+            )
+            self.yolo.start()
+            print("YOLO initialized")
         
         print("Connecting to turret...")
         if not self.turret.connect():
@@ -636,7 +821,7 @@ class YOLOGimbal:
             print("3D visualization started")
         
     def find_target_detection(self, detections) -> Optional[Tuple[float, float, float, float]]:
-        """Find the best target detection (largest, highest confidence)"""
+        """Find the best target detection (largest, highest confidence) - YOLO mode"""
         if not detections:
             return None
         
@@ -672,6 +857,15 @@ class YOLOGimbal:
         
         return center_x, center_y, width, height
     
+    def find_target_hand(self, frame: np.ndarray) -> Optional[Tuple[float, float, float, float]]:
+        """Find hand/finger target - Hand tracking mode"""
+        if self.hand_tracker is None:
+            return None
+        
+        # Detect hand and get fingertip position
+        result = self.hand_tracker.detect(frame)
+        return result  # Returns (finger_x, finger_y, hand_width, hand_height) or None
+    
     def calculate_error(self, target_x: float, target_y: float) -> Tuple[float, float, float, float]:
         """Calculate error from center in both pixels and normalized (FIX #3)"""
         # Error: how far target is from center
@@ -690,10 +884,17 @@ class YOLOGimbal:
     def run(self):
         """Main tracking loop with all fixes applied"""
         self.running = True
-        print("\n=== YOLO Gimbal Tracking Started ===")
+        
+        tracking_mode = "Hand Tracking" if self.hand_tracking else "YOLO Object Detection"
+        print(f"\n=== Gimbal Tracking Started ({tracking_mode}) ===")
         print("Press 'q' to quit, 'r' to reset PID, 'h' to home, 'l' to reset limits")
         print("Press 'c' to enter calibration mode, 's' to force status update")
-        print(f"Tracking: {self.target_class or 'all classes'}")
+        
+        if self.hand_tracking:
+            print(f"Tracking: {self.track_finger.upper()} finger tip")
+        else:
+            print(f"Tracking: {self.target_class or 'all classes'}")
+        
         print(f"PID gains: Kp={self.pid.kp}, Ki={self.pid.ki}, Kd={self.pid.kd}")
         print(f"Deadzone: {self.deadzone}px, {self.deadzone_degrees}°")
         print(f"Movement scale: {self.movement_scale} (lower = smoother)")
@@ -720,15 +921,22 @@ class YOLOGimbal:
                 if frame is None:
                     continue
                 
-                # Run YOLO detection on THIS frame (FIX #5 - sync detection with frame)
-                # Note: For true sync, we'd need to modify YOLODetector to process this frame
-                # For now, we ensure we read the most recent result
-                result = self.yolo.read()
-                if result is None:
-                    continue
-                
-                # Find target
-                target = self.find_target_detection(result.detections)
+                # Find target based on tracking mode
+                if self.hand_tracking:
+                    # Hand tracking mode - detect directly on frame
+                    target = self.find_target_hand(frame)
+                    
+                    # Draw hand landmarks
+                    if self.hand_tracker:
+                        frame = self.hand_tracker.draw_landmarks(frame, draw_all=True)
+                else:
+                    # YOLO detection mode
+                    result = self.yolo.read()
+                    if result is None:
+                        continue
+                    
+                    # Find target from YOLO detections
+                    target = self.find_target_detection(result.detections)
                 
                 # Periodic status re-sync (FIX #8)
                 status_update_counter += 1
@@ -881,7 +1089,8 @@ class YOLOGimbal:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                 
                 # Show frame
-                cv2.imshow("YOLO Gimbal Tracking", frame)
+                window_title = "Hand Tracking Gimbal" if self.hand_tracking else "YOLO Gimbal Tracking"
+                cv2.imshow(window_title, frame)
                 
                 # Handle keys
                 key = cv2.waitKey(1) & 0xFF
@@ -920,15 +1129,26 @@ class YOLOGimbal:
         """Calibration mode to determine correct axis directions (FIX #6)"""
         print("\n=== CALIBRATION MODE ===")
         print("This will help determine correct servo directions")
-        print("Place a target in view and press any key to continue...")
+        
+        if self.hand_tracking:
+            print("Place your hand with tracked finger visible and press any key to continue...")
+        else:
+            print("Place a target in view and press any key to continue...")
+        
+        window_title = "Hand Tracking Gimbal" if self.hand_tracking else "YOLO Gimbal Tracking"
         
         while True:
             frame = self.camera.read_frame()
             if frame is None:
                 continue
+            
+            # Draw landmarks if hand tracking
+            if self.hand_tracking and self.hand_tracker:
+                frame = self.hand_tracker.draw_landmarks(frame, draw_all=True)
+            
             cv2.putText(frame, "CALIBRATION: Place target in view", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-            cv2.imshow("YOLO Gimbal Tracking", frame)
+            cv2.imshow(window_title, frame)
             if cv2.waitKey(1) != -1:
                 break
         
@@ -937,9 +1157,17 @@ class YOLOGimbal:
         print("Moving servo +10° - observe if camera moves RIGHT")
         
         # Get initial target position
-        result = self.yolo.read()
-        if result and result.detections:
-            target = self.find_target_detection(result.detections)
+        frame = self.camera.read_frame()
+        if frame is not None:
+            if self.hand_tracking:
+                target = self.find_target_hand(frame)
+            else:
+                result = self.yolo.read()
+                if result and result.detections:
+                    target = self.find_target_detection(result.detections)
+                else:
+                    target = None
+            
             if target:
                 initial_x, _, _, _ = target
                 print(f"Initial target X: {initial_x:.1f}")
@@ -950,9 +1178,17 @@ class YOLOGimbal:
                 time.sleep(1.5)
                 
                 # Check new position
-                result = self.yolo.read()
-                if result and result.detections:
-                    target = self.find_target_detection(result.detections)
+                frame = self.camera.read_frame()
+                if frame is not None:
+                    if self.hand_tracking:
+                        target = self.find_target_hand(frame)
+                    else:
+                        result = self.yolo.read()
+                        if result and result.detections:
+                            target = self.find_target_detection(result.detections)
+                        else:
+                            target = None
+                    
                     if target:
                         new_x, _, _, _ = target
                         print(f"New target X: {new_x:.1f}")
@@ -976,9 +1212,17 @@ class YOLOGimbal:
         print("\nTesting VERTICAL (top servo)...")
         print("Moving servo +5° - observe if camera moves DOWN")
         
-        result = self.yolo.read()
-        if result and result.detections:
-            target = self.find_target_detection(result.detections)
+        frame = self.camera.read_frame()
+        if frame is not None:
+            if self.hand_tracking:
+                target = self.find_target_hand(frame)
+            else:
+                result = self.yolo.read()
+                if result and result.detections:
+                    target = self.find_target_detection(result.detections)
+                else:
+                    target = None
+            
             if target:
                 _, initial_y, _, _ = target
                 print(f"Initial target Y: {initial_y:.1f}")
@@ -989,9 +1233,17 @@ class YOLOGimbal:
                 time.sleep(1.5)
                 
                 # Check new position
-                result = self.yolo.read()
-                if result and result.detections:
-                    target = self.find_target_detection(result.detections)
+                frame = self.camera.read_frame()
+                if frame is not None:
+                    if self.hand_tracking:
+                        target = self.find_target_hand(frame)
+                    else:
+                        result = self.yolo.read()
+                        if result and result.detections:
+                            target = self.find_target_detection(result.detections)
+                        else:
+                            target = None
+                    
                     if target:
                         _, new_y, _, _ = target
                         print(f"New target Y: {new_y:.1f}")
@@ -1012,12 +1264,13 @@ class YOLOGimbal:
                 time.sleep(1.0)
         
         print("\nCalibration complete! Press any key to continue tracking...")
+        window_title = "Hand Tracking Gimbal" if self.hand_tracking else "YOLO Gimbal Tracking"
         while cv2.waitKey(1) == -1:
             frame = self.camera.read_frame()
             if frame is not None:
                 cv2.putText(frame, "Calibration complete - press any key", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                cv2.imshow("YOLO Gimbal Tracking", frame)
+                cv2.imshow(window_title, frame)
     
     def cleanup(self):
         """Cleanup resources"""
@@ -1033,6 +1286,9 @@ class YOLOGimbal:
             self.turret.send_command("MOTOR1:0", read_response=False)
             self.turret.send_command("MOTOR2:0", read_response=False)
             self.turret.disconnect()
+        
+        if self.hand_tracker:
+            self.hand_tracker.close()
         
         if self.yolo:
             self.yolo.stop()
@@ -1061,9 +1317,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage:
+  # Basic YOLO object detection:
   python yolo_gimbal.py --camera 0 --turret COM3 --class person
   python yolo_gimbal.py --camera 1 --turret /dev/ttyUSB0 --class 0
+  
+  # Hand/finger tracking (no YOLO needed):
+  python yolo_gimbal.py --camera 0 --turret COM3 --hand-tracking
+  python yolo_gimbal.py --camera 0 --turret COM3 --hand --finger index
+  python yolo_gimbal.py --camera 0 --turret COM3 --hand --finger thumb --3d-viz
   
   # With 3D visualization:
   python yolo_gimbal.py --camera 0 --turret COM3 --3d-viz
@@ -1083,7 +1344,8 @@ Examples:
   python yolo_gimbal.py --camera 0 --turret COM3 --invert-y  # Flip vertical
   python yolo_gimbal.py --camera 0 --turret COM3 --swap-servos  # Swap top/bottom
   
-Note: To find your camera index, run: python find_camera.py
+Note: Hand tracking requires: pip install mediapipe
+      To find your camera index, run: python find_camera.py
         """
     )
     parser.add_argument('--camera', '-c', type=int, required=True,
@@ -1118,6 +1380,11 @@ Note: To find your camera index, run: python find_camera.py
                        help='Swap top and bottom servos (if they are wired backwards)')
     parser.add_argument('--3d-viz', '--viz', action='store_true', dest='enable_3d_viz',
                        help='Enable 3D visualization of turret orientation and tracking')
+    parser.add_argument('--hand-tracking', '--hand', action='store_true',
+                       help='Use hand tracking instead of YOLO object detection')
+    parser.add_argument('--finger', type=str, default='index',
+                       choices=['thumb', 'index', 'middle', 'ring', 'pinky'],
+                       help='Which finger to track (default: index)')
     parser.add_argument('--list-ports', '-l', action='store_true',
                        help='List available serial ports')
     
@@ -1149,7 +1416,9 @@ Note: To find your camera index, run: python find_camera.py
             invert_x=args.invert_x,
             invert_y=args.invert_y,
             swap_servos=args.swap_servos,
-            enable_3d_viz=args.enable_3d_viz
+            enable_3d_viz=args.enable_3d_viz,
+            hand_tracking=args.hand_tracking,
+            track_finger=args.finger
         )
         
         gimbal.initialize()
