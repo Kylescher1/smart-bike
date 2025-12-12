@@ -6,6 +6,7 @@ Tracks detected objects and keeps them centered using PID servo control
 Usage:
     python yolo_gimbal.py --camera 0 --turret COM3 --class person
     python yolo_gimbal.py --camera 1 --turret /dev/ttyUSB0 --class 0
+    python yolo_gimbal.py --camera 0 --turret COM3 --3d-viz  # With 3D visualization
 """
 
 import serial
@@ -13,11 +14,18 @@ import sys
 import time
 import argparse
 import threading
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from pathlib import Path
+from collections import deque
 
 import cv2
 import numpy as np
+import matplotlib
+matplotlib.use('TkAgg')  # Use TkAgg backend for threading compatibility
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from mpl_toolkits.mplot3d import Axes3D
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +34,294 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from yolo.live_demo import YOLODetector
 from src.hal.cam.Camera import Camera, CAMERA_CONFIG
+
+
+class Turret3DVisualizer:
+    """Real-time 3D visualization of turret orientation and tracking"""
+    
+    def __init__(self, history_length: int = 100):
+        self.history_length = history_length
+        
+        # State data
+        self.pan_angle = 90.0  # Bottom servo (horizontal)
+        self.tilt_angle = 90.0  # Top servo (vertical)
+        self.target_x = 0.0  # Target position in image coordinates
+        self.target_y = 0.0
+        self.has_target = False
+        self.error_x = 0.0
+        self.error_y = 0.0
+        
+        # History tracking
+        self.pan_history = deque(maxlen=history_length)
+        self.tilt_history = deque(maxlen=history_length)
+        self.target_history = deque(maxlen=history_length)
+        
+        # Threading
+        self.running = False
+        self.thread = None
+        self.lock = threading.Lock()
+        
+        # Matplotlib figure and axes
+        self.fig = None
+        self.ax = None
+        
+    def start(self):
+        """Start the visualization in a separate thread"""
+        self.running = True
+        self.thread = threading.Thread(target=self._run_visualization, daemon=True)
+        self.thread.start()
+        
+    def stop(self):
+        """Stop the visualization"""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=2.0)
+        if self.fig:
+            plt.close(self.fig)
+    
+    def update(self, pan: float, tilt: float, target_x: float = 0, target_y: float = 0, 
+               has_target: bool = False, error_x: float = 0, error_y: float = 0):
+        """Update the visualization data"""
+        with self.lock:
+            self.pan_angle = pan
+            self.tilt_angle = tilt
+            self.target_x = target_x
+            self.target_y = target_y
+            self.has_target = has_target
+            self.error_x = error_x
+            self.error_y = error_y
+            
+            # Update history
+            self.pan_history.append(pan)
+            self.tilt_history.append(tilt)
+            if has_target:
+                self.target_history.append((target_x, target_y))
+    
+    def _rotation_matrix_z(self, angle_deg: float) -> np.ndarray:
+        """Create rotation matrix around Z axis (pan)"""
+        angle_rad = np.radians(angle_deg - 90)  # 90° is forward
+        c, s = np.cos(angle_rad), np.sin(angle_rad)
+        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    
+    def _rotation_matrix_y(self, angle_deg: float) -> np.ndarray:
+        """Create rotation matrix around Y axis (tilt)"""
+        angle_rad = np.radians(angle_deg - 90)  # 90° is horizontal
+        c, s = np.cos(angle_rad), np.sin(angle_rad)
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    
+    def _create_camera_cone(self, fov_h: float = 60, fov_v: float = 45, length: float = 2.0):
+        """Create vertices for camera field of view cone"""
+        # Convert FOV to radians
+        fov_h_rad = np.radians(fov_h / 2)
+        fov_v_rad = np.radians(fov_v / 2)
+        
+        # Cone tip at origin
+        tip = np.array([0, 0, 0])
+        
+        # Four corners of the cone base
+        corners = [
+            np.array([length, length * np.tan(fov_h_rad), length * np.tan(fov_v_rad)]),
+            np.array([length, -length * np.tan(fov_h_rad), length * np.tan(fov_v_rad)]),
+            np.array([length, -length * np.tan(fov_h_rad), -length * np.tan(fov_v_rad)]),
+            np.array([length, length * np.tan(fov_h_rad), -length * np.tan(fov_v_rad)]),
+        ]
+        
+        return tip, corners
+    
+    def _draw_gimbal(self, ax, pan: float, tilt: float):
+        """Draw the turret gimbal structure"""
+        # Base
+        base_height = 0.3
+        base_radius = 0.2
+        theta = np.linspace(0, 2 * np.pi, 20)
+        x_base = base_radius * np.cos(theta)
+        y_base = base_radius * np.sin(theta)
+        z_base_bottom = np.zeros_like(theta) - 0.5
+        z_base_top = np.zeros_like(theta) - 0.5 + base_height
+        
+        ax.plot(x_base, y_base, z_base_bottom, 'k-', linewidth=2, alpha=0.5)
+        ax.plot(x_base, y_base, z_base_top, 'k-', linewidth=2, alpha=0.5)
+        
+        # Pan axis (vertical post)
+        ax.plot([0, 0], [0, 0], [-0.5, 0], 'b-', linewidth=3, label='Pan Axis')
+        
+        # Tilt arm (rotates with pan)
+        R_pan = self._rotation_matrix_z(pan)
+        tilt_arm = R_pan @ np.array([0.3, 0, 0])
+        ax.plot([0, tilt_arm[0]], [0, tilt_arm[1]], [0, tilt_arm[2]], 
+               'g-', linewidth=3, label='Tilt Arm')
+        
+        # Camera position (at end of tilt arm)
+        return tilt_arm
+    
+    def _draw_camera_view(self, ax, pan: float, tilt: float, camera_pos: np.ndarray):
+        """Draw the camera field of view cone"""
+        tip, corners = self._create_camera_cone()
+        
+        # Apply rotations: first tilt, then pan
+        R_pan = self._rotation_matrix_z(pan)
+        R_tilt = self._rotation_matrix_y(tilt)
+        R_combined = R_pan @ R_tilt
+        
+        # Transform cone
+        tip_world = camera_pos + R_combined @ tip
+        corners_world = [camera_pos + R_combined @ c for c in corners]
+        
+        # Draw cone edges
+        for corner in corners_world:
+            ax.plot([tip_world[0], corner[0]], 
+                   [tip_world[1], corner[1]], 
+                   [tip_world[2], corner[2]], 
+                   'c-', alpha=0.3, linewidth=1)
+        
+        # Draw base rectangle
+        base_points = corners_world + [corners_world[0]]
+        base_x = [p[0] for p in base_points]
+        base_y = [p[1] for p in base_points]
+        base_z = [p[2] for p in base_points]
+        ax.plot(base_x, base_y, base_z, 'c-', alpha=0.5, linewidth=1)
+        
+        # Fill cone faces with transparency
+        faces = [
+            [tip_world, corners_world[0], corners_world[1]],
+            [tip_world, corners_world[1], corners_world[2]],
+            [tip_world, corners_world[2], corners_world[3]],
+            [tip_world, corners_world[3], corners_world[0]],
+        ]
+        
+        poly = Poly3DCollection(faces, alpha=0.1, facecolor='cyan', edgecolor='none')
+        ax.add_collection3d(poly)
+        
+        return tip_world, corners_world
+    
+    def _draw_target(self, ax, tip_world: np.ndarray, corners_world: List[np.ndarray]):
+        """Draw target position in 3D space"""
+        if not self.has_target:
+            return
+        
+        # Map 2D image coordinates to 3D position on the FOV plane
+        # Assume normalized coordinates (-0.5 to 0.5)
+        norm_x = (self.target_x / 640.0) - 0.5  # Assuming 640 width
+        norm_y = (self.target_y / 480.0) - 0.5  # Assuming 480 height
+        
+        # Calculate target position on the FOV base
+        # Use bilinear interpolation on the cone base
+        center = np.mean(corners_world, axis=0)
+        
+        # Simple projection: map to cone base
+        right_vec = (corners_world[0] + corners_world[3]) / 2 - center
+        down_vec = (corners_world[2] + corners_world[3]) / 2 - center
+        
+        target_pos = center + norm_x * right_vec + norm_y * down_vec
+        
+        # Draw target marker
+        ax.scatter(*target_pos, c='red', s=200, marker='*', 
+                  edgecolors='yellow', linewidths=2, label='Target')
+        
+        # Draw line from camera to target
+        ax.plot([tip_world[0], target_pos[0]], 
+               [tip_world[1], target_pos[1]], 
+               [tip_world[2], target_pos[2]], 
+               'r--', linewidth=2, alpha=0.7, label='To Target')
+        
+        # Draw error vector in 3D
+        if abs(self.error_x) > 10 or abs(self.error_y) > 10:
+            error_scale = 0.5
+            error_vec = np.array([0, self.error_x * error_scale / 100, 
+                                 self.error_y * error_scale / 100])
+            error_end = target_pos + error_vec
+            ax.quiver(target_pos[0], target_pos[1], target_pos[2],
+                     error_vec[0], error_vec[1], error_vec[2],
+                     color='orange', arrow_length_ratio=0.3, linewidth=2,
+                     label='Error Vector')
+    
+    def _draw_trajectory(self, ax):
+        """Draw historical trajectory of pan/tilt angles"""
+        if len(self.pan_history) < 2:
+            return
+        
+        # Convert angle history to 3D positions
+        positions = []
+        for pan, tilt in zip(self.pan_history, self.tilt_history):
+            R_pan = self._rotation_matrix_z(pan)
+            R_tilt = self._rotation_matrix_y(tilt)
+            # Camera pointing direction
+            direction = R_pan @ R_tilt @ np.array([1.5, 0, 0])
+            positions.append(direction)
+        
+        positions = np.array(positions)
+        ax.plot(positions[:, 0], positions[:, 1], positions[:, 2],
+               'y-', alpha=0.5, linewidth=1, label='Trajectory')
+    
+    def _update_plot(self, frame):
+        """Update function for animation"""
+        with self.lock:
+            pan = self.pan_angle
+            tilt = self.tilt_angle
+            
+        self.ax.clear()
+        
+        # Set labels and title
+        self.ax.set_xlabel('X (Forward)', fontsize=10)
+        self.ax.set_ylabel('Y (Right)', fontsize=10)
+        self.ax.set_zlabel('Z (Up)', fontsize=10)
+        self.ax.set_title(f'Turret 3D View | Pan: {pan:.1f}° Tilt: {tilt:.1f}°', 
+                         fontsize=12, fontweight='bold')
+        
+        # Set axis limits
+        limit = 3
+        self.ax.set_xlim([-limit, limit])
+        self.ax.set_ylim([-limit, limit])
+        self.ax.set_zlim([-1, limit])
+        
+        # Draw grid
+        self.ax.grid(True, alpha=0.3)
+        
+        # Draw coordinate system origin
+        origin = np.array([0, 0, 0])
+        axis_length = 0.5
+        self.ax.quiver(0, 0, 0, axis_length, 0, 0, color='red', arrow_length_ratio=0.2, linewidth=2)
+        self.ax.quiver(0, 0, 0, 0, axis_length, 0, color='green', arrow_length_ratio=0.2, linewidth=2)
+        self.ax.quiver(0, 0, 0, 0, 0, axis_length, color='blue', arrow_length_ratio=0.2, linewidth=2)
+        
+        # Draw gimbal
+        camera_pos = self._draw_gimbal(self.ax, pan, tilt)
+        
+        # Draw camera view
+        tip_world, corners_world = self._draw_camera_view(self.ax, pan, tilt, camera_pos)
+        
+        # Draw target
+        self._draw_target(self.ax, tip_world, corners_world)
+        
+        # Draw trajectory
+        self._draw_trajectory(self.ax)
+        
+        # Set view angle
+        self.ax.view_init(elev=20, azim=45)
+        
+        # Add legend
+        self.ax.legend(loc='upper left', fontsize=8)
+        
+        return self.ax,
+    
+    def _run_visualization(self):
+        """Run the visualization loop"""
+        try:
+            # Create figure
+            self.fig = plt.figure(figsize=(10, 8))
+            self.ax = self.fig.add_subplot(111, projection='3d')
+            
+            # Set up animation
+            ani = FuncAnimation(self.fig, self._update_plot, interval=50, 
+                              blit=False, cache_frame_data=False)
+            
+            plt.tight_layout()
+            plt.show()
+            
+        except Exception as e:
+            print(f"3D Visualization error: {e}")
+        finally:
+            self.running = False
 
 
 class PIDController:
@@ -233,7 +529,7 @@ class YOLOGimbal:
                  movement_scale: float = 30.0, min_step: float = 1.0,
                  control_rate: float = 30.0,
                  invert_x: bool = False, invert_y: bool = False,
-                 swap_servos: bool = False):
+                 swap_servos: bool = False, enable_3d_viz: bool = False):
         self.camera_index = camera_index
         self.turret_port = turret_port
         self.target_class = target_class
@@ -247,12 +543,14 @@ class YOLOGimbal:
         self.invert_x = invert_x  # Invert horizontal movement
         self.invert_y = invert_y  # Invert vertical movement
         self.swap_servos = swap_servos  # Swap top and bottom servos
+        self.enable_3d_viz = enable_3d_viz  # Enable 3D visualization
         
         # Initialize components
         self.camera = None
         self.yolo = None
         self.turret = TurretController(turret_port)
         self.pid = PIDController(kp=kp, ki=ki, kd=kd, max_output=10.0)
+        self.visualizer = None
         
         # State
         self.running = False
@@ -329,6 +627,13 @@ class YOLOGimbal:
         self.turret.send_command("HOME", read_response=False)
         time.sleep(1)
         self.turret.update_status()
+        
+        # Initialize 3D visualizer if enabled
+        if self.enable_3d_viz:
+            print("Starting 3D visualization...")
+            self.visualizer = Turret3DVisualizer(history_length=200)
+            self.visualizer.start()
+            print("3D visualization started")
         
     def find_target_detection(self, detections) -> Optional[Tuple[float, float, float, float]]:
         """Find the best target detection (largest, highest confidence)"""
@@ -498,6 +803,18 @@ class YOLOGimbal:
                         else:
                             self.turret.move_to(target_bottom, target_top)
                         
+                        # Update 3D visualizer
+                        if self.visualizer:
+                            self.visualizer.update(
+                                pan=self.turret.bottom_pos,
+                                tilt=self.turret.top_pos,
+                                target_x=target_x,
+                                target_y=target_y,
+                                has_target=True,
+                                error_x=error_x_px,
+                                error_y=error_y_px
+                            )
+                        
                         # Better logging (FIX #13)
                         if abs(error_x_px) > 50:  # Significant horizontal error
                             direction = "RIGHT" if error_x_px > 0 else "LEFT"
@@ -522,6 +839,18 @@ class YOLOGimbal:
                     else:
                         cv2.putText(frame, "LOCKED", (10, 30), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        
+                        # Update visualizer even when locked
+                        if self.visualizer:
+                            self.visualizer.update(
+                                pan=self.turret.bottom_pos,
+                                tilt=self.turret.top_pos,
+                                target_x=target_x,
+                                target_y=target_y,
+                                has_target=True,
+                                error_x=error_x_px,
+                                error_y=error_y_px
+                            )
                     
                     self.last_control_time = current_time
                 else:
@@ -530,6 +859,14 @@ class YOLOGimbal:
                         self.pid.reset()
                     cv2.putText(frame, "NO TARGET", (10, 30), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                    
+                    # Update visualizer with no target
+                    if self.visualizer:
+                        self.visualizer.update(
+                            pan=self.turret.bottom_pos,
+                            tilt=self.turret.top_pos,
+                            has_target=False
+                        )
                 
                 # Calculate FPS properly (FIX #4)
                 self.frame_count += 1
@@ -686,6 +1023,10 @@ class YOLOGimbal:
         print("\nCleaning up...")
         self.running = False
         
+        if self.visualizer:
+            print("Stopping 3D visualization...")
+            self.visualizer.stop()
+        
         if self.turret:
             self.turret.send_command("HOME", read_response=False)
             self.turret.send_command("MOTOR1:0", read_response=False)
@@ -722,6 +1063,10 @@ Examples:
   python yolo_gimbal.py --camera 0 --turret COM3 --class person
   python yolo_gimbal.py --camera 1 --turret /dev/ttyUSB0 --class 0
   python yolo_gimbal.py --camera 0 --turret COM3 --class "bottle" --kp 0.8 --ki 0.02
+  
+  # With 3D visualization:
+  python yolo_gimbal.py --camera 0 --turret COM3 --3d-viz
+  python yolo_gimbal.py --camera 0 --turret COM3 --class person --viz
   
   # Fix flipped directions:
   python yolo_gimbal.py --camera 0 --turret COM3 --invert-x  # Flip horizontal
@@ -761,6 +1106,8 @@ Note: To find your camera index, run: python find_camera.py
                        help='Invert vertical movement direction')
     parser.add_argument('--swap-servos', action='store_true',
                        help='Swap top and bottom servos (if they are wired backwards)')
+    parser.add_argument('--3d-viz', '--viz', action='store_true', dest='enable_3d_viz',
+                       help='Enable 3D visualization of turret orientation and tracking')
     parser.add_argument('--list-ports', '-l', action='store_true',
                        help='List available serial ports')
     
@@ -791,7 +1138,8 @@ Note: To find your camera index, run: python find_camera.py
             control_rate=args.control_rate,
             invert_x=args.invert_x,
             invert_y=args.invert_y,
-            swap_servos=args.swap_servos
+            swap_servos=args.swap_servos,
+            enable_3d_viz=args.enable_3d_viz
         )
         
         gimbal.initialize()
