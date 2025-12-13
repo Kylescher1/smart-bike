@@ -27,7 +27,7 @@ print("Writing config file as")
 config = {
     "horizontal_lidar":
         {
-            "port": "/dev/ttyUSB1",
+            "port": "/dev/ttyUSB0",
             "baudrate" : 460800,
             "BUFFER_SIZE" : 600,
             # "orientation": np.quaternion(0.7071, 0, 0, -0.7071),#w,x,y,z
@@ -92,7 +92,7 @@ config = {
             "sensor_location":None,
             "who_to_run": "src.hal.BrakeRoutines.BrakeRoutines",
             "debug_mode":False,
-            "abs_enabled":True,
+            "abs_enabled":False,
             "chip_num": 4,
             "line_num": 11,
         },

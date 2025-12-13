@@ -173,7 +173,7 @@ class BrakeRoutines:
 
             # brake.set(1200)
        
-            self.brake.set_pulse_width(1200, check_stall=False)
+            self.brake.set_pulse_width(1100, check_stall=False)
             
             # sleep(2)
             
