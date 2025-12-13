@@ -118,11 +118,11 @@ class MultiCameraYOLO:
             camera_index = self.camera_indices[cam_id]
             print(f"Initializing {cam_id} camera (index {camera_index})...")
             
-            # Configure camera
+            # Configure camera (optimized for speed)
             config = CAMERA_CONFIG.copy()
             config.update({
-                "width": 640,
-                "height": 480,
+                "width": 640,   # Can reduce to 320 for even faster processing
+                "height": 480,  # Can reduce to 240 for even faster processing
                 "fps": 30,
                 "fourcc": "MJPG"
             })
@@ -137,12 +137,15 @@ class MultiCameraYOLO:
             
             if use_rknn:
                 print(f"  Using RKNN detector for {cam_id} camera")
+                # Use smaller input size for faster inference (416 is good balance)
+                # Can go down to 320 for even faster but less accurate
+                inference_size = 416  # Reduced from 640 for ~2x speedup
                 detector = RKNNYOLODetector(
                     name=f"{cam_id.title()}Detector",
                     camera=camera,
                     weights=str(model_path),
                     conf=self.conf_threshold,
-                    imgsz=640
+                    imgsz=inference_size
                 )
             else:
                 if str(model_path).endswith('.rknn'):

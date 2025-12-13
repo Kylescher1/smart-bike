@@ -56,6 +56,11 @@ def main():
     # STEP 5: Enable performance profiling
     ENABLE_PROFILING = True  # Set to False to disable timing measurements
     
+    # STEP 6: Speed optimization options
+    # - Using yolov8n.rknn (faster than yolo11n.rknn)
+    # - Inference size reduced to 416x416 (from 640x640) for ~2x speedup
+    # - For even faster: change inference_size to 320 in MultiCameraYOLO.py
+    
     # ============================================
     
     print(f"\nConfiguration:")
@@ -69,7 +74,7 @@ def main():
         turret = Turret(
             port=PORT,
             cameras=CAMERAS,
-            yolo_model='yolo11n.rknn',  # Using RKNN model for NPU acceleration
+            yolo_model='yolov8n.rknn',  # Using YOLOv8n RKNN model (faster than v11)
             conf_threshold=0.5,
             target_classes=TARGET_CLASSES,
             tracking_enabled=True
