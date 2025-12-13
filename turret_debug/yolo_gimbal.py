@@ -2206,6 +2206,8 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Disable TF03 LiDAR distance reading (use if sensor not connected)')
     parser.add_argument('--list-ports', '-l', action='store_true',
                        help='List available serial ports')
+
+    # Parse arguments
     
     args = parser.parse_args()
     
