@@ -1100,6 +1100,12 @@ class TurretController:
         self.command_interval = 0.05  # 20 Hz max command rate
         self.min_angle_change = 0.5  # Don't send if change < 0.5 degrees
         
+        # TF03 LiDAR distance tracking
+        self.distance_cm = None  # Current distance in cm
+        self.distance_available = False  # Whether LiDAR is available
+        self.last_distance_time = 0.0
+        self.distance_update_interval = 0.1  # Update distance every 100ms (10 Hz)
+        
         # Limits will be updated from Arduino on connect
         
     def connect(self) -> bool:
@@ -1177,6 +1183,64 @@ class TurretController:
                     except:
                         pass
     
+    def read_distance(self) -> Optional[float]:
+        """Read distance from TF03 LiDAR sensor
+        
+        Returns:
+            Distance in cm, or None if not available
+        """
+        # Rate limit distance reads
+        current_time = time.time()
+        if current_time - self.last_distance_time < self.distance_update_interval:
+            return self.distance_cm
+        
+        self.last_distance_time = current_time
+        
+        # Try to read distance from Arduino
+        # The Arduino should respond with "DISTANCE:XXX" or "Dist: XXX cm"
+        resp = self.send_command("DISTANCE", read_response=True)
+        if resp:
+            # Try multiple parsing formats
+            for line in resp.split('\n'):
+                # Format 1: "DISTANCE:XXX" or "OK: DISTANCE:XXX"
+                if 'DISTANCE:' in line:
+                    try:
+                        dist_str = line.split('DISTANCE:')[1].strip().split()[0]
+                        distance = float(dist_str)
+                        self.distance_cm = distance
+                        self.distance_available = True
+                        return distance
+                    except:
+                        pass
+                
+                # Format 2: "Dist: XXX cm" (from sensor reading)
+                elif 'Dist:' in line and 'cm' in line:
+                    try:
+                        dist_str = line.split('Dist:')[1].split('cm')[0].strip()
+                        distance = float(dist_str)
+                        self.distance_cm = distance
+                        self.distance_available = True
+                        return distance
+                    except:
+                        pass
+                
+                # Format 3: Just a number
+                elif line.strip().replace('.', '').replace('-', '').isdigit():
+                    try:
+                        distance = float(line.strip())
+                        if 0 < distance < 10000:  # Sanity check (0-100m range)
+                            self.distance_cm = distance
+                            self.distance_available = True
+                            return distance
+                    except:
+                        pass
+        
+        # If command not supported, mark as unavailable
+        if resp and ('ERROR' in resp or 'Unknown' in resp):
+            self.distance_available = False
+        
+        return self.distance_cm
+    
     def move_to(self, target_bottom: float, target_top: float, force: bool = False):
         """Move servos to absolute positions (FIX #7)
         
@@ -1233,7 +1297,7 @@ class YOLOGimbal:
                  swap_servos: bool = False, enable_3d_viz: bool = False,
                  use_rknn: bool = False, rknn_model: Optional[str] = None,
                  enable_error_plot: bool = False, enable_timing: bool = False,
-                 detection_imgsz: int = 640):
+                 detection_imgsz: int = 640, enable_distance: bool = True):
         self.camera_index = camera_index
         self.turret_port = turret_port
         self.target_class = target_class
@@ -1257,6 +1321,7 @@ class YOLOGimbal:
         self.enable_error_plot = enable_error_plot  # Enable error plotting
         self.enable_timing = enable_timing  # Enable timing profiling
         self.detection_imgsz = detection_imgsz  # Detection input size (lower = faster)
+        self.enable_distance = enable_distance  # Enable TF03 LiDAR distance reading
         
         # Initialize components
         self.camera = None
@@ -1581,6 +1646,11 @@ class YOLOGimbal:
                     self.turret.update_status()
                     status_update_counter = 0
                 
+                # Read distance from TF03 LiDAR (non-blocking with rate limiting)
+                distance_cm = None
+                if self.enable_distance:
+                    distance_cm = self.turret.read_distance()
+                
                 # Check if we should display this frame (for display FPS limiting)
                 dt_display = current_time - self.last_display_time
                 should_display_frame = self.disable_display == False and dt_display >= self.display_dt
@@ -1693,9 +1763,10 @@ class YOLOGimbal:
                         if abs(error_x_px) > 50:  # Significant horizontal error
                             direction = "RIGHT" if error_x_px > 0 else "LEFT"
                             move_dir = "RIGHT" if move_x > 0 else "LEFT"
+                            dist_info = f", Range={distance_cm:.1f}cm" if distance_cm is not None else ""
                             print(f"Target {direction} of center (error={error_x_px:.1f}px), "
                                   f"PID_out={output_x:.3f}, moving turret {move_dir} "
-                                  f"(move={move_x:.2f}deg, pos={self.turret.bottom_pos:.1f}°)")
+                                  f"(move={move_x:.2f}deg, pos={self.turret.bottom_pos:.1f}°{dist_info})")
                         
                         # Display info (only if displaying)
                         if should_display_frame:
@@ -1715,6 +1786,10 @@ class YOLOGimbal:
                         if should_display_frame:
                             cv2.putText(frame, "LOCKED", (10, 30), 
                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                            # Show distance even when locked
+                            if distance_cm is not None:
+                                cv2.putText(frame, f"Range: {distance_cm:.1f}cm", (10, 60), 
+                                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                         
                         # Update visualizer even when locked
                         if self.visualizer:
@@ -1790,6 +1865,12 @@ class YOLOGimbal:
                     display_start = self.profiler.start_timer('display')
                     cv2.putText(frame, f"FPS: {self.current_fps:.1f}", (10, frame.shape[0] - 10), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    
+                    # Display distance if available
+                    if distance_cm is not None and self.turret.distance_available:
+                        distance_text = f"Range: {distance_cm:.1f} cm ({distance_cm/100:.2f} m)"
+                        cv2.putText(frame, distance_text, (10, frame.shape[0] - 40), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     
                     # Show frame
                     cv2.imshow("YOLO Gimbal Tracking", frame)
@@ -2102,6 +2183,10 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Use RKNN hardware acceleration (Radxa Rock Pi 5B)')
     parser.add_argument('--rknn-model', type=str, default=None,
                        help='Path to RKNN model file (default: yolo/models/yolo11n.rknn)')
+    parser.add_argument('--enable-distance', action='store_true', default=True,
+                       help='Enable TF03 LiDAR distance reading (default: enabled)')
+    parser.add_argument('--disable-distance', action='store_true',
+                       help='Disable TF03 LiDAR distance reading (use if sensor not connected)')
     parser.add_argument('--list-ports', '-l', action='store_true',
                        help='List available serial ports')
     
@@ -2115,6 +2200,9 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
     target_class = args.target_class
     if target_class and target_class.isdigit():
         target_class = int(target_class)
+    
+    # Handle distance sensor flag
+    enable_distance = args.enable_distance and not args.disable_distance
     
     try:
         gimbal = YOLOGimbal(
@@ -2141,7 +2229,8 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
             rknn_model=args.rknn_model,
             enable_error_plot=args.enable_error_plot,
             enable_timing=args.enable_timing,
-            detection_imgsz=args.detection_imgsz
+            detection_imgsz=args.detection_imgsz,
+            enable_distance=enable_distance
         )
         
         gimbal.initialize()
