@@ -92,7 +92,7 @@ config = {
             "sensor_location":None,
             "who_to_run": "src.hal.BrakeRoutines.BrakeRoutines",
             "debug_mode":False,
-            "abs_enabled":True,
+            "abs_enabled":False,
             "chip_num": 4,
             "line_num": 11,
         },

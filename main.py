@@ -64,7 +64,10 @@ def simple_point2obsticle(data,k=10):
             k = min(k, norms.size)  # avoid overflow if <10 points
             if k == 0:
                 return None  # No points to process
-            idxs = np.argpartition(norms, k)[:k]  # unsorted K closest
+            if k < norms.size:
+                idxs = np.argpartition(norms, k)[:k]  # unsorted K closest
+            else:
+                idxs = np.arange(norms.size)  # take all points when k >= size
             timings['argpartition'] = (time.time() - t0) * 1000
 
             t0 = time.time()
@@ -149,7 +152,11 @@ def simple_obsticle_response(obsticle_arr,Peripherals,brake_state):
     # do we play sound?
 
     #do we activate breaks?
+<<<<<<< HEAD
     brake_mindist = 0.75# (m)
+=======
+    brake_mindist = 5.0# (m)
+>>>>>>> origin/rockpi
     if dist < brake_mindist:
         # Only engage brakes if not already engaged or running
         if 'Brakes' in Peripherals:
@@ -248,7 +255,7 @@ def filter_forward_cone(arr):
     # Define the forward cone: ±45° from positive y direction (90°)
     # This means angles between 45° and 135°
     # Keep points WITHIN this range
-    mask = (angles >= 45) & (angles <= 135)
+    mask = (angles >= 85) & (angles <= 95)
     
     # Filter the array to keep only points within the forward cone
     filtered_arr = arr[:, mask]
