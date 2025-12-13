@@ -24,6 +24,14 @@ if str(PROJECT_ROOT) not in sys.path:
 from yolo.live_demo import YOLODetector
 from src.hal.cam.Camera import Camera, CAMERA_CONFIG
 
+# Try to import RKNN detector
+try:
+    from yolo.rknn_detector import RKNNYOLODetector
+    RKNN_AVAILABLE = True
+except ImportError:
+    RKNN_AVAILABLE = False
+    RKNNYOLODetector = None
+
 
 @dataclass
 class Detection:
@@ -124,14 +132,29 @@ class MultiCameraYOLO:
             camera.open()
             self.cameras[cam_id] = camera
             
-            # Create YOLO detector
-            detector = YOLODetector(
-                name=f"{cam_id.title()}Detector",
-                camera=camera,
-                weights=str(model_path),
-                conf=self.conf_threshold,
-                imgsz=640
-            )
+            # Choose detector based on model file extension
+            use_rknn = str(model_path).endswith('.rknn') and RKNN_AVAILABLE
+            
+            if use_rknn:
+                print(f"  Using RKNN detector for {cam_id} camera")
+                detector = RKNNYOLODetector(
+                    name=f"{cam_id.title()}Detector",
+                    camera=camera,
+                    weights=str(model_path),
+                    conf=self.conf_threshold,
+                    imgsz=640
+                )
+            else:
+                if str(model_path).endswith('.rknn'):
+                    print(f"  Warning: RKNN model specified but RKNN not available. Falling back to Ultralytics.")
+                detector = YOLODetector(
+                    name=f"{cam_id.title()}Detector",
+                    camera=camera,
+                    weights=str(model_path),
+                    conf=self.conf_threshold,
+                    imgsz=640
+                )
+            
             detector.start()
             self.detectors[cam_id] = detector
             
@@ -168,7 +191,7 @@ class MultiCameraYOLO:
                     for det in result.detections:
                         # Filter by target classes if specified
                         if self.target_classes is not None:
-                            class_name = getattr(det, 'label', '').lower()
+                            class_name = getattr(det, 'label', getattr(det, 'class_name', '')).lower()
                             if not any(tc.lower() in class_name for tc in self.target_classes):
                                 continue
                         
@@ -179,8 +202,11 @@ class MultiCameraYOLO:
                         width = x2 - x1
                         height = y2 - y1
                         
+                        # Handle both YOLODetector (label) and RKNNYOLODetector (label) formats
+                        class_name = getattr(det, 'label', getattr(det, 'class_name', 'unknown'))
+                        
                         detections.append(Detection(
-                            class_name=getattr(det, 'label', 'unknown'),
+                            class_name=class_name,
                             class_id=getattr(det, 'class_id', -1),
                             confidence=getattr(det, 'confidence', 0.0),
                             bbox=(x1, y1, x2, y2),

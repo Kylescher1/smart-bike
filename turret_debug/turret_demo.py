@@ -69,7 +69,7 @@ def main():
         turret = Turret(
             port=PORT,
             cameras=CAMERAS,
-            yolo_model='yolo11n.pt',
+            yolo_model='yolo11n.rknn',  # Using RKNN model for NPU acceleration
             conf_threshold=0.5,
             target_classes=TARGET_CLASSES,
             tracking_enabled=True
