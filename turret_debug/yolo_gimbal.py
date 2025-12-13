@@ -592,6 +592,278 @@ class Turret3DVisualizer:
             self.running = False
 
 
+class ErrorPlotter:
+    """Real-time plotting of position errors, PID outputs, and servo positions for debugging"""
+    
+    def __init__(self, history_length: int = 500):
+        self.history_length = history_length
+        
+        # Data storage
+        self.time_history = deque(maxlen=history_length)
+        self.error_x_history = deque(maxlen=history_length)
+        self.error_y_history = deque(maxlen=history_length)
+        self.pid_output_x_history = deque(maxlen=history_length)
+        self.pid_output_y_history = deque(maxlen=history_length)
+        self.move_x_history = deque(maxlen=history_length)
+        self.move_y_history = deque(maxlen=history_length)
+        self.bottom_pos_history = deque(maxlen=history_length)
+        self.top_pos_history = deque(maxlen=history_length)
+        self.target_x_history = deque(maxlen=history_length)
+        self.target_y_history = deque(maxlen=history_length)
+        self.has_target_history = deque(maxlen=history_length)
+        
+        # Threading
+        self.running = False
+        self.thread = None
+        self.lock = threading.Lock()
+        
+        # Matplotlib figure and axes
+        self.fig = None
+        self.axes = None
+        
+        # Lazy-loaded matplotlib modules
+        self.plt = None
+        self.FuncAnimation = None
+        
+        # Start time for relative time tracking
+        self.start_time = None
+    
+    def _import_matplotlib(self):
+        """Lazy import matplotlib modules only when needed"""
+        if self.plt is None:
+            try:
+                import matplotlib
+                # Use TkAgg backend for threading compatibility and non-blocking operation
+                matplotlib.use('TkAgg')
+                import matplotlib.pyplot as plt
+                
+                # Enable interactive mode for non-blocking operation
+                plt.ion()
+                
+                self.plt = plt
+            except ImportError as e:
+                raise ImportError(
+                    f"Failed to import matplotlib modules. "
+                    f"This is required for error plotting. Error: {e}\n"
+                    f"Try: pip install matplotlib"
+                ) from e
+    
+    def start(self):
+        """Start the plotting in a separate thread"""
+        self.running = True
+        self.start_time = time.time()
+        self.thread = threading.Thread(target=self._run_plotting, daemon=True)
+        self.thread.start()
+    
+    def stop(self):
+        """Stop the plotting"""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=2.0)
+        if self.fig and self.plt:
+            try:
+                self.plt.close(self.fig)
+                self.plt.ioff()  # Turn off interactive mode
+            except:
+                pass
+    
+    def update(self, error_x_px: float, error_y_px: float,
+               pid_output_x: float, pid_output_y: float,
+               move_x: float, move_y: float,
+               bottom_pos: float, top_pos: float,
+               target_x: float = 0, target_y: float = 0,
+               has_target: bool = False):
+        """Update the plotting data"""
+        if self.start_time is None:
+            self.start_time = time.time()
+        
+        current_time = time.time() - self.start_time
+        
+        with self.lock:
+            self.time_history.append(current_time)
+            self.error_x_history.append(error_x_px)
+            self.error_y_history.append(error_y_px)
+            self.pid_output_x_history.append(pid_output_x)
+            self.pid_output_y_history.append(pid_output_y)
+            self.move_x_history.append(move_x)
+            self.move_y_history.append(move_y)
+            self.bottom_pos_history.append(bottom_pos)
+            self.top_pos_history.append(top_pos)
+            self.target_x_history.append(target_x if has_target else np.nan)
+            self.target_y_history.append(target_y if has_target else np.nan)
+            self.has_target_history.append(has_target)
+    
+    def _update_plot(self, frame=None):
+        """Update function for async plotting"""
+        if self.fig is None or self.axes is None:
+            return
+        
+        with self.lock:
+            if len(self.time_history) < 1:
+                return
+            
+            times = np.array(self.time_history)
+            error_x = np.array(self.error_x_history)
+            error_y = np.array(self.error_y_history)
+            pid_x = np.array(self.pid_output_x_history)
+            pid_y = np.array(self.pid_output_y_history)
+            move_x = np.array(self.move_x_history)
+            move_y = np.array(self.move_y_history)
+            bottom_pos = np.array(self.bottom_pos_history)
+            top_pos = np.array(self.top_pos_history)
+            target_x = np.array(self.target_x_history)
+            target_y = np.array(self.target_y_history)
+            has_target = np.array(self.has_target_history)
+        
+        # Clear axes
+        for ax in self.axes:
+            ax.clear()
+        
+        # Plot 1: Position Errors (pixels)
+        ax = self.axes[0]
+        ax.plot(times, error_x, 'r-', label='Error X (px)', linewidth=1.5, alpha=0.7)
+        ax.plot(times, error_y, 'b-', label='Error Y (px)', linewidth=1.5, alpha=0.7)
+        ax.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Error (pixels)')
+        ax.set_title('Position Error (X=Horizontal, Y=Vertical)')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        # Highlight large jumps (>50px change)
+        if len(error_x) > 1:
+            error_x_diff = np.abs(np.diff(error_x))
+            error_y_diff = np.abs(np.diff(error_y))
+            jump_threshold = 50
+            x_jumps = np.where(error_x_diff > jump_threshold)[0]
+            y_jumps = np.where(error_y_diff > jump_threshold)[0]
+            
+            for idx in x_jumps:
+                if idx < len(times) - 1:
+                    ax.axvline(x=times[idx], color='orange', linestyle=':', alpha=0.5, linewidth=1)
+            for idx in y_jumps:
+                if idx < len(times) - 1:
+                    ax.axvline(x=times[idx], color='purple', linestyle=':', alpha=0.5, linewidth=1)
+        
+        # Plot 2: PID Outputs
+        ax = self.axes[1]
+        ax.plot(times, pid_x, 'r-', label='PID Output X', linewidth=1.5, alpha=0.7)
+        ax.plot(times, pid_y, 'b-', label='PID Output Y', linewidth=1.5, alpha=0.7)
+        ax.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('PID Output (normalized)')
+        ax.set_title('PID Controller Outputs')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 3: Servo Movements (degrees)
+        ax = self.axes[2]
+        ax.plot(times, move_x, 'r-', label='Move X (deg)', linewidth=1.5, alpha=0.7)
+        ax.plot(times, move_y, 'b-', label='Move Y (deg)', linewidth=1.5, alpha=0.7)
+        ax.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Movement (degrees)')
+        ax.set_title('Servo Movement Commands')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        # Highlight large movements (>5 degrees)
+        if len(move_x) > 0:
+            large_moves_x = np.where(np.abs(move_x) > 5)[0]
+            large_moves_y = np.where(np.abs(move_y) > 5)[0]
+            for idx in large_moves_x:
+                ax.axvline(x=times[idx], color='red', linestyle=':', alpha=0.3, linewidth=1)
+            for idx in large_moves_y:
+                ax.axvline(x=times[idx], color='blue', linestyle=':', alpha=0.3, linewidth=1)
+        
+        # Plot 4: Servo Positions
+        ax = self.axes[3]
+        ax.plot(times, bottom_pos, 'r-', label='Bottom Servo (pan)', linewidth=1.5, alpha=0.7)
+        ax.plot(times, top_pos, 'b-', label='Top Servo (tilt)', linewidth=1.5, alpha=0.7)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Position (degrees)')
+        ax.set_title('Servo Positions')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 5: Target Position (if available)
+        ax = self.axes[4]
+        if np.any(has_target):
+            valid_mask = ~np.isnan(target_x)
+            if np.any(valid_mask):
+                ax.plot(times[valid_mask], target_x[valid_mask], 'r-', label='Target X', linewidth=1.5, alpha=0.7, marker='o', markersize=2)
+            valid_mask = ~np.isnan(target_y)
+            if np.any(valid_mask):
+                ax.plot(times[valid_mask], target_y[valid_mask], 'b-', label='Target Y', linewidth=1.5, alpha=0.7, marker='o', markersize=2)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Position (pixels)')
+        ax.set_title('Target Position in Frame')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        # Plot 6: Error Magnitude
+        ax = self.axes[5]
+        error_magnitude = np.sqrt(error_x**2 + error_y**2)
+        ax.plot(times, error_magnitude, 'g-', label='Error Magnitude', linewidth=1.5, alpha=0.7)
+        ax.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Error Magnitude (pixels)')
+        ax.set_title('Total Error Magnitude')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        # Adjust layout
+        self.plt.tight_layout()
+        
+        # Draw the figure (non-blocking)
+        self.fig.canvas.draw_idle()
+    
+    def _run_plotting(self):
+        """Run the plotting loop in async thread"""
+        try:
+            # Import matplotlib modules (lazy loading)
+            self._import_matplotlib()
+            
+            # Create figure with subplots
+            self.fig, self.axes = self.plt.subplots(3, 2, figsize=(14, 10))
+            self.axes = self.axes.flatten()
+            
+            self.plt.tight_layout()
+            self.fig.show()
+            
+            # Async update loop - runs independently without blocking
+            update_interval = 0.1  # Update every 100ms
+            while self.running:
+                try:
+                    # Update plots
+                    self._update_plot(None)
+                    
+                    # Non-blocking pause to allow GUI to process events
+                    self.plt.pause(update_interval)
+                    
+                    # Check if window is still open
+                    if not self.plt.get_fignums():
+                        break
+                        
+                except Exception as e:
+                    # Continue running even if update fails
+                    if self.running:
+                        print(f"Error plotter update error: {e}")
+                    time.sleep(update_interval)
+            
+        except Exception as e:
+            print(f"Error Plotting error: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.running = False
+            if self.fig and self.plt:
+                try:
+                    self.plt.close(self.fig)
+                except:
+                    pass
+
+
 class PIDController:
     """PID controller for servo positioning"""
     
@@ -800,7 +1072,8 @@ class YOLOGimbal:
                  disable_display: bool = False,
                  invert_x: bool = False, invert_y: bool = False,
                  swap_servos: bool = False, enable_3d_viz: bool = False,
-                 use_rknn: bool = False, rknn_model: Optional[str] = None):
+                 use_rknn: bool = False, rknn_model: Optional[str] = None,
+                 enable_error_plot: bool = False):
         self.camera_index = camera_index
         self.turret_port = turret_port
         self.target_class = target_class
@@ -821,6 +1094,7 @@ class YOLOGimbal:
         self.enable_3d_viz = enable_3d_viz  # Enable 3D visualization
         self.use_rknn = use_rknn  # Use RKNN acceleration
         self.rknn_model = rknn_model  # Path to RKNN model
+        self.enable_error_plot = enable_error_plot  # Enable error plotting
         
         # Initialize components
         self.camera = None
@@ -829,6 +1103,7 @@ class YOLOGimbal:
         self.turret = TurretController(turret_port)
         self.pid = PIDController(kp=kp, ki=ki, kd=kd, max_output=5.0)  # Reduced from 10.0 for smoother movement
         self.visualizer = None
+        self.error_plotter = None
         
         # State
         self.running = False
@@ -939,6 +1214,13 @@ class YOLOGimbal:
             self.visualizer = Turret3DVisualizer(history_length=200)
             self.visualizer.start()
             print("3D visualization started")
+        
+        # Initialize error plotter if enabled
+        if self.enable_error_plot:
+            print("Starting error plotting...")
+            self.error_plotter = ErrorPlotter(history_length=500)
+            self.error_plotter.start()
+            print("Error plotting started")
         
     def find_target_detection(self, detections) -> Optional[Tuple[float, float, float, float]]:
         """Find the best target detection (largest, highest confidence)"""
@@ -1136,6 +1418,22 @@ class YOLOGimbal:
                                 error_y=error_y_px
                             )
                         
+                        # Update error plotter
+                        if self.error_plotter:
+                            self.error_plotter.update(
+                                error_x_px=error_x_px,
+                                error_y_px=error_y_px,
+                                pid_output_x=output_x,
+                                pid_output_y=output_y,
+                                move_x=move_x,
+                                move_y=move_y,
+                                bottom_pos=self.turret.bottom_pos,
+                                top_pos=self.turret.top_pos,
+                                target_x=target_x,
+                                target_y=target_y,
+                                has_target=True
+                            )
+                        
                         # Better logging (FIX #13)
                         if abs(error_x_px) > 50:  # Significant horizontal error
                             direction = "RIGHT" if error_x_px > 0 else "LEFT"
@@ -1174,6 +1472,22 @@ class YOLOGimbal:
                                 error_x=error_x_px,
                                 error_y=error_y_px
                             )
+                        
+                        # Update error plotter even when locked
+                        if self.error_plotter:
+                            self.error_plotter.update(
+                                error_x_px=error_x_px,
+                                error_y_px=error_y_px,
+                                pid_output_x=0.0,  # No movement when locked
+                                pid_output_y=0.0,
+                                move_x=0.0,
+                                move_y=0.0,
+                                bottom_pos=self.turret.bottom_pos,
+                                top_pos=self.turret.top_pos,
+                                target_x=target_x,
+                                target_y=target_y,
+                                has_target=True
+                            )
                     
                     self.last_control_time = current_time
                 else:
@@ -1189,6 +1503,22 @@ class YOLOGimbal:
                         self.visualizer.update(
                             pan=self.turret.bottom_pos,
                             tilt=self.turret.top_pos,
+                            has_target=False
+                        )
+                    
+                    # Update error plotter with no target
+                    if self.error_plotter:
+                        self.error_plotter.update(
+                            error_x_px=0.0,
+                            error_y_px=0.0,
+                            pid_output_x=0.0,
+                            pid_output_y=0.0,
+                            move_x=0.0,
+                            move_y=0.0,
+                            bottom_pos=self.turret.bottom_pos,
+                            top_pos=self.turret.top_pos,
+                            target_x=0.0,
+                            target_y=0.0,
                             has_target=False
                         )
                 
@@ -1366,6 +1696,10 @@ class YOLOGimbal:
             print("Stopping 3D visualization...")
             self.visualizer.stop()
         
+        if self.error_plotter:
+            print("Stopping error plotting...")
+            self.error_plotter.stop()
+        
         if self.turret:
             self.turret.send_command("HOME", read_response=False)
             self.turret.send_command("MOTOR1:0", read_response=False)
@@ -1414,6 +1748,10 @@ Examples:
   # With 3D visualization:
   python yolo_gimbal.py --camera 0 --turret COM3 --3d-viz
   python yolo_gimbal.py --camera 0 --turret COM3 --class person --viz
+  
+  # With error plotting (for debugging large jumps):
+  python yolo_gimbal.py --camera 0 --turret COM3 --error-plot
+  python yolo_gimbal.py --camera 0 --turret COM3 --rknn --error-plot --class person
   
   # Tuning movement (if too fast/jerky):
   python yolo_gimbal.py --camera 0 --turret COM3 --movement-scale 10  # Slower
@@ -1479,6 +1817,8 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Swap top and bottom servos (if they are wired backwards)')
     parser.add_argument('--3d-viz', '--viz', action='store_true', dest='enable_3d_viz',
                        help='Enable 3D visualization of turret orientation and tracking')
+    parser.add_argument('--error-plot', action='store_true', dest='enable_error_plot',
+                       help='Enable real-time error plotting for debugging (shows position errors, PID outputs, servo movements)')
     parser.add_argument('--rknn', action='store_true',
                        help='Use RKNN hardware acceleration (Radxa Rock Pi 5B)')
     parser.add_argument('--rknn-model', type=str, default=None,
@@ -1519,7 +1859,8 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
             swap_servos=args.swap_servos,
             enable_3d_viz=args.enable_3d_viz,
             use_rknn=args.rknn,
-            rknn_model=args.rknn_model
+            rknn_model=args.rknn_model,
+            enable_error_plot=args.enable_error_plot
         )
         
         gimbal.initialize()
