@@ -4,6 +4,7 @@ YOLO-Based Automatic Camera Gimbal
 Tracks detected objects and keeps them centered using PID servo control
 
 Usage:
+/home/radxa/smart-bike/venv/bin/python /home/radxa/smart-bike/turret_debug/yolo_gimbal.py --camera 5 --turret /dev/ttyUSB0 --rknn --invert-y --class person --kp 0.25 --ki 0.1  --kd 0.1 --deadzone 50
     python yolo_gimbal.py --camera 0 --turret COM3 --class person
     python yolo_gimbal.py --camera 1 --turret /dev/ttyUSB0 --class 0
     python yolo_gimbal.py --camera 0 --turret COM3 --3d-viz  # With 3D visualization
