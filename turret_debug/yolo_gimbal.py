@@ -1226,6 +1226,7 @@ class YOLOGimbal:
                  kp: float = 0.3, ki: float = 0.005, kd: float = 0.05,
                  deadzone: float = 15.0, deadzone_degrees: float = 0.5,
                  movement_scale: float = 15.0, min_step: float = 0.5,
+                 max_movement: float = 10.0,
                  control_rate: float = 30.0,
                  camera_fps: float = 30.0, display_fps: Optional[float] = None,
                  disable_display: bool = False,
@@ -1242,6 +1243,7 @@ class YOLOGimbal:
         self.deadzone_degrees = deadzone_degrees  # Degrees - minimum movement (FIX #12)
         self.movement_scale = movement_scale  # Scale for normalized error to degrees (FIX #3)
         self.min_step = min_step  # Minimum step to overcome deadband (FIX #2)
+        self.max_movement = max_movement  # Maximum movement per command (degrees) - safety limit
         self.control_rate = control_rate  # Control loop rate in Hz (FIX #11)
         self.control_dt = 1.0 / control_rate  # Fixed dt for PID
         self.camera_fps = camera_fps  # Camera FPS setting
@@ -1485,6 +1487,7 @@ class YOLOGimbal:
         print(f"PID gains: Kp={self.pid.kp}, Ki={self.pid.ki}, Kd={self.pid.kd}")
         print(f"Deadzone: {self.deadzone}px, {self.deadzone_degrees}°")
         print(f"Movement scale: {self.movement_scale} (lower = smoother)")
+        print(f"Max movement: {self.max_movement}° per command (safety limit)")
         print(f"Control rate: {self.control_rate} Hz")
         print(f"Camera FPS: {self.camera_fps} Hz")
         if not self.disable_display:
@@ -1640,6 +1643,17 @@ class YOLOGimbal:
                             move_x = 0
                         if abs(move_y) < self.deadzone_degrees:
                             move_y = 0
+                        
+                        # Clamp movements to maximum allowed (safety filter)
+                        original_move_x = move_x
+                        original_move_y = move_y
+                        move_x = np.clip(move_x, -self.max_movement, self.max_movement)
+                        move_y = np.clip(move_y, -self.max_movement, self.max_movement)
+                        
+                        # Log if movement was clamped (for debugging)
+                        if abs(original_move_x) > self.max_movement or abs(original_move_y) > self.max_movement:
+                            print(f"WARNING: Movement clamped! Requested: X={original_move_x:.2f}° Y={original_move_y:.2f}°, "
+                                  f"Limited to: X={move_x:.2f}° Y={move_y:.2f}° (max={self.max_movement}°)")
                         
                         # Calculate target absolute positions (FIX #7)
                         target_bottom = self.turret.bottom_pos + move_x
@@ -2030,6 +2044,7 @@ Examples:
   python yolo_gimbal.py --camera 0 --turret COM3 --movement-scale 10  # Slower
   python yolo_gimbal.py --camera 0 --turret COM3 --kp 0.2  # Less aggressive
   python yolo_gimbal.py --camera 0 --turret COM3 --deadzone 20  # Less sensitive
+  python yolo_gimbal.py --camera 0 --turret COM3 --max-movement 5  # Limit large jumps (safety)
   
   # Tuning movement (if too slow/sluggish):
   python yolo_gimbal.py --camera 0 --turret COM3 --movement-scale 25  # Faster
@@ -2076,6 +2091,8 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Movement scale factor (default: 15.0, lower = slower/smoother)')
     parser.add_argument('--min-step', type=float, default=0.5,
                        help='Minimum step size to overcome servo deadband (default: 0.5)')
+    parser.add_argument('--max-movement', type=float, default=10.0,
+                       help='Maximum movement per command in degrees (default: 10.0, safety limit to prevent large jumps)')
     parser.add_argument('--control-rate', type=float, default=30.0,
                        help='Control loop rate in Hz (default: 30.0, higher = faster tracking)')
     parser.add_argument('--camera-fps', type=float, default=30.0,
@@ -2129,6 +2146,7 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
             deadzone_degrees=args.deadzone_degrees,
             movement_scale=args.movement_scale,
             min_step=args.min_step,
+            max_movement=args.max_movement,
             control_rate=args.control_rate,
             camera_fps=args.camera_fps,
             display_fps=args.display_fps,
