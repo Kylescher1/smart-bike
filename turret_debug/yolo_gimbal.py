@@ -7,6 +7,7 @@ Usage:
     python yolo_gimbal.py --camera 0 --turret COM3 --class person
     python yolo_gimbal.py --camera 1 --turret /dev/ttyUSB0 --class 0
     python yolo_gimbal.py --camera 0 --turret COM3 --3d-viz  # With 3D visualization
+    e$ /home/radxa/smart-bike/venv/bin/python /home/radxa/smart-bike/turret_debug/yolo_gimbal.py --camera 5 --turret /dev/ttyUSB0 --rknn --invert-y --class person --kp 0.3 --ki 0.9 --kd 0.01
 """
 
 import serial
@@ -795,6 +796,8 @@ class YOLOGimbal:
                  deadzone: float = 15.0, deadzone_degrees: float = 0.5,
                  movement_scale: float = 15.0, min_step: float = 0.5,
                  control_rate: float = 30.0,
+                 camera_fps: float = 30.0, display_fps: Optional[float] = None,
+                 disable_display: bool = False,
                  invert_x: bool = False, invert_y: bool = False,
                  swap_servos: bool = False, enable_3d_viz: bool = False,
                  use_rknn: bool = False, rknn_model: Optional[str] = None):
@@ -808,6 +811,10 @@ class YOLOGimbal:
         self.min_step = min_step  # Minimum step to overcome deadband (FIX #2)
         self.control_rate = control_rate  # Control loop rate in Hz (FIX #11)
         self.control_dt = 1.0 / control_rate  # Fixed dt for PID
+        self.camera_fps = camera_fps  # Camera FPS setting
+        self.display_fps = display_fps if display_fps is not None else min(30.0, control_rate)  # Display FPS (default: min of 30 or control_rate)
+        self.display_dt = 1.0 / self.display_fps if self.display_fps > 0 else 0
+        self.disable_display = disable_display  # Disable display for maximum FPS
         self.invert_x = invert_x  # Invert horizontal movement
         self.invert_y = invert_y  # Invert vertical movement
         self.swap_servos = swap_servos  # Swap top and bottom servos
@@ -846,7 +853,7 @@ class YOLOGimbal:
         camera_config.update({
             "width": 640,
             "height": 480,
-            "fps": 30,
+            "fps": int(self.camera_fps),
             "fourcc": "MJPG"
         })
         
@@ -994,10 +1001,17 @@ class YOLOGimbal:
         print(f"PID gains: Kp={self.pid.kp}, Ki={self.pid.ki}, Kd={self.pid.kd}")
         print(f"Deadzone: {self.deadzone}px, {self.deadzone_degrees}°")
         print(f"Movement scale: {self.movement_scale} (lower = smoother)")
-        print(f"Control rate: {self.control_rate} Hz\n")
+        print(f"Control rate: {self.control_rate} Hz")
+        print(f"Camera FPS: {self.camera_fps} Hz")
+        if not self.disable_display:
+            print(f"Display FPS: {self.display_fps} Hz")
+        else:
+            print("Display: DISABLED (maximum performance)")
+        print()
         
         self.last_control_time = time.time()
         self.last_fps_time = time.time()
+        self.last_display_time = time.time()
         no_target_count = 0
         status_update_counter = 0
         
@@ -1029,33 +1043,40 @@ class YOLOGimbal:
                         continue
                     target = self.find_target_detection(result.detections)
                 
-                # Periodic status re-sync (FIX #8)
+                # Periodic status re-sync (FIX #8) - adaptive based on control rate
                 status_update_counter += 1
-                if status_update_counter >= 30:  # Every 30 frames (~1 sec at 30Hz)
+                status_update_interval = max(10, int(self.control_rate))  # Update every ~1 second
+                if status_update_counter >= status_update_interval:
                     self.turret.update_status()
                     status_update_counter = 0
                 
-                # Draw center crosshair
-                cv2.line(frame, (self.center_x - 20, self.center_y), 
-                        (self.center_x + 20, self.center_y), (0, 255, 0), 2)
-                cv2.line(frame, (self.center_x, self.center_y - 20), 
-                        (self.center_x, self.center_y + 20), (0, 255, 0), 2)
+                # Check if we should display this frame (for display FPS limiting)
+                dt_display = current_time - self.last_display_time
+                should_display_frame = self.disable_display == False and dt_display >= self.display_dt
+                
+                # Draw center crosshair (only if displaying)
+                if should_display_frame:
+                    cv2.line(frame, (self.center_x - 20, self.center_y), 
+                            (self.center_x + 20, self.center_y), (0, 255, 0), 2)
+                    cv2.line(frame, (self.center_x, self.center_y - 20), 
+                            (self.center_x, self.center_y + 20), (0, 255, 0), 2)
                 
                 if target is not None:
                     target_x, target_y, width, height = target
                     no_target_count = 0
                     
-                    # Draw target bounding box
-                    x1 = int(target_x - width/2)
-                    y1 = int(target_y - height/2)
-                    x2 = int(target_x + width/2)
-                    y2 = int(target_y + height/2)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                    cv2.circle(frame, (int(target_x), int(target_y)), 5, (0, 0, 255), -1)
-                    
-                    # Draw line from center to target
-                    cv2.line(frame, (self.center_x, self.center_y), 
-                            (int(target_x), int(target_y)), (255, 0, 0), 2)
+                    # Draw target bounding box (only if displaying)
+                    if should_display_frame:
+                        x1 = int(target_x - width/2)
+                        y1 = int(target_y - height/2)
+                        x2 = int(target_x + width/2)
+                        y2 = int(target_y + height/2)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                        cv2.circle(frame, (int(target_x), int(target_y)), 5, (0, 0, 255), -1)
+                        
+                        # Draw line from center to target
+                        cv2.line(frame, (self.center_x, self.center_y), 
+                                (int(target_x), int(target_y)), (255, 0, 0), 2)
                     
                     # Calculate error (FIX #3 - now returns pixels and normalized)
                     error_x_px, error_y_px, error_x_norm, error_y_norm = self.calculate_error(target_x, target_y)
@@ -1123,22 +1144,24 @@ class YOLOGimbal:
                                   f"PID_out={output_x:.3f}, moving turret {move_dir} "
                                   f"(move={move_x:.2f}deg, pos={self.turret.bottom_pos:.1f}°)")
                         
-                        # Display info
-                        limit_text = ""
-                        if at_limit_x:
-                            limit_text += " [X LIMIT]"
-                        if at_limit_y:
-                            limit_text += " [Y LIMIT]"
-                        
-                        cv2.putText(frame, f"Error: X={error_x_px:.1f}px Y={error_y_px:.1f}px", 
-                                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                        cv2.putText(frame, f"Move: X={move_x:.2f}deg Y={move_y:.2f}deg{limit_text}", 
-                                   (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                        cv2.putText(frame, f"Pos: Bottom={self.turret.bottom_pos:.1f}deg Top={self.turret.top_pos:.1f}deg", 
-                                   (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                        # Display info (only if displaying)
+                        if should_display_frame:
+                            limit_text = ""
+                            if at_limit_x:
+                                limit_text += " [X LIMIT]"
+                            if at_limit_y:
+                                limit_text += " [Y LIMIT]"
+                            
+                            cv2.putText(frame, f"Error: X={error_x_px:.1f}px Y={error_y_px:.1f}px", 
+                                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                            cv2.putText(frame, f"Move: X={move_x:.2f}deg Y={move_y:.2f}deg{limit_text}", 
+                                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                            cv2.putText(frame, f"Pos: Bottom={self.turret.bottom_pos:.1f}deg Top={self.turret.top_pos:.1f}deg", 
+                                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                     else:
-                        cv2.putText(frame, "LOCKED", (10, 30), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        if should_display_frame:
+                            cv2.putText(frame, "LOCKED", (10, 30), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                         
                         # Update visualizer even when locked
                         if self.visualizer:
@@ -1157,8 +1180,9 @@ class YOLOGimbal:
                     no_target_count += 1
                     if no_target_count > 30:  # Reset PID after 1 second of no target
                         self.pid.reset()
-                    cv2.putText(frame, "NO TARGET", (10, 30), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                    if should_display_frame:
+                        cv2.putText(frame, "NO TARGET", (10, 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                     
                     # Update visualizer with no target
                     if self.visualizer:
@@ -1176,14 +1200,17 @@ class YOLOGimbal:
                     self.frame_count = 0
                     self.last_fps_time = current_time
                 
-                cv2.putText(frame, f"FPS: {self.current_fps:.1f}", (10, frame.shape[0] - 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                # Display frame if enabled and enough time has passed for display FPS
+                if should_display_frame:
+                    cv2.putText(frame, f"FPS: {self.current_fps:.1f}", (10, frame.shape[0] - 10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    
+                    # Show frame
+                    cv2.imshow("YOLO Gimbal Tracking", frame)
+                    self.last_display_time = current_time
                 
-                # Show frame
-                cv2.imshow("YOLO Gimbal Tracking", frame)
-                
-                # Handle keys
-                key = cv2.waitKey(1) & 0xFF
+                # Handle keys (always check, even if display is disabled)
+                key = cv2.waitKey(1) & 0xFF if not self.disable_display else -1
                 if key == ord('q'):
                     break
                 elif key == ord('r'):
@@ -1402,8 +1429,16 @@ Examples:
   python yolo_gimbal.py --camera 0 --turret COM3 --invert-y  # Flip vertical
   python yolo_gimbal.py --camera 0 --turret COM3 --swap-servos  # Swap top/bottom
   
+  # Increase FPS (performance optimization):
+  python yolo_gimbal.py --camera 0 --turret COM3 --rknn --control-rate 60  # 60 Hz control loop
+  python yolo_gimbal.py --camera 0 --turret COM3 --rknn --camera-fps 60  # 60 FPS camera capture
+  python yolo_gimbal.py --camera 0 --turret COM3 --rknn --control-rate 60 --camera-fps 60  # Both
+  python yolo_gimbal.py --camera 0 --turret COM3 --rknn --disable-display  # Max FPS (no display)
+  python yolo_gimbal.py --camera 0 --turret COM3 --rknn --display-fps 15  # Lower display FPS to save CPU
+  
 Note: RKNN requires rknnlite installed (Rock Pi 5B)
       To find your camera index, run: python find_camera.py
+      Higher FPS requires faster hardware and may reduce tracking stability
         """
     )
     parser.add_argument('--camera', '-c', type=int, required=True,
@@ -1429,7 +1464,13 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
     parser.add_argument('--min-step', type=float, default=0.5,
                        help='Minimum step size to overcome servo deadband (default: 0.5)')
     parser.add_argument('--control-rate', type=float, default=30.0,
-                       help='Control loop rate in Hz (default: 30.0)')
+                       help='Control loop rate in Hz (default: 30.0, higher = faster tracking)')
+    parser.add_argument('--camera-fps', type=float, default=30.0,
+                       help='Camera FPS setting (default: 30.0, increase for higher capture rate)')
+    parser.add_argument('--display-fps', type=float, default=None,
+                       help='Display FPS limit (default: min(30, control-rate), set lower to reduce CPU usage)')
+    parser.add_argument('--disable-display', action='store_true',
+                       help='Disable video display for maximum FPS (detection still runs at full speed)')
     parser.add_argument('--invert-x', action='store_true',
                        help='Invert horizontal movement direction')
     parser.add_argument('--invert-y', action='store_true',
@@ -1470,6 +1511,9 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
             movement_scale=args.movement_scale,
             min_step=args.min_step,
             control_rate=args.control_rate,
+            camera_fps=args.camera_fps,
+            display_fps=args.display_fps,
+            disable_display=args.disable_display,
             invert_x=args.invert_x,
             invert_y=args.invert_y,
             swap_servos=args.swap_servos,
