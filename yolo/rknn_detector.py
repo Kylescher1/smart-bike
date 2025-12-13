@@ -160,9 +160,25 @@ def post_process_yolov8(input_data, conf_threshold=0.25, iou_threshold=0.45, img
         scores.append(np.ones_like(input_data[pair_per_branch * i + 1][:, :1, :, :], dtype=np.float32))
     
     def sp_flatten(_in):
-        ch = _in.shape[1]
-        _in = _in.transpose(0, 2, 3, 1)
-        return _in.reshape(-1, ch)
+        """Flatten spatial dimensions while preserving channels."""
+        if len(_in.shape) == 4:
+            # Shape: (batch, channels, height, width)
+            ch = _in.shape[1]
+            _in = _in.transpose(0, 2, 3, 1)  # (batch, height, width, channels)
+            return _in.reshape(-1, ch)
+        elif len(_in.shape) == 3:
+            # Already flattened or different format
+            # Try to reshape to (batch, channels, spatial)
+            if _in.shape[0] == 1:
+                # (batch, channels, spatial) -> flatten spatial
+                ch = _in.shape[1]
+                return _in.reshape(-1, ch)
+            else:
+                # Assume (spatial, channels) or similar
+                return _in.reshape(-1, _in.shape[-1])
+        else:
+            # Already 2D or unexpected shape
+            return _in.reshape(-1, _in.shape[-1])
     
     boxes = [sp_flatten(_v) for _v in boxes]
     classes_conf = [sp_flatten(_v) for _v in classes_conf]
@@ -213,21 +229,36 @@ def post_process_yolov8(input_data, conf_threshold=0.25, iou_threshold=0.45, img
     return boxes, classes, scores
 
 
-def box_process_yolov8(box_output, img_size):
-    """Process YOLOv8 box output."""
-    h, w = img_size
-    box_output = box_output.transpose(0, 2, 3, 1)
-    box_output = box_output.reshape(-1, 4)
+def dfl(position):
+    """Distribution Focal Loss (DFL) for YOLOv8/v11 box decoding."""
+    n, c, h, w = position.shape
+    p_num = 4
+    mc = c // p_num
+    x = position.reshape(n, p_num, mc, h, w)
+    # Softmax
+    exp_x = np.exp(x - np.max(x, axis=2, keepdims=True))
+    softmax_x = exp_x / np.sum(exp_x, axis=2, keepdims=True)
+    # Weighted sum
+    acc_metrix = np.arange(mc).reshape(1, 1, mc, 1, 1).astype(np.float32)
+    y = np.sum(softmax_x * acc_metrix, axis=2)
+    return y
+
+
+def box_process_yolov8(position, img_size=(640, 640)):
+    """Process YOLOv8/v11 box outputs."""
+    grid_h, grid_w = position.shape[2:4]
+    col, row = np.meshgrid(np.arange(0, grid_w), np.arange(0, grid_h))
+    col = col.reshape(1, 1, grid_h, grid_w)
+    row = row.reshape(1, 1, grid_h, grid_w)
+    grid = np.concatenate((col, row), axis=1)
+    stride = np.array([img_size[1] // grid_h, img_size[0] // grid_w]).reshape(1, 2, 1, 1)
     
-    # Convert from normalized [x_center, y_center, w, h] to pixel coordinates
-    box_output[:, 0] = box_output[:, 0] * w
-    box_output[:, 1] = box_output[:, 1] * h
-    box_output[:, 2] = box_output[:, 2] * w
-    box_output[:, 3] = box_output[:, 3] * h
+    position = dfl(position)
+    box_xy = grid + 0.5 - position[:, 0:2, :, :]
+    box_xy2 = grid + 0.5 + position[:, 2:4, :, :]
+    xyxy = np.concatenate((box_xy * stride, box_xy2 * stride), axis=1)
     
-    # Convert to [x1, y1, x2, y2]
-    boxes = xywh2xyxy(box_output)
-    return boxes.reshape(1, -1, 4)
+    return xyxy
 
 
 class RKNNYOLODetector:
@@ -350,8 +381,19 @@ class RKNNYOLODetector:
                 outputs = self.rknn.inference([img_input])
                 inference_time = (time.time() - inference_start) * 1000  # ms
                 
+                # Debug: print output shapes on first run
+                if not hasattr(self, '_debug_printed'):
+                    print(f"[{self.name}] RKNN output shapes: {[out.shape for out in outputs]}")
+                    print(f"[{self.name}] Number of outputs: {len(outputs)}")
+                    self._debug_printed = True
+                
                 # Post-process
-                boxes, classes, scores = post_process_yolov8(outputs, self.conf, 0.45, (self.imgsz, self.imgsz))
+                try:
+                    boxes, classes, scores = post_process_yolov8(outputs, self.conf, 0.45, (self.imgsz, self.imgsz))
+                except Exception as e:
+                    print(f"[{self.name}] Post-processing error: {e}")
+                    print(f"[{self.name}] Output shapes: {[out.shape for out in outputs]}")
+                    raise
                 
                 # Convert to Detection objects
                 detections = []
