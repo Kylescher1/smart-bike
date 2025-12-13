@@ -20,6 +20,7 @@
   - GET_LIMITS: Print current limits
   - MOTOR1:<speed>: Set motor 1 speed (0-255)
   - MOTOR2:<speed>: Set motor 2 speed (0-255)
+  - GET_RANGE: Get ToF sensor range reading (if connected)
   - STATUS: Print current positions and limits
   - HELP: Print available commands
 */
@@ -33,6 +34,12 @@ const int PIN_MOTOR_1 = 5;
 const int PIN_MOTOR_2 = 6;
 const int PIN_LED_1 = 8;  
 const int PIN_LED_2 = 10;
+
+// ToF Sensor (placeholder - adjust based on your sensor)
+// If using I2C: A4 (SDA), A5 (SCL)
+// If using analog: adjust pin number
+const int PIN_TOF_ANALOG = A0;  // If using analog distance sensor
+bool tof_available = false;  // Set to true if ToF connected
 
 // --- SERVO LIMITS (will be updated via commands) ---
 //TOP
@@ -341,6 +348,18 @@ void processCommand(char* cmd) {
     Serial.println(bottom_max);
   }
   
+  // GET_RANGE command - read ToF sensor
+  else if (strcmp(cmd, "GET_RANGE") == 0) {
+    float range = readToFRange();
+    if (range >= 0) {
+      Serial.print(F("OK: Range: "));
+      Serial.print(range, 2);
+      Serial.println(F(" in"));
+    } else {
+      Serial.println(F("ERROR: ToF sensor not available"));
+    }
+  }
+  
   // HELP command
   else if (strcmp(cmd, "HELP") == 0) {
     printHelp();
@@ -471,6 +490,41 @@ void testLimit(bool isTop, bool isMin) {
   Serial.println(F("Test complete. Check for physical interference."));
 }
 
+float readToFRange() {
+  /*
+   * Read ToF sensor and return distance in inches.
+   * 
+   * IMPLEMENTATION NOTE: This is a placeholder function.
+   * You need to modify this based on your actual ToF sensor:
+   * 
+   * - For VL53L0X (I2C): Include VL53L0X library and read distance
+   * - For analog distance sensor: Read analog pin and convert to inches
+   * - For UART sensor: Read serial data
+   * 
+   * Example for analog sensor (Sharp GP2Y0A21YK):
+   *   int raw = analogRead(PIN_TOF_ANALOG);
+   *   float volts = raw * (5.0 / 1023.0);
+   *   float inches = 27.86 * pow(volts, -1.15);  // Calibration curve
+   *   return inches;
+   * 
+   * Returns -1.0 if sensor not available.
+   */
+  
+  if (!tof_available) {
+    return -1.0;
+  }
+  
+  // PLACEHOLDER: Replace with actual sensor reading
+  // For now, return a mock value for testing
+  int raw = analogRead(PIN_TOF_ANALOG);
+  float volts = raw * (5.0 / 1023.0);
+  
+  // Simple mock conversion (replace with real calibration)
+  float inches = 12.0;  // Mock: always return 12 inches
+  
+  return inches;
+}
+
 void printHelp() {
   Serial.println(F("=== AVAILABLE COMMANDS ==="));
   Serial.println(F("HOME                    - Move both servos to home (90)"));
@@ -490,6 +544,7 @@ void printHelp() {
   Serial.println(F("GET_LIMITS             - Print current limits"));
   Serial.println(F("MOTOR1:<speed>         - Set motor 1 speed (0-255)"));
   Serial.println(F("MOTOR2:<speed>         - Set motor 2 speed (0-255)"));
+  Serial.println(F("GET_RANGE              - Get ToF sensor range (inches)"));
   Serial.println(F("STATUS                 - Print current status"));
   Serial.println(F("HELP                   - Show this help"));
   Serial.println(F("========================="));
