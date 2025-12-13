@@ -1102,9 +1102,9 @@ class TurretController:
         
         # TF03 LiDAR distance tracking
         self.distance_cm = None  # Current distance in cm
-        self.distance_available = False  # Whether LiDAR is available
+        self.distance_available = None  # Whether LiDAR is available (None=unknown, True=yes, False=no)
         self.last_distance_time = 0.0
-        self.distance_update_interval = 0.1  # Update distance every 100ms (10 Hz)
+        self.distance_update_interval = 0.5  # Update distance every 500ms (2 Hz - less aggressive)
         
         # Limits will be updated from Arduino on connect
         
@@ -1189,6 +1189,10 @@ class TurretController:
         Returns:
             Distance in cm, or None if not available
         """
+        # If previously determined to be unavailable, skip immediately
+        if self.distance_available == False:
+            return self.distance_cm
+        
         # Rate limit distance reads
         current_time = time.time()
         if current_time - self.last_distance_time < self.distance_update_interval:
@@ -1196,48 +1200,64 @@ class TurretController:
         
         self.last_distance_time = current_time
         
-        # Try to read distance from Arduino
-        # The Arduino should respond with "DISTANCE:XXX" or "Dist: XXX cm"
-        resp = self.send_command("DISTANCE", read_response=True)
-        if resp:
-            # Try multiple parsing formats
-            for line in resp.split('\n'):
-                # Format 1: "DISTANCE:XXX" or "OK: DISTANCE:XXX"
-                if 'DISTANCE:' in line:
-                    try:
-                        dist_str = line.split('DISTANCE:')[1].strip().split()[0]
-                        distance = float(dist_str)
-                        self.distance_cm = distance
-                        self.distance_available = True
-                        return distance
-                    except:
-                        pass
+        # Try to read distance from Arduino (with short timeout to avoid blocking)
+        if not self.ser or not self.ser.is_open:
+            return self.distance_cm
+        
+        try:
+            self.ser.reset_input_buffer()
+            self.ser.write(b'DISTANCE\n')
+            self.ser.flush()
+            
+            # Quick read with 50ms timeout (won't block control loop)
+            response = ""
+            start_time = time.time()
+            while time.time() - start_time < 0.05:  # 50ms timeout instead of 500ms!
+                if self.ser.in_waiting > 0:
+                    line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+                    if line:
+                        response += line + "\n"
+                        if line.startswith("OK:") or line.startswith("ERROR:"):
+                            break
+                time.sleep(0.001)  # 1ms sleep
+            
+            if response:
+                # Check if command not supported - disable permanently
+                if 'ERROR' in response or 'Unknown' in response:
+                    if self.distance_available is None:  # First check
+                        print("Distance sensor not available (DISTANCE command not supported)")
+                    self.distance_available = False
+                    return self.distance_cm
                 
-                # Format 2: "Dist: XXX cm" (from sensor reading)
-                elif 'Dist:' in line and 'cm' in line:
-                    try:
-                        dist_str = line.split('Dist:')[1].split('cm')[0].strip()
-                        distance = float(dist_str)
-                        self.distance_cm = distance
-                        self.distance_available = True
-                        return distance
-                    except:
-                        pass
-                
-                # Format 3: Just a number
-                elif line.strip().replace('.', '').replace('-', '').isdigit():
-                    try:
-                        distance = float(line.strip())
-                        if 0 < distance < 10000:  # Sanity check (0-100m range)
+                # Try multiple parsing formats
+                for line in response.split('\n'):
+                    # Format 1: "DISTANCE:XXX" or "OK: DISTANCE:XXX"
+                    if 'DISTANCE:' in line:
+                        try:
+                            dist_str = line.split('DISTANCE:')[1].strip().split()[0]
+                            distance = float(dist_str)
                             self.distance_cm = distance
+                            if self.distance_available is None:  # First successful read
+                                print(f"Distance sensor available (read {distance:.1f} cm)")
                             self.distance_available = True
                             return distance
-                    except:
-                        pass
-        
-        # If command not supported, mark as unavailable
-        if resp and ('ERROR' in resp or 'Unknown' in resp):
-            self.distance_available = False
+                        except:
+                            pass
+                    
+                    # Format 2: "Dist: XXX cm" (from sensor reading)
+                    elif 'Dist:' in line and 'cm' in line:
+                        try:
+                            dist_str = line.split('Dist:')[1].split('cm')[0].strip()
+                            distance = float(dist_str)
+                            self.distance_cm = distance
+                            if self.distance_available is None:
+                                print(f"Distance sensor available (read {distance:.1f} cm)")
+                            self.distance_available = True
+                            return distance
+                        except:
+                            pass
+        except:
+            pass  # Silently fail to avoid breaking control loop
         
         return self.distance_cm
     
