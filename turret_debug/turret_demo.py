@@ -74,7 +74,7 @@ def main():
         turret = Turret(
             port=PORT,
             cameras=CAMERAS,
-            yolo_model='yolov8n.rknn',  # Using YOLOv8n RKNN model (faster than v11)
+            yolo_model='yolo11n.rknn',  # Using YOLOv11n RKNN model (compiled for 640x640)
             conf_threshold=0.5,
             target_classes=TARGET_CLASSES,
             tracking_enabled=True
@@ -226,8 +226,15 @@ def main():
                 # Show current target
                 if output.current_target:
                     tgt = output.current_target
+                    source_desc = "Fisheye Scout" if tgt.source == 'fisheye_scout' else "Center Camera"
                     print(f"  Target: {tgt.detection.class_name} "
-                          f"({tgt.source}, priority={tgt.priority_score:.1f})")
+                          f"({source_desc}, priority={tgt.priority_score:.1f})")
+                    if tgt.source == 'fisheye_scout':
+                        print(f"    → Turret moving to point center camera at target")
+                    elif output.is_locked:
+                        print(f"    → LOCKED: Target centered in frame")
+                    else:
+                        print(f"    → Centering target in frame...")
                 
                 # Performance profiling output
                 if ENABLE_PROFILING and len(timing_stats['total_frame']) > 0:

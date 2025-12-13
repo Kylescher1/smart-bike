@@ -336,7 +336,17 @@ class RKNNYOLODetector:
         if ret != 0:
             raise RuntimeError(f"Failed to initialize RKNN runtime: {ret}")
         
-        print(f"[{self.name}] RKNN model loaded successfully")
+        # Query model input size and adjust if needed
+        try:
+            input_attrs = self.rknn.query_input_attrs(0)
+            model_input_size = input_attrs['dims'][2]  # Height/width (assuming square)
+            if model_input_size != self.imgsz:
+                print(f"[{self.name}] Model expects {model_input_size}x{model_input_size} input, adjusting from {self.imgsz}")
+                self.imgsz = model_input_size
+        except Exception as e:
+            print(f"[{self.name}] Could not query model input size, using provided size {self.imgsz}: {e}")
+        
+        print(f"[{self.name}] RKNN model loaded successfully (input size: {self.imgsz}x{self.imgsz})")
         
         # Start detection thread
         self.running = True
@@ -378,8 +388,18 @@ class RKNNYOLODetector:
                 
                 # Run inference
                 inference_start = time.time()
-                outputs = self.rknn.inference([img_input])
-                inference_time = (time.time() - inference_start) * 1000  # ms
+                try:
+                    outputs = self.rknn.inference([img_input])
+                    inference_time = (time.time() - inference_start) * 1000  # ms
+                except Exception as e:
+                    print(f"[{self.name}] RKNN inference error: {e}")
+                    print(f"[{self.name}] Input shape: {img_input.shape}, Expected: model input size")
+                    inference_time = 0
+                    outputs = None
+                
+                if outputs is None:
+                    time.sleep(0.01)
+                    continue
                 
                 # Debug: print output shapes on first run
                 if not hasattr(self, '_debug_printed'):
@@ -392,8 +412,10 @@ class RKNNYOLODetector:
                     boxes, classes, scores = post_process_yolov8(outputs, self.conf, 0.45, (self.imgsz, self.imgsz))
                 except Exception as e:
                     print(f"[{self.name}] Post-processing error: {e}")
-                    print(f"[{self.name}] Output shapes: {[out.shape for out in outputs]}")
-                    raise
+                    if outputs:
+                        print(f"[{self.name}] Output shapes: {[out.shape for out in outputs]}")
+                    time.sleep(0.01)
+                    continue
                 
                 # Convert to Detection objects
                 detections = []

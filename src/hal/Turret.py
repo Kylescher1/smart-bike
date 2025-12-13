@@ -143,13 +143,14 @@ class Turret:
         self.yolo.start()
         print("  ✓ Multi-camera YOLO system started")
         
-        # Initialize target selector
+        # Initialize target selector with person as primary class
         self.target_selector = TargetSelector(
             geometry=self.geometry,
             controller=self.controller,
             lock_threshold=self.lock_threshold,
             min_confidence=self.conf_threshold * 0.8,  # Slightly lower for selection
-            priority_classes=self.target_classes
+            priority_classes=self.target_classes,
+            primary_class='person'  # Prioritize person class above all others
         )
         print("  ✓ Target selector initialized")
         

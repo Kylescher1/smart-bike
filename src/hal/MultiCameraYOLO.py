@@ -137,9 +137,10 @@ class MultiCameraYOLO:
             
             if use_rknn:
                 print(f"  Using RKNN detector for {cam_id} camera")
-                # Use smaller input size for faster inference (416 is good balance)
-                # Can go down to 320 for even faster but less accurate
-                inference_size = 416  # Reduced from 640 for ~2x speedup
+                # RKNN models are compiled for specific input sizes
+                # yolov8n.rknn and yolo11n.rknn are compiled for 640x640
+                # Must match the model's compiled size exactly
+                inference_size = 640  # Model was compiled for this size
                 detector = RKNNYOLODetector(
                     name=f"{cam_id.title()}Detector",
                     camera=camera,
