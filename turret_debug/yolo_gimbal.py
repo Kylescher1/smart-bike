@@ -20,12 +20,8 @@ from collections import deque
 
 import cv2
 import numpy as np
-import matplotlib
-matplotlib.use('TkAgg')  # Use TkAgg backend for threading compatibility
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from mpl_toolkits.mplot3d import Axes3D
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+# Matplotlib imports are lazy-loaded only when 3D visualization is enabled
+# to avoid conflicts with multiple matplotlib installations
 
 # Try to import RKNN for Radxa Rock Pi hardware acceleration
 try:
@@ -43,7 +39,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from yolo.live_demo import YOLODetector
+# YOLODetector import is conditional - only imported when not using RKNN
+# to avoid loading PyTorch unnecessarily
 from src.hal.cam.Camera import Camera, CAMERA_CONFIG
 
 # COCO class names
@@ -304,6 +301,34 @@ class Turret3DVisualizer:
         self.fig = None
         self.ax = None
         
+        # Lazy-loaded matplotlib modules (only when 3D viz is actually used)
+        self.plt = None
+        self.FuncAnimation = None
+        self.Axes3D = None
+        self.Poly3DCollection = None
+    
+    def _import_matplotlib(self):
+        """Lazy import matplotlib modules only when needed"""
+        if self.plt is None:
+            try:
+                import matplotlib
+                matplotlib.use('TkAgg')  # Use TkAgg backend for threading compatibility
+                import matplotlib.pyplot as plt
+                from matplotlib.animation import FuncAnimation
+                from mpl_toolkits.mplot3d import Axes3D
+                from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+                
+                self.plt = plt
+                self.FuncAnimation = FuncAnimation
+                self.Axes3D = Axes3D
+                self.Poly3DCollection = Poly3DCollection
+            except ImportError as e:
+                raise ImportError(
+                    f"Failed to import matplotlib 3D modules. "
+                    f"This is required for 3D visualization. Error: {e}\n"
+                    f"Try: pip install matplotlib"
+                ) from e
+        
     def start(self):
         """Start the visualization in a separate thread"""
         self.running = True
@@ -315,8 +340,8 @@ class Turret3DVisualizer:
         self.running = False
         if self.thread:
             self.thread.join(timeout=2.0)
-        if self.fig:
-            plt.close(self.fig)
+        if self.fig and self.plt:
+            self.plt.close(self.fig)
     
     def update(self, pan: float, tilt: float, target_x: float = 0, target_y: float = 0, 
                has_target: bool = False, error_x: float = 0, error_y: float = 0):
@@ -428,7 +453,7 @@ class Turret3DVisualizer:
             [tip_world, corners_world[3], corners_world[0]],
         ]
         
-        poly = Poly3DCollection(faces, alpha=0.1, facecolor='cyan', edgecolor='none')
+        poly = self.Poly3DCollection(faces, alpha=0.1, facecolor='cyan', edgecolor='none')
         ax.add_collection3d(poly)
         
         return tip_world, corners_world
@@ -546,16 +571,19 @@ class Turret3DVisualizer:
     def _run_visualization(self):
         """Run the visualization loop"""
         try:
+            # Import matplotlib modules (lazy loading)
+            self._import_matplotlib()
+            
             # Create figure
-            self.fig = plt.figure(figsize=(10, 8))
+            self.fig = self.plt.figure(figsize=(10, 8))
             self.ax = self.fig.add_subplot(111, projection='3d')
             
             # Set up animation
-            ani = FuncAnimation(self.fig, self._update_plot, interval=50, 
+            ani = self.FuncAnimation(self.fig, self._update_plot, interval=50, 
                               blit=False, cache_frame_data=False)
             
-            plt.tight_layout()
-            plt.show()
+            self.plt.tight_layout()
+            self.plt.show()
             
         except Exception as e:
             print(f"3D Visualization error: {e}")
@@ -859,6 +887,9 @@ class YOLOGimbal:
         
         if not self.use_rknn:
             print("Initializing YOLO...")
+            # Import YOLODetector only when needed (lazy import to avoid PyTorch dependency)
+            from yolo.live_demo import YOLODetector
+            
             yolo_weights = Path(PROJECT_ROOT) / "yolo" / "models" / "yolo11n.pt"
             self.yolo = YOLODetector(
                 name="GimbalTracker",
@@ -1184,6 +1215,14 @@ class YOLOGimbal:
         finally:
             self.cleanup()
     
+    def _get_detections(self, frame):
+        """Helper method to get detections from either RKNN or YOLO"""
+        if self.use_rknn:
+            return self.rknn_detector.detect(frame)
+        else:
+            result = self.yolo.read()
+            return result.detections if result else []
+    
     def run_calibration(self):
         """Calibration mode to determine correct axis directions (FIX #6)"""
         print("\n=== CALIBRATION MODE ===")
@@ -1205,9 +1244,10 @@ class YOLOGimbal:
         print("Moving servo +10° - observe if camera moves RIGHT")
         
         # Get initial target position
-        result = self.yolo.read()
-        if result and result.detections:
-            target = self.find_target_detection(result.detections)
+        frame = self.camera.read_frame()
+        if frame is not None:
+            detections = self._get_detections(frame)
+            target = self.find_target_detection(detections)
             if target:
                 initial_x, _, _, _ = target
                 print(f"Initial target X: {initial_x:.1f}")
@@ -1218,9 +1258,10 @@ class YOLOGimbal:
                 time.sleep(1.5)
                 
                 # Check new position
-                result = self.yolo.read()
-                if result and result.detections:
-                    target = self.find_target_detection(result.detections)
+                frame = self.camera.read_frame()
+                if frame is not None:
+                    detections = self._get_detections(frame)
+                    target = self.find_target_detection(detections)
                     if target:
                         new_x, _, _, _ = target
                         print(f"New target X: {new_x:.1f}")
@@ -1244,9 +1285,10 @@ class YOLOGimbal:
         print("\nTesting VERTICAL (top servo)...")
         print("Moving servo +5° - observe if camera moves DOWN")
         
-        result = self.yolo.read()
-        if result and result.detections:
-            target = self.find_target_detection(result.detections)
+        frame = self.camera.read_frame()
+        if frame is not None:
+            detections = self._get_detections(frame)
+            target = self.find_target_detection(detections)
             if target:
                 _, initial_y, _, _ = target
                 print(f"Initial target Y: {initial_y:.1f}")
@@ -1257,9 +1299,10 @@ class YOLOGimbal:
                 time.sleep(1.5)
                 
                 # Check new position
-                result = self.yolo.read()
-                if result and result.detections:
-                    target = self.find_target_detection(result.detections)
+                frame = self.camera.read_frame()
+                if frame is not None:
+                    detections = self._get_detections(frame)
+                    target = self.find_target_detection(detections)
                     if target:
                         _, new_y, _, _ = target
                         print(f"New target Y: {new_y:.1f}")

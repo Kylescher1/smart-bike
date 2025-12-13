@@ -141,12 +141,24 @@ class MultiCameraYOLO:
                 # yolov8n.rknn and yolo11n.rknn are compiled for 640x640
                 # Must match the model's compiled size exactly
                 inference_size = 640  # Model was compiled for this size
+                
+                # Fisheye cameras (left/right) only need to scout periodically
+                # Center camera needs full-speed for responsive tracking
+                # skip_frames: 0=every frame, 4=every 5th frame, 9=every 10th frame
+                if cam_id in ['left', 'right']:
+                    skip_frames = 9  # Process fisheye every 10th frame (~3 FPS scouting)
+                    print(f"    → Fisheye mode: processing every {skip_frames + 1}th frame")
+                else:
+                    skip_frames = 0  # Center camera: every frame for tracking
+                    print(f"    → Tracking mode: processing every frame")
+                
                 detector = RKNNYOLODetector(
                     name=f"{cam_id.title()}Detector",
                     camera=camera,
                     weights=str(model_path),
                     conf=self.conf_threshold,
-                    imgsz=inference_size
+                    imgsz=inference_size,
+                    skip_frames=skip_frames
                 )
             else:
                 if str(model_path).endswith('.rknn'):

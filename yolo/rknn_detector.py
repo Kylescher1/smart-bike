@@ -267,7 +267,7 @@ class RKNNYOLODetector:
     Uses NPU for fast inference on Rockchip devices.
     """
     
-    def __init__(self, name="RKNNYOLODetector", camera=None, weights=None, conf=0.25, imgsz=640):
+    def __init__(self, name="RKNNYOLODetector", camera=None, weights=None, conf=0.25, imgsz=640, skip_frames=0):
         """
         Initialize RKNN YOLO detector.
         
@@ -277,6 +277,8 @@ class RKNNYOLODetector:
             weights: Path to .rknn model file
             conf: Confidence threshold
             imgsz: Input image size
+            skip_frames: Process every Nth frame (0=every frame, 4=every 5th frame)
+                        Use for fisheye cameras to save processing time
         """
         if not RKNN_AVAILABLE:
             raise ImportError("rknnlite not available. Cannot use RKNN detector.")
@@ -285,6 +287,7 @@ class RKNNYOLODetector:
         self.camera = camera
         self.conf = conf
         self.imgsz = imgsz
+        self.skip_frames = skip_frames  # 0 = process every frame
         
         # Convert weights path
         if weights is None:
@@ -315,6 +318,12 @@ class RKNNYOLODetector:
         
         # Pre-allocated buffers
         self.img_input_buffer = None
+        
+        # Threaded frame capture (reduces blocking on camera.read_frame())
+        self.latest_frame = None
+        self.frame_lock = threading.Lock()
+        self.capture_thread = None
+        self.capture_running = False
         
     def start(self):
         """Initialize RKNN and start detection thread."""
@@ -348,6 +357,19 @@ class RKNNYOLODetector:
         
         print(f"[{self.name}] RKNN model loaded successfully (input size: {self.imgsz}x{self.imgsz})")
         
+        # Start background frame capture thread (reduces blocking on camera reads)
+        self.capture_running = True
+        self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.capture_thread.start()
+        
+        # Wait for first frame
+        timeout = time.time() + 2.0
+        while self.latest_frame is None and time.time() < timeout:
+            time.sleep(0.01)
+        
+        if self.latest_frame is None:
+            print(f"[{self.name}] Warning: No initial frame captured")
+        
         # Start detection thread
         self.running = True
         self.connected = True
@@ -362,19 +384,49 @@ class RKNNYOLODetector:
         if len(self.data_buffer) == 0:
             raise RuntimeError("Failed to get first detection result")
     
+    def _capture_loop(self):
+        """Background thread for continuous frame capture (non-blocking)."""
+        while self.capture_running:
+            try:
+                if self.camera is None:
+                    time.sleep(0.01)
+                    continue
+                
+                # Read frame from camera (this is the blocking call)
+                frame = self.camera.read_frame()
+                
+                if frame is not None:
+                    with self.frame_lock:
+                        self.latest_frame = frame
+                else:
+                    time.sleep(0.001)
+            except Exception as e:
+                # Silently continue on capture errors
+                time.sleep(0.01)
+    
     def _detection_loop(self):
         """Background thread for continuous detection."""
+        frame_count = 0
+        
         while self.running:
             try:
                 if self.camera is None:
                     time.sleep(0.1)
                     continue
                 
-                # Read frame
-                frame = self.camera.read_frame()
-                if frame is None:
-                    time.sleep(0.01)
+                # Skip frames for fisheye cameras (process every Nth frame)
+                # Center camera processes every frame for responsive tracking
+                frame_count += 1
+                if self.skip_frames > 0 and (frame_count % (self.skip_frames + 1)) != 0:
+                    time.sleep(0.001)  # Brief sleep when skipping
                     continue
+                
+                # Get latest frame from capture thread (non-blocking!)
+                with self.frame_lock:
+                    if self.latest_frame is None:
+                        time.sleep(0.01)
+                        continue
+                    frame = self.latest_frame.copy()  # Copy to avoid race conditions
                 
                 # Preprocess
                 img_resized, ratio, (dw, dh) = letterbox(frame, new_shape=(self.imgsz, self.imgsz))
@@ -488,8 +540,17 @@ class RKNNYOLODetector:
     def stop(self):
         """Stop detector and cleanup."""
         self.running = False
-        if self.thread:
+        self.capture_running = False
+        
+        # Stop capture thread first
+        if self.capture_thread and self.capture_thread.is_alive():
+            self.capture_thread.join(timeout=1.0)
+        
+        # Stop detection thread
+        if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2.0)
+        
+        # Release RKNN
         if self.rknn:
             self.rknn.release()
         self.connected = False
