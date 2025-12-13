@@ -61,74 +61,33 @@ COCO_CLASSES = [
 
 
 class RKNNDetector:
-    """RKNN-accelerated YOLO detector for Rock Pi 5B
+    """RKNN-accelerated YOLO detector for Rock Pi 5B"""
     
-    Optimizations applied:
-    - Multi-core support: Uses multiple CPU cores for inference (core_mask=0x07)
-    - Pre-allocated buffers: Reuses input buffer to avoid memory allocation overhead
-    - Grid caching: Caches grid calculations in box_process for repeated use
-    - Vectorized operations: Uses numpy vectorized operations where possible
-    - Optimized post-processing: Early exits and efficient numpy operations
-    
-    Expected performance improvement: 15-30% faster inference
-    """
-    
-    def __init__(self, model_path: str, conf_threshold: float = 0.5, imgsz: int = 640, 
-                 use_multi_core: bool = True, performance_mode: bool = True):
+    def __init__(self, model_path: str, conf_threshold: float = 0.5, imgsz: int = 640):
         if not RKNN_AVAILABLE:
             raise ImportError("RKNN not available. Please install rknnlite on Rock Pi 5B")
         
         self.model_path = model_path
         self.conf_threshold = conf_threshold
         self.imgsz = imgsz
-        self.use_multi_core = use_multi_core
-        self.performance_mode = performance_mode
         self.rknn = None
         
-        # Pre-allocate input buffer to avoid memory allocation overhead
-        self.img_input_buffer = np.zeros((1, imgsz, imgsz, 3), dtype=np.uint8)
-        
-        # Cache for grid calculations (reused in box_process)
-        self._grid_cache = {}
-        
     def load(self):
-        """Load and initialize RKNN model with optimized settings"""
+        """Load and initialize RKNN model"""
         self.rknn = RKNNLite(verbose=False)
         
         ret = self.rknn.load_rknn(self.model_path)
         if ret != 0:
             raise RuntimeError(f"Failed to load RKNN model: {ret}")
         
-        # Optimize core mask: use multiple cores if available and requested
-        # core_mask: 0=auto, 1=core0, 3=core0+1, 7=core0+1+2, etc.
-        core_mask = 0  # Auto by default
-        if self.use_multi_core:
-            # Try to use multiple cores for better performance
-            # Rock Pi 5B has 6 cores, try using first 3-4 cores
-            # Note: Some models may not benefit from multi-core, so we start conservative
-            try:
-                # Try core 0+1+2 (mask=7) for balanced performance
-                ret = self.rknn.init_runtime(target=None, core_mask=0x07)
-                if ret == 0:
-                    print("RKNN initialized with multi-core support (cores 0-2)")
-                else:
-                    # Fallback to single core
-                    ret = self.rknn.init_runtime(target=None, core_mask=0)
-                    if ret == 0:
-                        print("RKNN initialized with single core (fallback)")
-            except:
-                # Fallback to default
-                ret = self.rknn.init_runtime(target=None, core_mask=0)
-        else:
-            ret = self.rknn.init_runtime(target=None, core_mask=0)
-        
+        ret = self.rknn.init_runtime(target=None, core_mask=0)
         if ret != 0:
             raise RuntimeError(f"Failed to initialize RKNN runtime: {ret}")
         
         print("RKNN model loaded successfully")
     
     def letterbox(self, img, new_shape=(640, 640)):
-        """Resize with padding - optimized version"""
+        """Resize with padding"""
         shape = img.shape[:2]
         if isinstance(new_shape, int):
             new_shape = (new_shape, new_shape)
@@ -141,12 +100,10 @@ class RKNNDetector:
         
         if shape[::-1] != new_unpad:
             img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
-        
         top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
         left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-        img_resized = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
-        
-        return img_resized, r, (dw, dh)
+        img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+        return img, r, (dw, dh)
     
     def dfl(self, position):
         """Distribution Focal Loss for YOLOv8/v11"""
@@ -161,20 +118,13 @@ class RKNNDetector:
         return y
     
     def box_process(self, position, img_size=(640, 640)):
-        """Process box outputs - optimized with grid caching"""
+        """Process box outputs"""
         grid_h, grid_w = position.shape[2:4]
-        
-        # Cache grid calculations (they're the same for same grid size)
-        cache_key = (grid_h, grid_w, img_size[0], img_size[1])
-        if cache_key not in self._grid_cache:
-            col, row = np.meshgrid(np.arange(0, grid_w), np.arange(0, grid_h))
-            col = col.reshape(1, 1, grid_h, grid_w)
-            row = row.reshape(1, 1, grid_h, grid_w)
-            grid = np.concatenate((col, row), axis=1)
-            stride = np.array([img_size[1] // grid_h, img_size[0] // grid_w]).reshape(1, 2, 1, 1)
-            self._grid_cache[cache_key] = (grid, stride)
-        else:
-            grid, stride = self._grid_cache[cache_key]
+        col, row = np.meshgrid(np.arange(0, grid_w), np.arange(0, grid_h))
+        col = col.reshape(1, 1, grid_h, grid_w)
+        row = row.reshape(1, 1, grid_h, grid_w)
+        grid = np.concatenate((col, row), axis=1)
+        stride = np.array([img_size[1] // grid_h, img_size[0] // grid_w]).reshape(1, 2, 1, 1)
         
         position = self.dfl(position)
         box_xy = grid + 0.5 - position[:, 0:2, :, :]
@@ -205,7 +155,7 @@ class RKNNDetector:
         return np.array(keep)
     
     def post_process(self, output):
-        """Post-process RKNN output - optimized version"""
+        """Post-process RKNN output"""
         boxes, scores, classes_conf = [], [], []
         default_branch = 3
         
@@ -219,7 +169,6 @@ class RKNNDetector:
         
         pair_per_branch = len(output) // default_branch
         
-        # Pre-allocate lists for better performance
         for i in range(default_branch):
             boxes.append(self.box_process(output[pair_per_branch * i], (self.imgsz, self.imgsz)))
             classes_conf.append(output[pair_per_branch * i + 1])
@@ -238,78 +187,68 @@ class RKNNDetector:
         classes_conf = np.concatenate(classes_conf).astype(np.float32)
         scores = np.concatenate(scores).astype(np.float32)
         
-        # Optimized: combine operations
         box_confidences = scores.reshape(-1)
         class_max_score = np.max(classes_conf, axis=-1)
         classes = np.argmax(classes_conf, axis=-1)
         
-        # Early exit if no detections
-        combined_scores = class_max_score * box_confidences
-        _class_pos = np.where(combined_scores >= self.conf_threshold)[0]
-        
-        if len(_class_pos) == 0:
-            return []
-        
-        scores = combined_scores[_class_pos]
+        _class_pos = np.where(class_max_score * box_confidences >= self.conf_threshold)
+        scores = (class_max_score * box_confidences)[_class_pos]
         boxes = boxes[_class_pos]
         classes = classes[_class_pos]
         
-        # NMS per class - optimized
-        nboxes, nclasses, nscores = [], [], []
-        unique_classes = np.unique(classes)  # Faster than set() for numpy arrays
+        if len(boxes) == 0:
+            return []
         
-        for c in unique_classes:
-            inds = np.where(classes == c)[0]
-            if len(inds) == 0:
-                continue
+        # NMS per class
+        nboxes, nclasses, nscores = [], [], []
+        for c in set(classes):
+            inds = np.where(classes == c)
             b = boxes[inds]
             c_vals = classes[inds]
             s = scores[inds]
             keep = self.nms(b, s, 0.45)
             
-            if len(keep) > 0:
+            if len(keep) != 0:
                 nboxes.append(b[keep])
                 nclasses.append(c_vals[keep])
                 nscores.append(s[keep])
         
-        if not nclasses:
+        if not nclasses and not nscores:
             return []
         
         boxes = np.concatenate(nboxes)
         classes = np.concatenate(nclasses)
         scores = np.concatenate(nscores)
         
-        # Convert to detection format - optimized list comprehension
-        detections = [
-            type('obj', (object,), {
+        # Convert to detection format
+        detections = []
+        for i in range(len(boxes)):
+            det = type('obj', (object,), {
                 'bbox': boxes[i].astype(int).tolist(),
                 'confidence': float(scores[i]),
                 'class_id': int(classes[i]),
                 'label': COCO_CLASSES[classes[i]] if classes[i] < len(COCO_CLASSES) else f'class_{classes[i]}'
             })()
-            for i in range(len(boxes))
-        ]
+            detections.append(det)
         
         return detections
     
     def detect(self, frame):
-        """Run detection on frame - optimized with pre-allocated buffers"""
-        # Preprocess - reuse buffer to avoid memory allocation
+        """Run detection on frame"""
+        # Preprocess
         img_resized, ratio, (dw, dh) = self.letterbox(frame, new_shape=(self.imgsz, self.imgsz))
         img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        img_input = np.expand_dims(img_rgb.astype(np.uint8), axis=0)
         
-        # Use pre-allocated buffer instead of creating new array
-        self.img_input_buffer[0] = img_rgb.astype(np.uint8)
-        
-        # Inference - pass buffer directly
-        outputs = self.rknn.inference([self.img_input_buffer])
+        # Inference
+        outputs = self.rknn.inference([img_input])
         if outputs is None:
             return []
         
         # Post-process
         detections = self.post_process(outputs)
         
-        # Scale boxes back to original image - optimized
+        # Scale boxes back to original image
         if detections:
             h_orig, w_orig = frame.shape[:2]
             scale = min(self.imgsz / w_orig, self.imgsz / h_orig)
@@ -318,14 +257,12 @@ class RKNNDetector:
             pad_x = (self.imgsz - new_w) / 2
             pad_y = (self.imgsz - new_h) / 2
             
-            # Vectorized scaling (faster than loop)
-            scale_inv = 1.0 / scale
             for det in detections:
                 bbox = det.bbox
-                bbox[0] = int((bbox[0] - pad_x) * scale_inv)
-                bbox[1] = int((bbox[1] - pad_y) * scale_inv)
-                bbox[2] = int((bbox[2] - pad_x) * scale_inv)
-                bbox[3] = int((bbox[3] - pad_y) * scale_inv)
+                bbox[0] = int((bbox[0] - pad_x) / scale)
+                bbox[1] = int((bbox[1] - pad_y) / scale)
+                bbox[2] = int((bbox[2] - pad_x) / scale)
+                bbox[3] = int((bbox[3] - pad_y) / scale)
                 det.bbox = bbox
         
         return detections
@@ -927,102 +864,6 @@ class ErrorPlotter:
                     pass
 
 
-class TimingProfiler:
-    """Profiler for tracking processing time of different operations"""
-    
-    def __init__(self, enabled: bool = True, log_interval: float = 1.0):
-        self.enabled = enabled
-        self.log_interval = log_interval  # Log statistics every N seconds
-        self.last_log_time = time.perf_counter()
-        
-        # Timing accumulators
-        self.timings = {
-            'frame_read': [],
-            'detection': [],
-            'target_finding': [],
-            'pid_calc': [],
-            'servo_comm': [],
-            'display': [],
-            'error_plotter': [],
-            'total_loop': []
-        }
-        
-        # Counters
-        self.operation_counts = {key: 0 for key in self.timings.keys()}
-        
-    def start_timer(self, operation: str) -> float:
-        """Start timing an operation, returns start time"""
-        if not self.enabled:
-            return 0.0
-        return time.perf_counter()
-    
-    def end_timer(self, operation: str, start_time: float):
-        """End timing an operation and record it"""
-        if not self.enabled or start_time == 0.0:
-            return
-        
-        elapsed = time.perf_counter() - start_time
-        if operation in self.timings:
-            self.timings[operation].append(elapsed)
-            self.operation_counts[operation] += 1
-    
-    def log_statistics(self):
-        """Log timing statistics if enough time has passed"""
-        if not self.enabled:
-            return
-        
-        current_time = time.perf_counter()
-        if current_time - self.last_log_time < self.log_interval:
-            return
-        
-        self.last_log_time = current_time
-        
-        # Calculate statistics
-        stats = {}
-        for op, times in self.timings.items():
-            if times:
-                stats[op] = {
-                    'mean': np.mean(times),
-                    'max': np.max(times),
-                    'min': np.min(times),
-                    'std': np.std(times),
-                    'count': len(times),
-                    'total': np.sum(times)
-                }
-        
-        # Print statistics
-        if stats:
-            print("\n=== Timing Statistics (last second) ===")
-            # Sort by mean time (descending)
-            sorted_ops = sorted(stats.items(), key=lambda x: x[1]['mean'], reverse=True)
-            
-            for op, stat in sorted_ops:
-                if stat['count'] > 0:
-                    print(f"  {op:20s}: "
-                          f"mean={stat['mean']*1000:6.2f}ms "
-                          f"max={stat['max']*1000:6.2f}ms "
-                          f"min={stat['min']*1000:6.2f}ms "
-                          f"std={stat['std']*1000:5.2f}ms "
-                          f"count={stat['count']:4d} "
-                          f"total={stat['total']*1000:7.2f}ms")
-            
-            # Calculate percentage of total time
-            if 'total_loop' in stats and stats['total_loop']['mean'] > 0:
-                total_mean = stats['total_loop']['mean']
-                print(f"\n  Percentage of loop time:")
-                for op, stat in sorted_ops:
-                    if op != 'total_loop' and stat['count'] > 0:
-                        pct = (stat['mean'] / total_mean) * 100
-                        print(f"    {op:20s}: {pct:5.1f}%")
-            
-            print()
-            
-            # Clear old data (keep last 100 samples)
-            for op in self.timings:
-                if len(self.timings[op]) > 100:
-                    self.timings[op] = self.timings[op][-100:]
-
-
 class PIDController:
     """PID controller for servo positioning"""
     
@@ -1339,9 +1180,12 @@ class YOLOGimbal:
         self.use_rknn = use_rknn  # Use RKNN acceleration
         self.rknn_model = rknn_model  # Path to RKNN model
         self.enable_error_plot = enable_error_plot  # Enable error plotting
+<<<<<<< HEAD
         self.enable_timing = enable_timing  # Enable timing profiling
         self.detection_imgsz = detection_imgsz  # Detection input size (lower = faster)
         self.enable_distance = enable_distance  # Enable TF03 LiDAR distance reading
+=======
+>>>>>>> parent of bcac720 (things work ok)
         
         # Initialize components
         self.camera = None
@@ -1351,7 +1195,6 @@ class YOLOGimbal:
         self.pid = PIDController(kp=kp, ki=ki, kd=kd, max_output=5.0)  # Reduced from 10.0 for smoother movement
         self.visualizer = None
         self.error_plotter = None
-        self.profiler = TimingProfiler(enabled=enable_timing, log_interval=1.0)
         
         # State
         self.running = False
@@ -1359,18 +1202,6 @@ class YOLOGimbal:
         self.frame_height = 480
         self.center_x = self.frame_width // 2
         self.center_y = self.frame_height // 2
-        
-        # Threaded frame capture (for performance)
-        self.latest_frame = None
-        self.frame_lock = threading.Lock()
-        self.capture_thread = None
-        self.capture_running = False
-        self.use_threaded_capture = True  # Enable by default for better performance
-        
-        # Frame skipping for handling spikes
-        self.last_detection_time = 0.0
-        self.detection_timeout = 0.2  # Skip if detection takes >200ms
-        self.last_detections = None  # Cache last detections for skipping
         
         # Timing (FIX #4)
         self.last_control_time = 0.0
@@ -1422,12 +1253,10 @@ class YOLOGimbal:
                     self.rknn_detector = RKNNDetector(
                         model_path=self.rknn_model,
                         conf_threshold=self.conf_threshold,
-                        imgsz=self.detection_imgsz,  # Use configurable detection size
-                        use_multi_core=True,  # Enable multi-core for better performance
-                        performance_mode=True  # Enable performance optimizations
+                        imgsz=640
                     )
                     self.rknn_detector.load()
-                    print("RKNN detector initialized with optimizations")
+                    print("RKNN detector initialized")
         
         if not self.use_rknn:
             print("Initializing YOLO...")
@@ -1483,31 +1312,6 @@ class YOLOGimbal:
             self.error_plotter = ErrorPlotter(history_length=500)
             self.error_plotter.start()
             print("Error plotting started")
-        
-        # Start threaded frame capture for better performance
-        if self.use_threaded_capture:
-            print("Starting threaded frame capture...")
-            self.capture_running = True
-            self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
-            self.capture_thread.start()
-            # Wait a bit for first frame
-            time.sleep(0.1)
-            print("Threaded frame capture started")
-    
-    def _capture_loop(self):
-        """Background frame capture - always has fresh frame ready (non-blocking)"""
-        while self.capture_running:
-            try:
-                frame = self.camera.read_frame()
-                if frame is not None:
-                    with self.frame_lock:
-                        self.latest_frame = frame
-                else:
-                    time.sleep(0.001)  # Small sleep if no frame
-            except Exception as e:
-                if self.capture_running:  # Only log if still running
-                    print(f"Frame capture error: {e}")
-                time.sleep(0.01)
         
     def find_target_detection(self, detections) -> Optional[Tuple[float, float, float, float]]:
         """Find the best target detection (largest, highest confidence)"""
@@ -1576,8 +1380,6 @@ class YOLOGimbal:
             print(f"Display FPS: {self.display_fps} Hz")
         else:
             print("Display: DISABLED (maximum performance)")
-        if self.enable_timing:
-            print("Timing profiling: ENABLED (will log statistics every second)")
         print()
         
         self.last_control_time = time.time()
@@ -1588,8 +1390,6 @@ class YOLOGimbal:
         
         try:
             while self.running:
-                loop_start = self.profiler.start_timer('total_loop')
-                
                 # Fixed control rate (FIX #11)
                 current_time = time.time()
                 dt_since_last = current_time - self.last_control_time
@@ -1599,65 +1399,22 @@ class YOLOGimbal:
                     time.sleep(self.control_dt - dt_since_last)
                     current_time = time.time()
                 
-                # Read frame - use threaded capture if enabled (non-blocking)
-                frame_read_start = self.profiler.start_timer('frame_read')
-                if self.use_threaded_capture:
-                    with self.frame_lock:
-                        if self.latest_frame is None:
-                            self.profiler.end_timer('frame_read', frame_read_start)
-                            self.profiler.end_timer('total_loop', loop_start)
-                            continue
-                        frame = self.latest_frame.copy()  # Copy to avoid race conditions
-                else:
-                    frame = self.camera.read_frame()
-                self.profiler.end_timer('frame_read', frame_read_start)
+                # Read frame (FIX #5 - read fresh frame)
+                frame = self.camera.read_frame()
                 if frame is None:
-                    self.profiler.end_timer('total_loop', loop_start)
                     continue
                 
-                # Run detection (RKNN or YOLO) - with frame skipping for spikes
-                detection_start = self.profiler.start_timer('detection')
-                detection_start_time = time.perf_counter()
-                
-                # Check if we should skip detection (if previous one took too long)
-                time_since_last_detection = detection_start_time - self.last_detection_time
-                skip_detection = (time_since_last_detection < self.detection_timeout and 
-                                 self.last_detections is not None)
-                
-                if skip_detection:
-                    # Use cached detections to avoid blocking
-                    detections = self.last_detections
-                elif self.use_rknn:
+                # Run detection (RKNN or YOLO)
+                if self.use_rknn:
                     # RKNN: direct synchronous inference on frame
                     detections = self.rknn_detector.detect(frame)
-                    self.last_detections = detections  # Cache for next iteration
-                    self.last_detection_time = time.perf_counter()
-                else:
-                    # YOLO: read from threaded detector (already async)
-                    detections = None  # Will be handled below
-                
-                if detections is not None:
-                    # RKNN or cached detections
-                    target_find_start = self.profiler.start_timer('target_finding')
                     target = self.find_target_detection(detections)
-                    self.profiler.end_timer('target_finding', target_find_start)
                 else:
                     # YOLO: read from threaded detector
                     result = self.yolo.read()
                     if result is None:
-                        self.profiler.end_timer('detection', detection_start)
-                        self.profiler.end_timer('total_loop', loop_start)
                         continue
-                    target_find_start = self.profiler.start_timer('target_finding')
                     target = self.find_target_detection(result.detections)
-                    self.profiler.end_timer('target_finding', target_find_start)
-                
-                # End detection timing (only if we actually ran detection)
-                if not skip_detection:
-                    self.profiler.end_timer('detection', detection_start)
-                else:
-                    # Still record timing but mark as skipped
-                    self.profiler.end_timer('detection', detection_start)
                 
                 # Periodic status re-sync (FIX #8) - adaptive based on control rate
                 status_update_counter += 1
@@ -1705,9 +1462,7 @@ class YOLOGimbal:
                     # Check pixel deadzone (FIX #12)
                     if abs(error_x_px) > self.deadzone or abs(error_y_px) > self.deadzone:
                         # Update PID with fixed dt (FIX #11)
-                        pid_start = self.profiler.start_timer('pid_calc')
                         output_x, output_y = self.pid.update(error_x_norm, error_y_norm, self.control_dt)
-                        self.profiler.end_timer('pid_calc', pid_start)
                         
                         # Convert PID output to servo movement (FIX #3 - better scaling)
                         move_x = output_x * self.movement_scale
@@ -1742,12 +1497,10 @@ class YOLOGimbal:
                                      target_top >= self.turret.top_max)
                         
                         # Apply servo swap if needed and move (FIX #7 - absolute positioning)
-                        servo_start = self.profiler.start_timer('servo_comm')
                         if self.swap_servos:
                             self.turret.move_to(target_top, target_bottom)
                         else:
                             self.turret.move_to(target_bottom, target_top)
-                        self.profiler.end_timer('servo_comm', servo_start)
                         
                         # Update 3D visualizer
                         if self.visualizer:
@@ -1763,7 +1516,6 @@ class YOLOGimbal:
                         
                         # Update error plotter
                         if self.error_plotter:
-                            plotter_start = self.profiler.start_timer('error_plotter')
                             self.error_plotter.update(
                                 error_x_px=error_x_px,
                                 error_y_px=error_y_px,
@@ -1777,7 +1529,6 @@ class YOLOGimbal:
                                 target_y=target_y,
                                 has_target=True
                             )
-                            self.profiler.end_timer('error_plotter', plotter_start)
                         
                         # Better logging (FIX #13)
                         if abs(error_x_px) > 50:  # Significant horizontal error
@@ -1882,7 +1633,6 @@ class YOLOGimbal:
                 
                 # Display frame if enabled and enough time has passed for display FPS
                 if should_display_frame:
-                    display_start = self.profiler.start_timer('display')
                     cv2.putText(frame, f"FPS: {self.current_fps:.1f}", (10, frame.shape[0] - 10), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                     
@@ -1894,14 +1644,7 @@ class YOLOGimbal:
                     
                     # Show frame
                     cv2.imshow("YOLO Gimbal Tracking", frame)
-                    self.profiler.end_timer('display', display_start)
                     self.last_display_time = current_time
-                
-                # Log timing statistics periodically
-                self.profiler.log_statistics()
-                
-                # End total loop timing
-                self.profiler.end_timer('total_loop', loop_start)
                 
                 # Handle keys (always check, even if display is disabled)
                 key = cv2.waitKey(1) & 0xFF if not self.disable_display else -1
@@ -2056,12 +1799,6 @@ class YOLOGimbal:
         print("\nCleaning up...")
         self.running = False
         
-        # Stop threaded frame capture
-        if self.use_threaded_capture and self.capture_running:
-            self.capture_running = False
-            if self.capture_thread:
-                self.capture_thread.join(timeout=1.0)
-        
         if self.visualizer:
             print("Stopping 3D visualization...")
             self.visualizer.stop()
@@ -2123,10 +1860,6 @@ Examples:
   python yolo_gimbal.py --camera 0 --turret COM3 --error-plot
   python yolo_gimbal.py --camera 0 --turret COM3 --rknn --error-plot --class person
   
-  # With timing profiling (to see what's taking processing time):
-  python yolo_gimbal.py --camera 0 --turret COM3 --timing
-  python yolo_gimbal.py --camera 0 --turret COM3 --rknn --timing --class person
-  
   # Tuning movement (if too fast/jerky):
   python yolo_gimbal.py --camera 0 --turret COM3 --movement-scale 10  # Slower
   python yolo_gimbal.py --camera 0 --turret COM3 --kp 0.2  # Less aggressive
@@ -2147,8 +1880,6 @@ Examples:
   python yolo_gimbal.py --camera 0 --turret COM3 --rknn --control-rate 60 --camera-fps 60  # Both
   python yolo_gimbal.py --camera 0 --turret COM3 --rknn --disable-display  # Max FPS (no display)
   python yolo_gimbal.py --camera 0 --turret COM3 --rknn --display-fps 15  # Lower display FPS to save CPU
-  python yolo_gimbal.py --camera 0 --turret COM3 --rknn --detection-imgsz 416  # Faster detection (less accurate)
-  python yolo_gimbal.py --camera 0 --turret COM3 --rknn --detection-imgsz 320  # Very fast detection (lower accuracy)
   
 Note: RKNN requires rknnlite installed (Rock Pi 5B)
       To find your camera index, run: python find_camera.py
@@ -2195,10 +1926,6 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Enable 3D visualization of turret orientation and tracking')
     parser.add_argument('--error-plot', action='store_true', dest='enable_error_plot',
                        help='Enable real-time error plotting for debugging (shows position errors, PID outputs, servo movements)')
-    parser.add_argument('--timing', action='store_true', dest='enable_timing',
-                       help='Enable timing profiling to see what operations are taking the most processing time')
-    parser.add_argument('--detection-imgsz', type=int, default=640,
-                       help='Detection input image size (default: 640, lower=faster but less accurate: 416, 320)')
     parser.add_argument('--rknn', action='store_true',
                        help='Use RKNN hardware acceleration (Radxa Rock Pi 5B)')
     parser.add_argument('--rknn-model', type=str, default=None,
