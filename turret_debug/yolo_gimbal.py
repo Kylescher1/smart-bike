@@ -27,6 +27,17 @@ from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
+# Try to import RKNN for Radxa Rock Pi hardware acceleration
+try:
+    import site
+    system_packages = '/usr/lib/python3/dist-packages'
+    if system_packages not in sys.path:
+        sys.path.insert(0, system_packages)
+    from rknnlite.api import RKNNLite
+    RKNN_AVAILABLE = True
+except ImportError:
+    RKNN_AVAILABLE = False
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -34,6 +45,234 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from yolo.live_demo import YOLODetector
 from src.hal.cam.Camera import Camera, CAMERA_CONFIG
+
+# COCO class names
+COCO_CLASSES = [
+    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
+    'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat',
+    'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack',
+    'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
+    'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
+    'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+    'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake',
+    'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop',
+    'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
+    'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier',
+    'toothbrush'
+]
+
+
+class RKNNDetector:
+    """RKNN-accelerated YOLO detector for Rock Pi 5B"""
+    
+    def __init__(self, model_path: str, conf_threshold: float = 0.5, imgsz: int = 640):
+        if not RKNN_AVAILABLE:
+            raise ImportError("RKNN not available. Please install rknnlite on Rock Pi 5B")
+        
+        self.model_path = model_path
+        self.conf_threshold = conf_threshold
+        self.imgsz = imgsz
+        self.rknn = None
+        
+    def load(self):
+        """Load and initialize RKNN model"""
+        self.rknn = RKNNLite(verbose=False)
+        
+        ret = self.rknn.load_rknn(self.model_path)
+        if ret != 0:
+            raise RuntimeError(f"Failed to load RKNN model: {ret}")
+        
+        ret = self.rknn.init_runtime(target=None, core_mask=0)
+        if ret != 0:
+            raise RuntimeError(f"Failed to initialize RKNN runtime: {ret}")
+        
+        print("RKNN model loaded successfully")
+    
+    def letterbox(self, img, new_shape=(640, 640)):
+        """Resize with padding"""
+        shape = img.shape[:2]
+        if isinstance(new_shape, int):
+            new_shape = (new_shape, new_shape)
+        
+        r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+        dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]
+        dw /= 2
+        dh /= 2
+        
+        if shape[::-1] != new_unpad:
+            img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+        img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+        return img, r, (dw, dh)
+    
+    def dfl(self, position):
+        """Distribution Focal Loss for YOLOv8/v11"""
+        n, c, h, w = position.shape
+        p_num = 4
+        mc = c // p_num
+        x = position.reshape(n, p_num, mc, h, w)
+        exp_x = np.exp(x - np.max(x, axis=2, keepdims=True))
+        softmax_x = exp_x / np.sum(exp_x, axis=2, keepdims=True)
+        acc_metrix = np.arange(mc).reshape(1, 1, mc, 1, 1).astype(np.float32)
+        y = np.sum(softmax_x * acc_metrix, axis=2)
+        return y
+    
+    def box_process(self, position, img_size=(640, 640)):
+        """Process box outputs"""
+        grid_h, grid_w = position.shape[2:4]
+        col, row = np.meshgrid(np.arange(0, grid_w), np.arange(0, grid_h))
+        col = col.reshape(1, 1, grid_h, grid_w)
+        row = row.reshape(1, 1, grid_h, grid_w)
+        grid = np.concatenate((col, row), axis=1)
+        stride = np.array([img_size[1] // grid_h, img_size[0] // grid_w]).reshape(1, 2, 1, 1)
+        
+        position = self.dfl(position)
+        box_xy = grid + 0.5 - position[:, 0:2, :, :]
+        box_xy2 = grid + 0.5 + position[:, 2:4, :, :]
+        xyxy = np.concatenate((box_xy * stride, box_xy2 * stride), axis=1)
+        return xyxy
+    
+    def nms(self, boxes, scores, iou_threshold=0.45):
+        """Non-maximum suppression"""
+        order = scores.argsort()[::-1]
+        keep = []
+        while order.size > 0:
+            i = order[0]
+            keep.append(i)
+            if order.size == 1:
+                break
+            xx1 = np.maximum(boxes[i, 0], boxes[order[1:], 0])
+            yy1 = np.maximum(boxes[i, 1], boxes[order[1:], 1])
+            xx2 = np.minimum(boxes[i, 2], boxes[order[1:], 2])
+            yy2 = np.minimum(boxes[i, 3], boxes[order[1:], 3])
+            w = np.maximum(0.0, xx2 - xx1)
+            h = np.maximum(0.0, yy2 - yy1)
+            inter = w * h
+            iou = inter / ((boxes[i, 2] - boxes[i, 0]) * (boxes[i, 3] - boxes[i, 1]) +
+                          (boxes[order[1:], 2] - boxes[order[1:], 0]) * (boxes[order[1:], 3] - boxes[order[1:], 1]) - inter)
+            inds = np.where(iou <= iou_threshold)[0]
+            order = order[inds + 1]
+        return np.array(keep)
+    
+    def post_process(self, output):
+        """Post-process RKNN output"""
+        boxes, scores, classes_conf = [], [], []
+        default_branch = 3
+        
+        # Filter outputs if needed
+        if len(output) == 9:
+            filtered_outputs = []
+            for i in range(3):
+                filtered_outputs.append(output[i * 3])
+                filtered_outputs.append(output[i * 3 + 1])
+            output = filtered_outputs
+        
+        pair_per_branch = len(output) // default_branch
+        
+        for i in range(default_branch):
+            boxes.append(self.box_process(output[pair_per_branch * i], (self.imgsz, self.imgsz)))
+            classes_conf.append(output[pair_per_branch * i + 1])
+            scores.append(np.ones_like(output[pair_per_branch * i + 1][:, :1, :, :], dtype=np.float32))
+        
+        def sp_flatten(_in):
+            ch = _in.shape[1]
+            _in = _in.transpose(0, 2, 3, 1)
+            return _in.reshape(-1, ch)
+        
+        boxes = [sp_flatten(_v) for _v in boxes]
+        classes_conf = [sp_flatten(_v) for _v in classes_conf]
+        scores = [sp_flatten(_v) for _v in scores]
+        
+        boxes = np.concatenate(boxes)
+        classes_conf = np.concatenate(classes_conf).astype(np.float32)
+        scores = np.concatenate(scores).astype(np.float32)
+        
+        box_confidences = scores.reshape(-1)
+        class_max_score = np.max(classes_conf, axis=-1)
+        classes = np.argmax(classes_conf, axis=-1)
+        
+        _class_pos = np.where(class_max_score * box_confidences >= self.conf_threshold)
+        scores = (class_max_score * box_confidences)[_class_pos]
+        boxes = boxes[_class_pos]
+        classes = classes[_class_pos]
+        
+        if len(boxes) == 0:
+            return []
+        
+        # NMS per class
+        nboxes, nclasses, nscores = [], [], []
+        for c in set(classes):
+            inds = np.where(classes == c)
+            b = boxes[inds]
+            c_vals = classes[inds]
+            s = scores[inds]
+            keep = self.nms(b, s, 0.45)
+            
+            if len(keep) != 0:
+                nboxes.append(b[keep])
+                nclasses.append(c_vals[keep])
+                nscores.append(s[keep])
+        
+        if not nclasses and not nscores:
+            return []
+        
+        boxes = np.concatenate(nboxes)
+        classes = np.concatenate(nclasses)
+        scores = np.concatenate(nscores)
+        
+        # Convert to detection format
+        detections = []
+        for i in range(len(boxes)):
+            det = type('obj', (object,), {
+                'bbox': boxes[i].astype(int).tolist(),
+                'confidence': float(scores[i]),
+                'class_id': int(classes[i]),
+                'label': COCO_CLASSES[classes[i]] if classes[i] < len(COCO_CLASSES) else f'class_{classes[i]}'
+            })()
+            detections.append(det)
+        
+        return detections
+    
+    def detect(self, frame):
+        """Run detection on frame"""
+        # Preprocess
+        img_resized, ratio, (dw, dh) = self.letterbox(frame, new_shape=(self.imgsz, self.imgsz))
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        img_input = np.expand_dims(img_rgb.astype(np.uint8), axis=0)
+        
+        # Inference
+        outputs = self.rknn.inference([img_input])
+        if outputs is None:
+            return []
+        
+        # Post-process
+        detections = self.post_process(outputs)
+        
+        # Scale boxes back to original image
+        if detections:
+            h_orig, w_orig = frame.shape[:2]
+            scale = min(self.imgsz / w_orig, self.imgsz / h_orig)
+            new_w = int(w_orig * scale)
+            new_h = int(h_orig * scale)
+            pad_x = (self.imgsz - new_w) / 2
+            pad_y = (self.imgsz - new_h) / 2
+            
+            for det in detections:
+                bbox = det.bbox
+                bbox[0] = int((bbox[0] - pad_x) / scale)
+                bbox[1] = int((bbox[1] - pad_y) / scale)
+                bbox[2] = int((bbox[2] - pad_x) / scale)
+                bbox[3] = int((bbox[3] - pad_y) / scale)
+                det.bbox = bbox
+        
+        return detections
+    
+    def release(self):
+        """Release RKNN resources"""
+        if self.rknn:
+            self.rknn.release()
 
 
 class Turret3DVisualizer:
@@ -529,7 +768,8 @@ class YOLOGimbal:
                  movement_scale: float = 15.0, min_step: float = 0.5,
                  control_rate: float = 30.0,
                  invert_x: bool = False, invert_y: bool = False,
-                 swap_servos: bool = False, enable_3d_viz: bool = False):
+                 swap_servos: bool = False, enable_3d_viz: bool = False,
+                 use_rknn: bool = False, rknn_model: Optional[str] = None):
         self.camera_index = camera_index
         self.turret_port = turret_port
         self.target_class = target_class
@@ -544,10 +784,13 @@ class YOLOGimbal:
         self.invert_y = invert_y  # Invert vertical movement
         self.swap_servos = swap_servos  # Swap top and bottom servos
         self.enable_3d_viz = enable_3d_viz  # Enable 3D visualization
+        self.use_rknn = use_rknn  # Use RKNN acceleration
+        self.rknn_model = rknn_model  # Path to RKNN model
         
         # Initialize components
         self.camera = None
         self.yolo = None
+        self.rknn_detector = None
         self.turret = TurretController(turret_port)
         self.pid = PIDController(kp=kp, ki=ki, kd=kd, max_output=5.0)  # Reduced from 10.0 for smoother movement
         self.visualizer = None
@@ -569,7 +812,7 @@ class YOLOGimbal:
         self.calibration_mode = False
         
     def initialize(self):
-        """Initialize camera, YOLO, and turret"""
+        """Initialize camera, YOLO/RKNN detector, and turret"""
         print("Initializing camera...")
         camera_config = CAMERA_CONFIG.copy()
         camera_config.update({
@@ -591,17 +834,41 @@ class YOLOGimbal:
         self.center_y = self.frame_height // 2
         print(f"Camera initialized: {self.frame_width}x{self.frame_height}")
         
-        print("Initializing YOLO...")
-        yolo_weights = Path(PROJECT_ROOT) / "yolo" / "models" / "yolo11n.pt"
-        self.yolo = YOLODetector(
-            name="GimbalTracker",
-            camera=self.camera,
-            weights=str(yolo_weights),
-            conf=self.conf_threshold,
-            imgsz=640
-        )
-        self.yolo.start()
-        print("YOLO initialized")
+        # Initialize detector (RKNN or YOLO)
+        if self.use_rknn:
+            if not RKNN_AVAILABLE:
+                print("WARNING: RKNN not available, falling back to YOLO")
+                self.use_rknn = False
+            else:
+                print("Initializing RKNN detector (hardware accelerated)...")
+                # Determine RKNN model path
+                if self.rknn_model is None:
+                    self.rknn_model = str(Path(PROJECT_ROOT) / "yolo" / "models" / "yolo11n.rknn")
+                
+                if not Path(self.rknn_model).exists():
+                    print(f"WARNING: RKNN model not found at {self.rknn_model}, falling back to YOLO")
+                    self.use_rknn = False
+                else:
+                    self.rknn_detector = RKNNDetector(
+                        model_path=self.rknn_model,
+                        conf_threshold=self.conf_threshold,
+                        imgsz=640
+                    )
+                    self.rknn_detector.load()
+                    print("RKNN detector initialized")
+        
+        if not self.use_rknn:
+            print("Initializing YOLO...")
+            yolo_weights = Path(PROJECT_ROOT) / "yolo" / "models" / "yolo11n.pt"
+            self.yolo = YOLODetector(
+                name="GimbalTracker",
+                camera=self.camera,
+                weights=str(yolo_weights),
+                conf=self.conf_threshold,
+                imgsz=640
+            )
+            self.yolo.start()
+            print("YOLO initialized")
         
         print("Connecting to turret...")
         if not self.turret.connect():
@@ -671,7 +938,6 @@ class YOLOGimbal:
         height = y2 - y1
         
         return center_x, center_y, width, height
-    
     def calculate_error(self, target_x: float, target_y: float) -> Tuple[float, float, float, float]:
         """Calculate error from center in both pixels and normalized (FIX #3)"""
         # Error: how far target is from center
@@ -720,15 +986,17 @@ class YOLOGimbal:
                 if frame is None:
                     continue
                 
-                # Run YOLO detection on THIS frame (FIX #5 - sync detection with frame)
-                # Note: For true sync, we'd need to modify YOLODetector to process this frame
-                # For now, we ensure we read the most recent result
-                result = self.yolo.read()
-                if result is None:
-                    continue
-                
-                # Find target
-                target = self.find_target_detection(result.detections)
+                # Run detection (RKNN or YOLO)
+                if self.use_rknn:
+                    # RKNN: direct synchronous inference on frame
+                    detections = self.rknn_detector.detect(frame)
+                    target = self.find_target_detection(detections)
+                else:
+                    # YOLO: read from threaded detector
+                    result = self.yolo.read()
+                    if result is None:
+                        continue
+                    target = self.find_target_detection(result.detections)
                 
                 # Periodic status re-sync (FIX #8)
                 status_update_counter += 1
@@ -1034,6 +1302,9 @@ class YOLOGimbal:
             self.turret.send_command("MOTOR2:0", read_response=False)
             self.turret.disconnect()
         
+        if self.rknn_detector:
+            self.rknn_detector.release()
+        
         if self.yolo:
             self.yolo.stop()
         
@@ -1065,6 +1336,11 @@ Examples:
   python yolo_gimbal.py --camera 0 --turret COM3 --class person
   python yolo_gimbal.py --camera 1 --turret /dev/ttyUSB0 --class 0
   
+  # With RKNN acceleration (Rock Pi 5B):
+  python yolo_gimbal.py --camera 0 --turret /dev/ttyUSB0 --rknn
+  python yolo_gimbal.py --camera 0 --turret /dev/ttyUSB0 --rknn --class person
+  python yolo_gimbal.py --camera 0 --turret /dev/ttyUSB0 --rknn --rknn-model yolo/models/yolo11s.rknn
+  
   # With 3D visualization:
   python yolo_gimbal.py --camera 0 --turret COM3 --3d-viz
   python yolo_gimbal.py --camera 0 --turret COM3 --class person --viz
@@ -1083,7 +1359,8 @@ Examples:
   python yolo_gimbal.py --camera 0 --turret COM3 --invert-y  # Flip vertical
   python yolo_gimbal.py --camera 0 --turret COM3 --swap-servos  # Swap top/bottom
   
-Note: To find your camera index, run: python find_camera.py
+Note: RKNN requires rknnlite installed (Rock Pi 5B)
+      To find your camera index, run: python find_camera.py
         """
     )
     parser.add_argument('--camera', '-c', type=int, required=True,
@@ -1118,6 +1395,10 @@ Note: To find your camera index, run: python find_camera.py
                        help='Swap top and bottom servos (if they are wired backwards)')
     parser.add_argument('--3d-viz', '--viz', action='store_true', dest='enable_3d_viz',
                        help='Enable 3D visualization of turret orientation and tracking')
+    parser.add_argument('--rknn', action='store_true',
+                       help='Use RKNN hardware acceleration (Radxa Rock Pi 5B)')
+    parser.add_argument('--rknn-model', type=str, default=None,
+                       help='Path to RKNN model file (default: yolo/models/yolo11n.rknn)')
     parser.add_argument('--list-ports', '-l', action='store_true',
                        help='List available serial ports')
     
@@ -1149,7 +1430,9 @@ Note: To find your camera index, run: python find_camera.py
             invert_x=args.invert_x,
             invert_y=args.invert_y,
             swap_servos=args.swap_servos,
-            enable_3d_viz=args.enable_3d_viz
+            enable_3d_viz=args.enable_3d_viz,
+            use_rknn=args.rknn,
+            rknn_model=args.rknn_model
         )
         
         gimbal.initialize()
