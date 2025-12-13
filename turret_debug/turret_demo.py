@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 # Add project root to path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
@@ -23,21 +23,34 @@ def main():
     print("TURRET 3D TRACKING SYSTEM DEMO")
     print("=" * 60)
     
-    # Configure turret
-    # ADJUST THESE VALUES FOR YOUR SETUP:
-    PORT = 'COM3'  # Change to your Arduino port (Windows: COM3, Linux: /dev/ttyUSB0)
+    # ============================================
+    # CONFIGURE YOUR TURRET HERE:
+    # ============================================
+    
+    # STEP 1: Set your Arduino port
+    # Windows: 'COM3', 'COM4', etc.
+    # Linux: '/dev/ttyUSB0', '/dev/ttyACM0', etc.
+    PORT = 'COM3'  # <<< CHANGE THIS
+    
+    # STEP 2: Set your camera indices (from camera finder tool)
+    # Run: python src/Debug_Tools/fuck_you_camerafinder.py
+    # Then plug in the indices here:
     CAMERAS = {
-        'left': 0,    # Left fisheye camera index
-        'right': 1,   # Right fisheye camera index
-        'center': 2   # Center tracking camera index
+        'left': 0,    # <<< Left fisheye camera index
+        'right': 1,   # <<< Right fisheye camera index
+        'center': 2   # <<< Center tracking camera index
     }
     
-    # Optional: Only track specific objects
-    TARGET_CLASSES = ['person', 'bottle', 'cup']  # Or None for all classes
+    # STEP 3: (Optional) Only track specific objects
+    # Leave as None to track everything, or set list of classes:
+    TARGET_CLASSES = ['person', 'bottle', 'cup']  # Or None for all
+    # TARGET_CLASSES = None  # Track everything
+    
+    # ============================================
     
     print(f"\nConfiguration:")
     print(f"  Port: {PORT}")
-    print(f"  Cameras: {CAMERAS}")
+    print(f"  Cameras: Left={CAMERAS['left']}, Right={CAMERAS['right']}, Center={CAMERAS['center']}")
     print(f"  Target Classes: {TARGET_CLASSES or 'All'}")
     print()
     
@@ -120,4 +133,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
