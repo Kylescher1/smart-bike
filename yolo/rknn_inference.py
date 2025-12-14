@@ -395,6 +395,157 @@ def post_process_yolov5(outputs, conf_threshold=0.25, iou_threshold=0.45, img_sh
     return np.concatenate(nboxes), np.concatenate(nclasses), np.concatenate(nscores)
 
 
+def post_process_yolov5_seg(outputs, conf_threshold=0.25, iou_threshold=0.45, img_shape=(640, 640)):
+    """
+    Post-process YOLOv5-seg outputs (7 outputs: 3 det + 3 mask coeff + 1 proto).
+    
+    Returns: boxes, classes, scores, masks (list of binary masks per detection)
+    """
+    # Separate detection, mask coefficient, and prototype outputs
+    det_outputs = [outputs[0], outputs[2], outputs[4]]  # (1, 255, H, W)
+    mask_outputs = [outputs[1], outputs[3], outputs[5]]  # (1, 96, H, W) = 3 anchors × 32 coeffs
+    proto = outputs[6]  # (1, 32, 160, 160)
+    
+    anchors = [
+        [(10, 13), (16, 30), (33, 23)],
+        [(30, 61), (62, 45), (59, 119)],
+        [(116, 90), (156, 198), (373, 326)]
+    ]
+    strides = [8, 16, 32]
+    
+    all_boxes = []
+    all_scores = []
+    all_classes = []
+    all_mask_coeffs = []
+    
+    for i, (det_out, mask_out) in enumerate(zip(det_outputs, mask_outputs)):
+        _, det_channels, h, w = det_out.shape
+        num_anchors = 3
+        num_classes = det_channels // num_anchors - 5  # 80
+        num_mask_coeffs = 32
+        
+        # Reshape detection output
+        det_out = det_out.reshape(1, num_anchors, 5 + num_classes, h, w)
+        det_out = det_out.transpose(0, 1, 3, 4, 2)  # (1, 3, H, W, 85)
+        
+        # Reshape mask coefficient output
+        mask_out = mask_out.reshape(1, num_anchors, num_mask_coeffs, h, w)
+        mask_out = mask_out.transpose(0, 1, 3, 4, 2)  # (1, 3, H, W, 32)
+        
+        grid_y, grid_x = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+        grid = np.stack([grid_x, grid_y], axis=-1).astype(np.float32)
+        
+        for a in range(num_anchors):
+            anchor_w, anchor_h = anchors[i][a]
+            pred = det_out[0, a]  # (H, W, 85)
+            mask_pred = mask_out[0, a]  # (H, W, 32)
+            
+            xy = pred[..., :2]
+            wh = pred[..., 2:4]
+            obj = pred[..., 4:5]
+            cls = pred[..., 5:]
+            
+            xy = (xy * 2 - 0.5 + grid) * strides[i]
+            wh = (wh * 2) ** 2 * np.array([anchor_w, anchor_h])
+            
+            x1y1 = xy - wh / 2
+            x2y2 = xy + wh / 2
+            boxes = np.concatenate([x1y1, x2y2], axis=-1)
+            
+            scores = obj * cls
+            
+            boxes = boxes.reshape(-1, 4)
+            scores = scores.reshape(-1, num_classes)
+            mask_coeffs = mask_pred.reshape(-1, num_mask_coeffs)
+            
+            class_ids = np.argmax(scores, axis=1)
+            class_scores = np.max(scores, axis=1)
+            
+            mask = class_scores > conf_threshold
+            if np.any(mask):
+                all_boxes.append(boxes[mask])
+                all_scores.append(class_scores[mask])
+                all_classes.append(class_ids[mask])
+                all_mask_coeffs.append(mask_coeffs[mask])
+    
+    if not all_boxes:
+        return [], [], [], []
+    
+    boxes = np.concatenate(all_boxes)
+    scores = np.concatenate(all_scores)
+    classes = np.concatenate(all_classes)
+    mask_coeffs = np.concatenate(all_mask_coeffs)
+    
+    h_img, w_img = img_shape
+    boxes[:, 0] = np.clip(boxes[:, 0], 0, w_img)
+    boxes[:, 1] = np.clip(boxes[:, 1], 0, h_img)
+    boxes[:, 2] = np.clip(boxes[:, 2], 0, w_img)
+    boxes[:, 3] = np.clip(boxes[:, 3], 0, h_img)
+    
+    # NMS per class (keeping mask coefficients aligned)
+    nboxes, nclasses, nscores, nmask_coeffs = [], [], [], []
+    for c in set(classes):
+        inds = np.where(classes == c)[0]
+        b = boxes[inds]
+        s = scores[inds]
+        mc = mask_coeffs[inds]
+        keep = nms(b, s, iou_threshold)
+        if len(keep) > 0:
+            nboxes.append(b[keep])
+            nclasses.append(np.full(len(keep), c))
+            nscores.append(s[keep])
+            nmask_coeffs.append(mc[keep])
+    
+    if not nboxes:
+        return [], [], [], []
+    
+    boxes = np.concatenate(nboxes)
+    classes = np.concatenate(nclasses)
+    scores = np.concatenate(nscores)
+    mask_coeffs = np.concatenate(nmask_coeffs)
+    
+    # Generate masks from prototypes: mask = sigmoid(coeffs @ protos)
+    # proto shape: (1, 32, 160, 160) -> (32, 160*160)
+    proto_h, proto_w = proto.shape[2], proto.shape[3]
+    protos = proto[0].reshape(32, -1)  # (32, 25600)
+    
+    # mask_coeffs: (N, 32), protos: (32, 25600) -> masks: (N, 25600)
+    masks_flat = mask_coeffs @ protos  # (N, 25600)
+    masks_flat = 1 / (1 + np.exp(-masks_flat))  # sigmoid
+    masks_proto = masks_flat.reshape(-1, proto_h, proto_w)  # (N, 160, 160)
+    
+    # Crop and resize masks to bounding boxes at original image size
+    masks = []
+    scale_x = proto_w / w_img
+    scale_y = proto_h / h_img
+    
+    for i, box in enumerate(boxes):
+        x1, y1, x2, y2 = box
+        # Scale box to proto size
+        px1 = int(max(0, x1 * scale_x))
+        py1 = int(max(0, y1 * scale_y))
+        px2 = int(min(proto_w, x2 * scale_x))
+        py2 = int(min(proto_h, y2 * scale_y))
+        
+        if px2 <= px1 or py2 <= py1:
+            masks.append(np.zeros((int(y2 - y1), int(x2 - x1)), dtype=np.uint8))
+            continue
+        
+        # Crop mask from proto resolution
+        mask_crop = masks_proto[i, py1:py2, px1:px2]
+        
+        # Resize to box size
+        box_h = max(1, int(y2 - y1))
+        box_w = max(1, int(x2 - x1))
+        mask_resized = cv2.resize(mask_crop, (box_w, box_h), interpolation=cv2.INTER_LINEAR)
+        
+        # Threshold to binary
+        mask_binary = (mask_resized > 0.5).astype(np.uint8) * 255
+        masks.append(mask_binary)
+    
+    return boxes, classes, scores, masks
+
+
 def process_output(output, conf_threshold=0.25, iou_threshold=0.45, img_shape=(640, 640)):
     """
     Process RKNN model output to get detections.
@@ -407,10 +558,11 @@ def process_output(output, conf_threshold=0.25, iou_threshold=0.45, img_shape=(6
     # YOLOv5: 3 outputs with shape (1, 255, H, W)
     # YOLOv5-seg: 7 outputs (3 det + 3 mask coeff + 1 proto)
     # YOLOv8/v11: 6 or 9 outputs
+    masks = None  # Will be set for segmentation models
+    
     if len(output) == 7 and output[0].shape[1] == 255:
-        # YOLOv5-seg format: extract detection outputs (indices 0, 2, 4), ignore mask outputs
-        det_outputs = [output[0], output[2], output[4]]
-        boxes, classes, scores = post_process_yolov5(det_outputs, conf_threshold, iou_threshold, img_shape)
+        # YOLOv5-seg format: full segmentation with masks
+        boxes, classes, scores, masks = post_process_yolov5_seg(output, conf_threshold, iou_threshold, img_shape)
     elif len(output) == 3 and output[0].shape[1] == 255:
         # YOLOv5 format (3 anchor-based outputs)
         boxes, classes, scores = post_process_yolov5(output, conf_threshold, iou_threshold, img_shape)
@@ -510,30 +662,78 @@ def process_output(output, conf_threshold=0.25, iou_threshold=0.45, img_shape=(6
     # Format as list of detections
     detections = []
     for i in range(len(boxes)):
-        detections.append({
+        det = {
             'bbox': boxes[i].astype(int),
             'score': float(scores[i]),
             'class_id': int(classes[i]),
             'class_name': COCO_CLASSES[classes[i]] if classes[i] < len(COCO_CLASSES) else f'class_{classes[i]}'
-        })
+        }
+        # Include mask if available (segmentation model)
+        if masks is not None and i < len(masks):
+            det['mask'] = masks[i]
+        detections.append(det)
     
     return detections
 
 
+# Color palette for segmentation masks (different color per class)
+MASK_COLORS = [
+    (255, 56, 56), (255, 157, 151), (255, 112, 31), (255, 178, 29), (207, 210, 49),
+    (72, 249, 10), (146, 204, 23), (61, 219, 134), (26, 147, 52), (0, 212, 187),
+    (44, 153, 168), (0, 194, 255), (52, 69, 147), (100, 115, 255), (0, 24, 236),
+    (132, 56, 255), (82, 0, 133), (203, 56, 255), (255, 149, 200), (255, 55, 199)
+]
+
+
 def draw_detections(img, detections):
-    """Draw bounding boxes and labels on image."""
+    """Draw bounding boxes, labels, and segmentation masks on image."""
+    # First draw masks (so boxes appear on top)
+    overlay = img.copy()
+    for det in detections:
+        if 'mask' in det:
+            x1, y1, x2, y2 = det['bbox']
+            mask = det['mask']
+            class_id = det['class_id']
+            color = MASK_COLORS[class_id % len(MASK_COLORS)]
+            
+            # Create colored mask
+            h, w = mask.shape[:2]
+            if h > 0 and w > 0:
+                # Ensure mask fits in image bounds
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(img.shape[1], x2), min(img.shape[0], y2)
+                actual_w, actual_h = x2 - x1, y2 - y1
+                
+                if actual_w > 0 and actual_h > 0:
+                    # Resize mask if needed
+                    if mask.shape[0] != actual_h or mask.shape[1] != actual_w:
+                        mask = cv2.resize(mask, (actual_w, actual_h))
+                    
+                    # Apply colored mask where mask > 0
+                    mask_region = overlay[y1:y2, x1:x2]
+                    mask_bool = mask > 127
+                    mask_region[mask_bool] = (
+                        mask_region[mask_bool] * 0.5 + np.array(color) * 0.5
+                    ).astype(np.uint8)
+    
+    # Blend overlay with original
+    cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
+    
+    # Then draw boxes and labels
     for det in detections:
         x1, y1, x2, y2 = det['bbox']
         score = det['score']
         class_name = det['class_name']
+        class_id = det['class_id']
+        color = MASK_COLORS[class_id % len(MASK_COLORS)] if 'mask' in det else (0, 255, 0)
         
         # Draw bounding box
-        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
         
         # Draw label
         label = f"{class_name} {score:.2f}"
         (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        cv2.rectangle(img, (x1, y1 - text_height - baseline - 5), (x1 + text_width, y1), (0, 255, 0), -1)
+        cv2.rectangle(img, (x1, y1 - text_height - baseline - 5), (x1 + text_width, y1), color, -1)
         cv2.putText(img, label, (x1, y1 - baseline - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
     
     return img
