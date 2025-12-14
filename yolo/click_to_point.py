@@ -125,26 +125,43 @@ class TurretController:
 
 
 def pixel_to_servo(x: int, y: int, frame_w: int, frame_h: int, 
-                   turret: TurretController) -> tuple:
+                   turret: TurretController,
+                   fov_h: float = 50.0) -> tuple:
     """
-    Convert pixel coordinates to servo angles.
+    Convert pixel coordinates to servo angles based on camera FOV.
     
-    Camera center = servo home position (90, 90)
-    Moving left/right adjusts bottom servo (pan)
-    Moving up/down adjusts top servo (tilt)
+    Click offset from frame center = angular offset to move from CURRENT position.
+    This makes clicking center do nothing, clicking off-center moves to center on that point.
+    
+    Args:
+        x, y: Click position in pixels
+        frame_w, frame_h: Frame dimensions (e.g., 1280x720)
+        turret: TurretController instance
+        fov_h: Horizontal field of view in degrees (default 50°)
     """
-    # Normalize to -1 to 1 range (center = 0)
-    norm_x = (x - frame_w / 2) / (frame_w / 2)
-    norm_y = (y - frame_h / 2) / (frame_h / 2)
+    # Calculate vertical FOV from aspect ratio
+    aspect_ratio = frame_h / frame_w
+    fov_v = fov_h * aspect_ratio  # ~28° for 1280x720 with 50° horizontal
     
-    # Map to servo range
-    # Bottom servo (pan): left = higher angle, right = lower angle
-    bottom_range = turret.bottom_max - turret.bottom_min
-    bottom_angle = turret.bottom_home + int(norm_x * (bottom_range / 2))
+    # Pixel offset from center of frame
+    dx = x - frame_w / 2  # Positive = right of center
+    dy = y - frame_h / 2  # Positive = below center
     
-    # Top servo (tilt): up = lower angle, down = higher angle  
-    top_range = turret.top_max - turret.top_min
-    top_angle = turret.top_home - int(norm_y * (top_range / 2))
+    # Convert pixel offset to angular offset (degrees)
+    # At frame edge: dx = frame_w/2 corresponds to fov_h/2 degrees
+    angle_x = (dx / (frame_w / 2)) * (fov_h / 2)  # Horizontal angle offset
+    angle_y = (dy / (frame_h / 2)) * (fov_v / 2)  # Vertical angle offset
+    
+    # Add angular offset to CURRENT position (not home)
+    # Bottom servo (pan): click right of center → increase servo angle
+    bottom_angle = turret.bottom_pos + int(angle_x)
+    
+    # Top servo (tilt): click below center → decrease servo angle (inverted)
+    top_angle = turret.top_pos - int(angle_y)
+    
+    # Clamp to limits
+    bottom_angle = max(turret.bottom_min, min(turret.bottom_max, bottom_angle))
+    top_angle = max(turret.top_min, min(turret.top_max, top_angle))
     
     return top_angle, bottom_angle
 
@@ -167,9 +184,9 @@ def main():
     turret.home()
     time.sleep(1)
     
-    # Open camera
+    # Open camera (1280x720 to match 50° FOV calibration)
     camera_config = CAMERA_CONFIG.copy()
-    camera_config.update({"width": 640, "height": 480, "fps": 30, "fourcc": "MJPG"})
+    camera_config.update({"width": 1280, "height": 720, "fps": 30, "fourcc": "MJPG"})
     
     try:
         camera = ThreadedCamera(index=args.source, config=camera_config)
