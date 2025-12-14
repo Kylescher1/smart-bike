@@ -1160,14 +1160,17 @@ class YOLOGimbal:
                  swap_servos: bool = False, enable_3d_viz: bool = False,
                  use_rknn: bool = False, rknn_model: Optional[str] = None,
                  enable_error_plot: bool = False, enable_timing: bool = False,
-                 detection_imgsz: int = 640, enable_distance: bool = True):
+                 detection_imgsz: int = 640, enable_distance: bool = True,
+                 fov_horizontal: float = 50.0, fov_vertical: Optional[float] = None,
+                 frame_width: int = 1280, frame_height: int = 720,
+                 pid_max_output: float = 5.0):
         self.camera_index = camera_index
         self.turret_port = turret_port
         self.target_class = target_class
         self.conf_threshold = conf_threshold
         self.deadzone = deadzone  # Pixels - don't move if error is smaller (FIX #12)
         self.deadzone_degrees = deadzone_degrees  # Degrees - minimum movement (FIX #12)
-        self.movement_scale = movement_scale  # Scale for normalized error to degrees (FIX #3)
+        self.movement_scale = movement_scale  # Scale for normalized error to degrees (FIX #3) - kept for backwards compatibility
         self.min_step = min_step  # Minimum step to overcome deadband (FIX #2)
         self.max_movement = max_movement  # Maximum movement per command (degrees) - safety limit
         self.control_rate = control_rate  # Control loop rate in Hz (FIX #11)
@@ -1187,19 +1190,30 @@ class YOLOGimbal:
         self.detection_imgsz = detection_imgsz  # Detection input size (lower = faster)
         self.enable_distance = enable_distance  # Enable TF03 LiDAR distance reading
         
+        # Camera FOV-based error mapping (physically accurate pixel-to-degree conversion)
+        self.fov_horizontal = fov_horizontal  # Horizontal field of view in degrees
+        self.fov_vertical = fov_vertical  # Vertical FOV (calculated from aspect ratio if None)
+        self.requested_frame_width = frame_width  # Requested frame width
+        self.requested_frame_height = frame_height  # Requested frame height
+        
+        # These will be calculated in initialize() after getting actual frame dimensions
+        self.degrees_per_pixel_x = None
+        self.degrees_per_pixel_y = None
+        
         # Initialize components
         self.camera = None
         self.yolo = None
         self.rknn_detector = None
         self.turret = TurretController(turret_port)
-        self.pid = PIDController(kp=kp, ki=ki, kd=kd, max_output=5.0)  # Reduced from 10.0 for smoother movement
+        self.pid_max_output = pid_max_output
+        self.pid = PIDController(kp=kp, ki=ki, kd=kd, max_output=pid_max_output)  # Max output now in degrees
         self.visualizer = None
         self.error_plotter = None
         
         # State
         self.running = False
-        self.frame_width = 640
-        self.frame_height = 480
+        self.frame_width = self.requested_frame_width
+        self.frame_height = self.requested_frame_height
         self.center_x = self.frame_width // 2
         self.center_y = self.frame_height // 2
         
@@ -1217,8 +1231,8 @@ class YOLOGimbal:
         print("Initializing camera...")
         camera_config = CAMERA_CONFIG.copy()
         camera_config.update({
-            "width": 640,
-            "height": 480,
+            "width": self.requested_frame_width,
+            "height": self.requested_frame_height,
             "fps": int(self.camera_fps),
             "fourcc": "MJPG"
         })
@@ -1234,6 +1248,24 @@ class YOLOGimbal:
         self.center_x = self.frame_width // 2
         self.center_y = self.frame_height // 2
         print(f"Camera initialized: {self.frame_width}x{self.frame_height}")
+        
+        # Calculate FOV-based degrees per pixel for accurate error mapping
+        # This maps pixel error directly to servo degrees based on camera geometry
+        self.degrees_per_pixel_x = self.fov_horizontal / self.frame_width
+        
+        # Calculate vertical FOV from aspect ratio if not provided
+        if self.fov_vertical is None:
+            # Using proper FOV calculation: vertical_fov = 2 * atan(tan(h_fov/2) * height/width)
+            aspect_ratio = self.frame_height / self.frame_width
+            self.fov_vertical = 2 * np.degrees(np.arctan(
+                np.tan(np.radians(self.fov_horizontal / 2)) * aspect_ratio
+            ))
+        
+        self.degrees_per_pixel_y = self.fov_vertical / self.frame_height
+        
+        print(f"FOV mapping: {self.fov_horizontal:.1f}° horizontal, {self.fov_vertical:.1f}° vertical")
+        print(f"Degrees per pixel: X={self.degrees_per_pixel_x:.4f}°/px, Y={self.degrees_per_pixel_y:.4f}°/px")
+        print(f"Max error (at edge): X={self.frame_width/2 * self.degrees_per_pixel_x:.1f}°, Y={self.frame_height/2 * self.degrees_per_pixel_y:.1f}°")
         
         # Initialize detector (RKNN or YOLO)
         if self.use_rknn:
@@ -1349,20 +1381,34 @@ class YOLOGimbal:
         height = y2 - y1
         
         return center_x, center_y, width, height
-    def calculate_error(self, target_x: float, target_y: float) -> Tuple[float, float, float, float]:
-        """Calculate error from center in both pixels and normalized (FIX #3)"""
+    def calculate_error(self, target_x: float, target_y: float) -> Tuple[float, float, float, float, float, float]:
+        """Calculate error from center in pixels, normalized, and degrees (FOV-based)
+        
+        Returns:
+            error_x_px: Horizontal error in pixels
+            error_y_px: Vertical error in pixels  
+            error_x_norm: Normalized horizontal error (-0.5 to 0.5)
+            error_y_norm: Normalized vertical error (-0.5 to 0.5)
+            error_x_deg: Horizontal error in degrees (based on camera FOV)
+            error_y_deg: Vertical error in degrees (based on camera FOV)
+        """
         # Error: how far target is from center
         # Positive error_x = target is RIGHT of center, need to move turret RIGHT (increase bottom servo)
         # Positive error_y = target is BELOW center, need to move turret DOWN (increase top servo)
         error_x_px = target_x - self.center_x
         error_y_px = target_y - self.center_y
         
-        # Normalize error (for PID)
-        # Scale by frame dimensions
+        # Normalize error (legacy, kept for backwards compatibility)
         error_x_norm = error_x_px / self.frame_width  # -0.5 to 0.5
         error_y_norm = error_y_px / self.frame_height  # -0.5 to 0.5
         
-        return error_x_px, error_y_px, error_x_norm, error_y_norm
+        # FOV-based degree error (physically accurate!)
+        # This directly tells us how many degrees the servo needs to move
+        # to center the target, based on actual camera geometry
+        error_x_deg = error_x_px * self.degrees_per_pixel_x
+        error_y_deg = error_y_px * self.degrees_per_pixel_y
+        
+        return error_x_px, error_y_px, error_x_norm, error_y_norm, error_x_deg, error_y_deg
     
     def run(self):
         """Main tracking loop with all fixes applied"""
@@ -1371,10 +1417,11 @@ class YOLOGimbal:
         print("Press 'q' to quit, 'r' to reset PID, 'h' to home, 'l' to reset limits")
         print("Press 'c' to enter calibration mode, 's' to force status update")
         print(f"Tracking: {self.target_class or 'all classes'}")
-        print(f"PID gains: Kp={self.pid.kp}, Ki={self.pid.ki}, Kd={self.pid.kd}")
+        print(f"PID gains: Kp={self.pid.kp}, Ki={self.pid.ki}, Kd={self.pid.kd}, max_out={self.pid_max_output}°")
         print(f"Deadzone: {self.deadzone}px, {self.deadzone_degrees}°")
-        print(f"Movement scale: {self.movement_scale} (lower = smoother)")
-        print(f"Max movement: {self.max_movement}° per command (safety limit)")
+        print(f"FOV-based mapping: {self.degrees_per_pixel_x:.4f}°/px (H), {self.degrees_per_pixel_y:.4f}°/px (V)")
+        print(f"Max error at edge: ±{self.fov_horizontal/2:.1f}° horizontal, ±{self.fov_vertical/2:.1f}° vertical")
+        print(f"Max movement: {self.max_movement}° per step (safety), PID max: {self.pid_max_output}° per step")
         print(f"Control rate: {self.control_rate} Hz")
         print(f"Camera FPS: {self.camera_fps} Hz")
         if not self.disable_display:
@@ -1457,17 +1504,21 @@ class YOLOGimbal:
                         cv2.line(frame, (self.center_x, self.center_y), 
                                 (int(target_x), int(target_y)), (255, 0, 0), 2)
                     
-                    # Calculate error (FIX #3 - now returns pixels and normalized)
-                    error_x_px, error_y_px, error_x_norm, error_y_norm = self.calculate_error(target_x, target_y)
+                    # Calculate error (FIX #3 - now returns pixels, normalized, AND degrees)
+                    error_x_px, error_y_px, error_x_norm, error_y_norm, error_x_deg, error_y_deg = self.calculate_error(target_x, target_y)
                     
                     # Check pixel deadzone (FIX #12)
                     if abs(error_x_px) > self.deadzone or abs(error_y_px) > self.deadzone:
-                        # Update PID with fixed dt (FIX #11)
-                        output_x, output_y = self.pid.update(error_x_norm, error_y_norm, self.control_dt)
+                        # Update PID with degree-based error (FIX #14 - FOV-based mapping)
+                        # Using degree error makes PID output directly in degrees
+                        # This is physically accurate: if target is 5° off, PID operates on 5°
+                        # Max error is limited to half FOV (e.g., 25° for 50° FOV)
+                        output_x, output_y = self.pid.update(error_x_deg, error_y_deg, self.control_dt)
                         
-                        # Convert PID output to servo movement (FIX #3 - better scaling)
-                        move_x = output_x * self.movement_scale
-                        move_y = output_y * self.movement_scale
+                        # PID output is now already in degrees (no arbitrary scaling needed)
+                        # The PID naturally limits large movements because max input is ~25° (half FOV)
+                        move_x = output_x
+                        move_y = output_y
                         
                         # Apply direction inversions
                         if self.invert_x:
@@ -1542,14 +1593,14 @@ class YOLOGimbal:
                                 has_target=True
                             )
                         
-                        # Better logging (FIX #13)
-                        if abs(error_x_px) > 50:  # Significant horizontal error
+                        # Better logging (FIX #13) - now with degree error
+                        if abs(error_x_deg) > 2.0:  # Significant horizontal error (>2 degrees)
                             direction = "RIGHT" if error_x_px > 0 else "LEFT"
                             move_dir = "RIGHT" if move_x > 0 else "LEFT"
                             dist_info = f", Range={distance_cm:.1f}cm" if distance_cm is not None else ""
-                            print(f"Target {direction} of center (error={error_x_px:.1f}px), "
-                                  f"PID_out={output_x:.3f}, moving turret {move_dir} "
-                                  f"(move={move_x:.2f}deg, pos={self.turret.bottom_pos:.1f}°{dist_info})")
+                            print(f"Target {direction} (err={error_x_deg:.2f}°/{error_x_px:.0f}px), "
+                                  f"PID={output_x:.2f}°, move {move_dir} {move_x:.2f}°, "
+                                  f"pos={self.turret.bottom_pos:.1f}°{dist_info}")
                         
                         # Display info (only if displaying)
                         if should_display_frame:
@@ -1559,12 +1610,12 @@ class YOLOGimbal:
                             if at_limit_y:
                                 limit_text += " [Y LIMIT]"
                             
-                            cv2.putText(frame, f"Error: X={error_x_px:.1f}px Y={error_y_px:.1f}px", 
-                                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                            cv2.putText(frame, f"Error: X={error_x_px:.1f}px ({error_x_deg:.2f}deg) Y={error_y_px:.1f}px ({error_y_deg:.2f}deg)", 
+                                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                             cv2.putText(frame, f"Move: X={move_x:.2f}deg Y={move_y:.2f}deg{limit_text}", 
-                                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                                       (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                             cv2.putText(frame, f"Pos: Bottom={self.turret.bottom_pos:.1f}deg Top={self.turret.top_pos:.1f}deg", 
-                                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                                       (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                     else:
                         if should_display_frame:
                             cv2.putText(frame, "LOCKED", (10, 30), 
@@ -1855,9 +1906,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage:
+  # Basic usage (with FOV-based mapping for 1280x720 @ 50° FOV):
   python yolo_gimbal.py --camera 0 --turret COM3 --class person
   python yolo_gimbal.py --camera 1 --turret /dev/ttyUSB0 --class 0
+  
+  # With custom camera FOV and resolution:
+  python yolo_gimbal.py --camera 0 --turret COM3 --fov-h 60 --frame-width 1920 --frame-height 1080
+  python yolo_gimbal.py --camera 0 --turret COM3 --fov-h 50 --frame-width 1280 --frame-height 720
   
   # With RKNN acceleration (Rock Pi 5B):
   python yolo_gimbal.py --camera 0 --turret /dev/ttyUSB0 --rknn
@@ -1873,13 +1928,11 @@ Examples:
   python yolo_gimbal.py --camera 0 --turret COM3 --rknn --error-plot --class person
   
   # Tuning movement (if too fast/jerky):
-  python yolo_gimbal.py --camera 0 --turret COM3 --movement-scale 10  # Slower
   python yolo_gimbal.py --camera 0 --turret COM3 --kp 0.2  # Less aggressive
   python yolo_gimbal.py --camera 0 --turret COM3 --deadzone 20  # Less sensitive
   python yolo_gimbal.py --camera 0 --turret COM3 --max-movement 5  # Limit large jumps (safety)
   
   # Tuning movement (if too slow/sluggish):
-  python yolo_gimbal.py --camera 0 --turret COM3 --movement-scale 25  # Faster
   python yolo_gimbal.py --camera 0 --turret COM3 --kp 0.5 --ki 0.01  # More aggressive
   
   # Fix flipped directions:
@@ -1893,6 +1946,12 @@ Examples:
   python yolo_gimbal.py --camera 0 --turret COM3 --rknn --control-rate 60 --camera-fps 60  # Both
   python yolo_gimbal.py --camera 0 --turret COM3 --rknn --disable-display  # Max FPS (no display)
   python yolo_gimbal.py --camera 0 --turret COM3 --rknn --display-fps 15  # Lower display FPS to save CPU
+
+FOV-Based Mapping:
+  The system uses camera FOV to accurately map pixel error to servo degrees.
+  For a 50° horizontal FOV on 1280px width: 1 pixel = 0.039° (50/1280)
+  Max error at frame edge (640px off center) = 25° (half FOV)
+  This prevents unrealistic large servo movements from detection noise.
   
 Note: RKNN requires rknnlite installed (Rock Pi 5B)
       To find your camera index, run: python find_camera.py
@@ -1918,11 +1977,13 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
     parser.add_argument('--deadzone-degrees', type=float, default=0.5,
                        help='Deadzone in degrees (default: 0.5)')
     parser.add_argument('--movement-scale', type=float, default=15.0,
-                       help='Movement scale factor (default: 15.0, lower = slower/smoother)')
+                       help='[DEPRECATED] Movement scale factor - FOV-based mapping now used instead')
     parser.add_argument('--min-step', type=float, default=0.5,
                        help='Minimum step size to overcome servo deadband (default: 0.5)')
     parser.add_argument('--max-movement', type=float, default=10.0,
                        help='Maximum movement per command in degrees (default: 10.0, safety limit to prevent large jumps)')
+    parser.add_argument('--pid-max-output', type=float, default=5.0,
+                       help='PID controller max output in degrees (default: 5.0, limits max single-step movement)')
     parser.add_argument('--control-rate', type=float, default=30.0,
                        help='Control loop rate in Hz (default: 30.0, higher = faster tracking)')
     parser.add_argument('--camera-fps', type=float, default=30.0,
@@ -1953,6 +2014,14 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Enable TF03 LiDAR distance reading (default: enabled)')
     parser.add_argument('--disable-distance', action='store_true',
                        help='Disable TF03 LiDAR distance reading (use if sensor not connected)')
+    parser.add_argument('--fov-h', '--fov', type=float, default=50.0, dest='fov_horizontal',
+                       help='Camera horizontal field of view in degrees (default: 50.0)')
+    parser.add_argument('--fov-v', type=float, default=None, dest='fov_vertical',
+                       help='Camera vertical field of view in degrees (default: calculated from aspect ratio)')
+    parser.add_argument('--frame-width', type=int, default=1280,
+                       help='Camera frame width in pixels (default: 1280)')
+    parser.add_argument('--frame-height', type=int, default=720,
+                       help='Camera frame height in pixels (default: 720)')
     parser.add_argument('--list-ports', '-l', action='store_true',
                        help='List available serial ports')
 
@@ -1999,7 +2068,12 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
             enable_error_plot=args.enable_error_plot,
             enable_timing=args.enable_timing,
             detection_imgsz=args.detection_imgsz,
-            enable_distance=enable_distance
+            enable_distance=enable_distance,
+            fov_horizontal=args.fov_horizontal,
+            fov_vertical=args.fov_vertical,
+            frame_width=args.frame_width,
+            frame_height=args.frame_height,
+            pid_max_output=args.pid_max_output
         )
         
         gimbal.initialize()
