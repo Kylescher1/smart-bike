@@ -152,11 +152,7 @@ def simple_obsticle_response(obsticle_arr,Peripherals,brake_state):
     # do we play sound?
 
     #do we activate breaks?
-<<<<<<< HEAD
     brake_mindist = 0.75# (m)
-=======
-    brake_mindist = 5.0# (m)
->>>>>>> origin/rockpi
     if dist < brake_mindist:
         # Only engage brakes if not already engaged or running
         if 'Brakes' in Peripherals:
@@ -169,7 +165,7 @@ def simple_obsticle_response(obsticle_arr,Peripherals,brake_state):
                 print(f"DANGER! Obstacle at {dist:.2f}m - ENGAGING BRAKES")
                 # Start dont_die in a non-blocking thread
                 def start_brakes():
-                    Peripherals['Brakes'].dont_die()
+                    Peripherals['Brakes'].dont_die(blocking=True)  # blocking=True so wrapper waits for completion
                     brake_state['engaged'] = False  # Reset when routine completes
                 brake_thread = threading.Thread(target=start_brakes, daemon=True)
                 brake_thread.start()
@@ -319,7 +315,7 @@ def main():
     print("===" * 20)
     try:
         #Runs once before main loop
-        display = True
+        display = False
         last_plot_data = None
         plot_skip_counter = 0
         
@@ -443,104 +439,104 @@ def main():
             loop_time = (time.time() - loop_start) * 1000
             timing_stats['total'].append(loop_time)
             
-            # Print detailed timing every 10 loops
-            if loop_count % 10 == 0:
-                print(f"\n{'='*70}")
-                print(f"[TIMING ANALYSIS] Loop {loop_count} - Last 10 loops average:")
-                print(f"{'='*70}")
-                
-                # Calculate averages
-                avg_read = np.mean(timing_stats['read_sensors'][-10:])
-                avg_transform = np.mean([sum(transform_times.values())] if transform_times else [0])
-                avg_obstacle = np.mean(timing_stats['obstacle_detection'][-10:])
-                avg_response = np.mean(timing_stats['response'][-10:])
-                avg_plot = np.mean(timing_stats['plot'][-10:])
-                avg_sleep = np.mean(timing_stats['sleep'][-10:])
-                avg_total = np.mean(timing_stats['total'][-10:])
-                
-                # Calculate percentages
-                pct_read = (avg_read / avg_total * 100) if avg_total > 0 else 0
-                pct_transform = (avg_transform / avg_total * 100) if avg_total > 0 else 0
-                pct_obstacle = (avg_obstacle / avg_total * 100) if avg_total > 0 else 0
-                pct_response = (avg_response / avg_total * 100) if avg_total > 0 else 0
-                pct_plot = (avg_plot / avg_total * 100) if avg_total > 0 else 0
-                pct_sleep = (avg_sleep / avg_total * 100) if avg_total > 0 else 0
-                
-                print(f"Total Loop Time: {avg_total:.2f}ms ({1000/avg_total:.1f} FPS)")
-                print(f"\nBreakdown:")
-                print(f"  ├─ Read Sensors:     {avg_read:7.2f}ms ({pct_read:5.1f}%)", end="")
-                if sensor_read_times:
-                    print(" [", end="")
-                    sensor_details = []
-                    for name, t in sensor_read_times.items():
-                        sensor_details.append(f"{name}: {t:.1f}ms")
-                    print(" | ".join(sensor_details), end="")
-                    print("]")
-                else:
-                    print()
-                
-                if transform_times:
-                    total_transform = sum(transform_times.values())
-                    print(f"  ├─ Transform:        {total_transform:7.2f}ms ({pct_transform:5.1f}%)", end="")
-                    print(" [", end="")
-                    transform_details = []
-                    for key, t in transform_times.items():
-                        transform_details.append(f"{key}: {t:.1f}ms")
-                    print(" | ".join(transform_details), end="")
-                    print("]")
-                    
-                    # Show transform breakdown if available
-                    if hasattr(transform_to_cordnate, 'last_timings'):
-                        tf_times = transform_to_cordnate.last_timings
-                        print(f"      └─ Breakdown: slice={tf_times.get('slice', 0):.2f}ms, "
-                              f"to_quat={tf_times.get('to_quat', 0):.2f}ms, "
-                              f"rotate={tf_times.get('rotate', 0):.2f}ms, "
-                              f"from_quat={tf_times.get('from_quat', 0):.2f}ms, "
-                              f"copy={tf_times.get('copy_assign', 0):.2f}ms")
-                
-                print(f"  ├─ Obstacle Detect:  {avg_obstacle:7.2f}ms ({pct_obstacle:5.1f}%)", end="")
-                if hasattr(simple_point2obsticle, 'last_timings'):
-                    obs_times = simple_point2obsticle.last_timings
-                    print(f" [slice={obs_times.get('slice', 0):.2f}ms, "
-                          f"norm={obs_times.get('norm', 0):.2f}ms, "
-                          f"argpartition={obs_times.get('argpartition', 0):.2f}ms, "
-                          f"argsort={obs_times.get('argsort', 0):.2f}ms, "
-                          f"copy={obs_times.get('copy', 0):.2f}ms]")
-                else:
-                    print()
-                print(f"  ├─ Response Logic:   {avg_response:7.2f}ms ({pct_response:5.1f}%)", end="")
-                if hasattr(simple_obsticle_response, 'last_timings'):
-                    resp_times = simple_obsticle_response.last_timings
-                    print(f" [find_closest={resp_times.get('find_closest', 0):.2f}ms, "
-                          f"calc={resp_times.get('calc_dist_angle', 0):.2f}ms, "
-                          f"haptics={resp_times.get('haptics', 0):.2f}ms]")
-                else:
-                    print()
-                print(f"  ├─ Plot Update:       {avg_plot:7.2f}ms ({pct_plot:5.1f}%)", end="")
-                if display and hasattr(Sonar, 'last_update_times'):
-                    plot_times = Sonar.last_update_times
-                    print(f" [process: {plot_times['process']:.1f}ms, draw: {plot_times['draw']:.1f}ms]")
-                else:
-                    print()
-                print(f"  └─ Sleep:             {avg_sleep:7.2f}ms ({pct_sleep:5.1f}%)")
-                
-                # Show bottleneck
-                times_dict = {
-                    'Read Sensors': avg_read,
-                    'Transform': avg_transform if transform_times else 0,
-                    'Obstacle Detection': avg_obstacle,
-                    'Response Logic': avg_response,
-                    'Plot Update': avg_plot,
-                    'Sleep': avg_sleep
-                }
-                bottleneck = max(times_dict.items(), key=lambda x: x[1])
-                print(f"\n[BOTTLENECK] {bottleneck[0]}: {bottleneck[1]:.2f}ms ({bottleneck[1]/avg_total*100:.1f}% of total)")
-                print(f"{'='*70}\n")
-                
-                # Keep only last 100 entries to prevent memory growth
-                for key in timing_stats:
-                    if len(timing_stats[key]) > 100:
-                        timing_stats[key] = timing_stats[key][-100:]
+            # # Print detailed timing every 10 loops
+            # if loop_count % 10 == 0:
+            #     print(f"\n{'='*70}")
+            #     print(f"[TIMING ANALYSIS] Loop {loop_count} - Last 10 loops average:")
+            #     print(f"{'='*70}")
+            #     
+            #     # Calculate averages
+            #     avg_read = np.mean(timing_stats['read_sensors'][-10:])
+            #     avg_transform = np.mean([sum(transform_times.values())] if transform_times else [0])
+            #     avg_obstacle = np.mean(timing_stats['obstacle_detection'][-10:])
+            #     avg_response = np.mean(timing_stats['response'][-10:])
+            #     avg_plot = np.mean(timing_stats['plot'][-10:])
+            #     avg_sleep = np.mean(timing_stats['sleep'][-10:])
+            #     avg_total = np.mean(timing_stats['total'][-10:])
+            #     
+            #     # Calculate percentages
+            #     pct_read = (avg_read / avg_total * 100) if avg_total > 0 else 0
+            #     pct_transform = (avg_transform / avg_total * 100) if avg_total > 0 else 0
+            #     pct_obstacle = (avg_obstacle / avg_total * 100) if avg_total > 0 else 0
+            #     pct_response = (avg_response / avg_total * 100) if avg_total > 0 else 0
+            #     pct_plot = (avg_plot / avg_total * 100) if avg_total > 0 else 0
+            #     pct_sleep = (avg_sleep / avg_total * 100) if avg_total > 0 else 0
+            #     
+            #     print(f"Total Loop Time: {avg_total:.2f}ms ({1000/avg_total:.1f} FPS)")
+            #     print(f"\nBreakdown:")
+            #     print(f"  ├─ Read Sensors:     {avg_read:7.2f}ms ({pct_read:5.1f}%)", end="")
+            #     if sensor_read_times:
+            #         print(" [", end="")
+            #         sensor_details = []
+            #         for name, t in sensor_read_times.items():
+            #             sensor_details.append(f"{name}: {t:.1f}ms")
+            #         print(" | ".join(sensor_details), end="")
+            #         print("]")
+            #     else:
+            #         print()
+            #     
+            #     if transform_times:
+            #         total_transform = sum(transform_times.values())
+            #         print(f"  ├─ Transform:        {total_transform:7.2f}ms ({pct_transform:5.1f}%)", end="")
+            #         print(" [", end="")
+            #         transform_details = []
+            #         for key, t in transform_times.items():
+            #             transform_details.append(f"{key}: {t:.1f}ms")
+            #         print(" | ".join(transform_details), end="")
+            #         print("]")
+            #         
+            #         # Show transform breakdown if available
+            #         if hasattr(transform_to_cordnate, 'last_timings'):
+            #             tf_times = transform_to_cordnate.last_timings
+            #             print(f"      └─ Breakdown: slice={tf_times.get('slice', 0):.2f}ms, "
+            #                   f"to_quat={tf_times.get('to_quat', 0):.2f}ms, "
+            #                   f"rotate={tf_times.get('rotate', 0):.2f}ms, "
+            #                   f"from_quat={tf_times.get('from_quat', 0):.2f}ms, "
+            #                   f"copy={tf_times.get('copy_assign', 0):.2f}ms")
+            #     
+            #     print(f"  ├─ Obstacle Detect:  {avg_obstacle:7.2f}ms ({pct_obstacle:5.1f}%)", end="")
+            #     if hasattr(simple_point2obsticle, 'last_timings'):
+            #         obs_times = simple_point2obsticle.last_timings
+            #         print(f" [slice={obs_times.get('slice', 0):.2f}ms, "
+            #               f"norm={obs_times.get('norm', 0):.2f}ms, "
+            #               f"argpartition={obs_times.get('argpartition', 0):.2f}ms, "
+            #               f"argsort={obs_times.get('argsort', 0):.2f}ms, "
+            #               f"copy={obs_times.get('copy', 0):.2f}ms]")
+            #     else:
+            #         print()
+            #     print(f"  ├─ Response Logic:   {avg_response:7.2f}ms ({pct_response:5.1f}%)", end="")
+            #     if hasattr(simple_obsticle_response, 'last_timings'):
+            #         resp_times = simple_obsticle_response.last_timings
+            #         print(f" [find_closest={resp_times.get('find_closest', 0):.2f}ms, "
+            #               f"calc={resp_times.get('calc_dist_angle', 0):.2f}ms, "
+            #               f"haptics={resp_times.get('haptics', 0):.2f}ms]")
+            #     else:
+            #         print()
+            #     print(f"  ├─ Plot Update:       {avg_plot:7.2f}ms ({pct_plot:5.1f}%)", end="")
+            #     if display and hasattr(Sonar, 'last_update_times'):
+            #         plot_times = Sonar.last_update_times
+            #         print(f" [process: {plot_times['process']:.1f}ms, draw: {plot_times['draw']:.1f}ms]")
+            #     else:
+            #         print()
+            #     print(f"  └─ Sleep:             {avg_sleep:7.2f}ms ({pct_sleep:5.1f}%)")
+            #     
+            #     # Show bottleneck
+            #     times_dict = {
+            #         'Read Sensors': avg_read,
+            #         'Transform': avg_transform if transform_times else 0,
+            #         'Obstacle Detection': avg_obstacle,
+            #         'Response Logic': avg_response,
+            #         'Plot Update': avg_plot,
+            #         'Sleep': avg_sleep
+            #     }
+            #     bottleneck = max(times_dict.items(), key=lambda x: x[1])
+            #     print(f"\n[BOTTLENECK] {bottleneck[0]}: {bottleneck[1]:.2f}ms ({bottleneck[1]/avg_total*100:.1f}% of total)")
+            #     print(f"{'='*70}\n")
+            #     
+            #     # Keep only last 100 entries to prevent memory growth
+            #     for key in timing_stats:
+            #         if len(timing_stats[key]) > 100:
+            #             timing_stats[key] = timing_stats[key][-100:]
     except KeyboardInterrupt: #Closed file
         print("\nStopping Peripherals...")
         for sensor in Peripherals.values():

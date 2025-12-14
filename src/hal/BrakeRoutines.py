@@ -112,17 +112,22 @@ class BrakeRoutines:
         self.brake.disable()
         print("BrakeRoutines: Start routine complete!")
 
-    def start(self):
+    def start(self, blocking=False):
         """
         Start routine in a separate thread.
+        
+        Args:
+            blocking: If True, wait for the routine to complete before returning.
+                     If False (default), return immediately while routine runs in background.
         """
         print("BrakeRoutines: Creating thread for start routine...")
         self._stop_requested.clear()
-        self._start_thread = threading.Thread(target=self._start_routine, name="start_thread")
+        self._start_thread = threading.Thread(target=self._start_routine, name="start_thread", daemon=True)
         self._start_thread.start()
-        self._start_thread.join()
-        self._start_thread = None
-        print("BrakeRoutines: Start thread completed")
+        if blocking:
+            self._start_thread.join()
+            self._start_thread = None
+            print("BrakeRoutines: Start thread completed")
 
     
     def _dont_die_routine(self):
@@ -173,7 +178,7 @@ class BrakeRoutines:
 
             # brake.set(1200)
        
-            self.brake.set_pulse_width(1100, check_stall=False)
+            self.brake.set_pulse_width(1200, check_stall=False)
             
             # sleep(2)
             
@@ -226,17 +231,53 @@ class BrakeRoutines:
         
         print("BrakeRoutines: Dont_die routine complete!")
 
-    def dont_die(self):
+    def dont_die(self, blocking=False):
         """
         Dont_die routine in a separate thread.
+        
+        Args:
+            blocking: If True, wait for the routine to complete before returning.
+                     If False (default), return immediately while routine runs in background.
         """
         print("BrakeRoutines: Creating thread for dont_die routine...")
         self._stop_requested.clear()
-        self._dont_die_thread = threading.Thread(target=self._dont_die_routine, name="dont_die_thread")
+        self._dont_die_thread = threading.Thread(target=self._dont_die_routine, name="dont_die_thread", daemon=True)
         self._dont_die_thread.start()
-        self._dont_die_thread.join()
-        self._dont_die_thread = None
-        print("BrakeRoutines: Dont_die thread completed")
+        if blocking:
+            self._dont_die_thread.join()
+            self._dont_die_thread = None
+            print("BrakeRoutines: Dont_die thread completed")
+    
+    @property
+    def is_running(self):
+        """Check if any routine is currently running."""
+        start_running = self._start_thread is not None and self._start_thread.is_alive()
+        dont_die_running = self._dont_die_thread is not None and self._dont_die_thread.is_alive()
+        return start_running or dont_die_running
+    
+    def wait(self, timeout=None):
+        """
+        Wait for any running routine to complete.
+        
+        Args:
+            timeout: Maximum time to wait in seconds. None means wait forever.
+        
+        Returns:
+            True if routines completed, False if timeout occurred.
+        """
+        if self._start_thread is not None and self._start_thread.is_alive():
+            self._start_thread.join(timeout=timeout)
+            if self._start_thread.is_alive():
+                return False
+            self._start_thread = None
+        
+        if self._dont_die_thread is not None and self._dont_die_thread.is_alive():
+            self._dont_die_thread.join(timeout=timeout)
+            if self._dont_die_thread.is_alive():
+                return False
+            self._dont_die_thread = None
+        
+        return True
     
     def stop(self):
         """

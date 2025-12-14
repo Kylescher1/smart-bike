@@ -300,7 +300,11 @@ class BrakeESC:
             self.line.set_value(1)
             pulse_end_time = cycle_start + pulse_width_s
             
-            # Use busy-wait for precise timing
+            # Sleep for most of pulse width (releases GIL for other threads)
+            remaining = pulse_end_time - time.perf_counter()
+            if remaining > 0.0005:  # Sleep if more than 0.5ms remaining
+                time.sleep(remaining - 0.0003)  # Wake up 0.3ms early for fine-tuning
+            # Brief busy-wait only for final microseconds of precision
             while time.perf_counter() < pulse_end_time:
                 pass
             
@@ -308,7 +312,11 @@ class BrakeESC:
             self.line.set_value(0)
             period_end_time = cycle_start + self.period
             
-            # Wait for remainder of period using busy-wait for precision
+            # Sleep for most of the low period (releases GIL for other threads)
+            remaining = period_end_time - time.perf_counter()
+            if remaining > 0.001:  # Sleep if more than 1ms remaining
+                time.sleep(remaining - 0.0005)  # Wake up 0.5ms early for fine-tuning
+            # Brief busy-wait only for final microseconds of precision
             while time.perf_counter() < period_end_time:
                 pass
     
