@@ -1143,6 +1143,8 @@ class TurretController:
         self.distance_available = None  # Whether LiDAR is available (None=unknown, True=yes, False=no)
         self.last_distance_time = 0.0
         self.distance_update_interval = 0.5  # Update distance every 500ms (2 Hz - less aggressive)
+        self.last_distance_print_time = 0.0  # For periodic console output
+        self.distance_print_interval = 1.0  # Print distance to console every 1 second
         
         # Limits will be updated from Arduino on connect
         
@@ -1244,7 +1246,7 @@ class TurretController:
         
         try:
             self.ser.reset_input_buffer()
-            self.ser.write(b'DISTANCE\n')
+            self.ser.write(b'GET_RANGE\n')  # Use GET_RANGE command (matches turret_debug.ino)
             self.ser.flush()
             
             # Quick read with 50ms timeout (won't block control loop)
@@ -1260,29 +1262,32 @@ class TurretController:
                 time.sleep(0.001)  # 1ms sleep
             
             if response:
-                # Check if command not supported - disable permanently
-                if 'ERROR' in response or 'Unknown' in response:
-                    if self.distance_available is None:  # First check
-                        print("Distance sensor not available (DISTANCE command not supported)")
-                    self.distance_available = False
+                # Check if command not supported or sensor error - disable permanently
+                if 'ERROR' in response:
+                    if 'not available' in response.lower():
+                        if self.distance_available is None:  # First check
+                            print("Distance sensor not available (ToF sensor not connected)")
+                        self.distance_available = False
                     return self.distance_cm
                 
                 # Try multiple parsing formats
                 for line in response.split('\n'):
-                    # Format 1: "DISTANCE:XXX" or "OK: DISTANCE:XXX"
-                    if 'DISTANCE:' in line:
+                    # Format 1: "OK: Range: X.XX in" (from turret_debug.ino GET_RANGE command)
+                    if 'Range:' in line and 'in' in line:
                         try:
-                            dist_str = line.split('DISTANCE:')[1].strip().split()[0]
-                            distance = float(dist_str)
-                            self.distance_cm = distance
+                            # Extract the number between "Range:" and "in"
+                            dist_str = line.split('Range:')[1].split('in')[0].strip()
+                            distance_inches = float(dist_str)
+                            distance_cm = distance_inches * 2.54  # Convert inches to cm
+                            self.distance_cm = distance_cm
                             if self.distance_available is None:  # First successful read
-                                print(f"Distance sensor available (read {distance:.1f} cm)")
+                                print(f"TF03 LiDAR available (read {distance_cm:.1f} cm / {distance_inches:.1f} in)")
                             self.distance_available = True
-                            return distance
+                            return distance_cm
                         except:
                             pass
                     
-                    # Format 2: "Dist: XXX cm" (from sensor reading)
+                    # Format 2: "Dist: XXX cm" (legacy format)
                     elif 'Dist:' in line and 'cm' in line:
                         try:
                             dist_str = line.split('Dist:')[1].split('cm')[0].strip()
@@ -1707,6 +1712,14 @@ class YOLOGimbal:
                 distance_cm = None
                 if self.enable_distance:
                     distance_cm = self.turret.read_distance()
+                    
+                    # Periodic console output of distance (every 1 second)
+                    if distance_cm is not None and self.turret.distance_available:
+                        if current_time - self.turret.last_distance_print_time >= self.turret.distance_print_interval:
+                            distance_m = distance_cm / 100.0
+                            distance_in = distance_cm / 2.54
+                            print(f"[Range] {distance_cm:.1f} cm ({distance_m:.2f} m / {distance_in:.1f} in)")
+                            self.turret.last_distance_print_time = current_time
                 
                 # Check if we should display this frame (for display FPS limiting)
                 dt_display = current_time - self.last_display_time
