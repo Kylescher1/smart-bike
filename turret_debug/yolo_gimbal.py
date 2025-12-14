@@ -875,6 +875,85 @@ class TrackingState:
     GOING_HOME = "GOING_HOME"       # Moving to home before sweep
 
 
+class DetectionSmoother:
+    """Smooths detection positions over multiple frames to reduce jitter
+    
+    Uses a moving average filter on target center positions.
+    """
+    
+    def __init__(self, window_size: int = 3, max_jump_px: float = 100.0):
+        """
+        Args:
+            window_size: Number of frames to average over
+            max_jump_px: Maximum allowed jump between frames (pixels).
+                        Larger jumps are treated as new targets.
+        """
+        self.window_size = window_size
+        self.max_jump_px = max_jump_px
+        
+        # History buffers
+        self.x_history = deque(maxlen=window_size)
+        self.y_history = deque(maxlen=window_size)
+        self.width_history = deque(maxlen=window_size)
+        self.height_history = deque(maxlen=window_size)
+        
+        # Last raw detection for jump detection
+        self.last_x = None
+        self.last_y = None
+    
+    def update(self, x: float, y: float, width: float, height: float) -> Tuple[float, float, float, float]:
+        """Update with new detection and return smoothed position
+        
+        Args:
+            x, y: Center of detection (pixels)
+            width, height: Size of detection (pixels)
+            
+        Returns:
+            Smoothed (x, y, width, height)
+        """
+        # Check for large jump (possible new target or bad detection)
+        if self.last_x is not None and self.last_y is not None:
+            jump = np.sqrt((x - self.last_x)**2 + (y - self.last_y)**2)
+            if jump > self.max_jump_px:
+                # Large jump detected - could be new target, reset history
+                self.clear()
+        
+        # Store raw values for next jump detection
+        self.last_x = x
+        self.last_y = y
+        
+        # Add to history
+        self.x_history.append(x)
+        self.y_history.append(y)
+        self.width_history.append(width)
+        self.height_history.append(height)
+        
+        # Calculate smoothed values (simple moving average)
+        smoothed_x = np.mean(self.x_history)
+        smoothed_y = np.mean(self.y_history)
+        smoothed_width = np.mean(self.width_history)
+        smoothed_height = np.mean(self.height_history)
+        
+        return smoothed_x, smoothed_y, smoothed_width, smoothed_height
+    
+    def clear(self):
+        """Clear history (call when target is lost)"""
+        self.x_history.clear()
+        self.y_history.clear()
+        self.width_history.clear()
+        self.height_history.clear()
+        self.last_x = None
+        self.last_y = None
+    
+    def get_sample_count(self) -> int:
+        """Get number of samples currently in buffer"""
+        return len(self.x_history)
+    
+    def is_stable(self) -> bool:
+        """Check if we have enough samples for stable smoothing"""
+        return len(self.x_history) >= self.window_size
+
+
 class SweepController:
     """Controls sweep pattern when target is lost
     
@@ -1282,7 +1361,8 @@ class YOLOGimbal:
                  frame_width: int = 1280, frame_height: int = 720,
                  pid_max_output: float = 5.0,
                  lost_timeout: float = 1.0, search_timeout: float = 2.0,
-                 sweep_speed: float = 2.0, sweep_dwell: float = 0.5):
+                 sweep_speed: float = 2.0, sweep_dwell: float = 0.5,
+                 smooth_window: int = 3, smooth_max_jump: float = 100.0):
         self.camera_index = camera_index
         self.turret_port = turret_port
         self.target_class = target_class
@@ -1329,6 +1409,8 @@ class YOLOGimbal:
         self.visualizer = None
         self.error_plotter = None
         self.sweep_controller = SweepController(move_speed=sweep_speed)  # For sweep pattern when target lost
+        self.smooth_window = smooth_window
+        self.detection_smoother = DetectionSmoother(window_size=smooth_window, max_jump_px=smooth_max_jump)  # Smooth YOLO jitter
         
         # Tracking state machine
         self.tracking_state = TrackingState.TRACKING
@@ -1564,6 +1646,7 @@ class YOLOGimbal:
         print(f"Tracking: {self.target_class or 'all classes'}")
         print(f"PID gains: Kp={self.pid.kp}, Ki={self.pid.ki}, Kd={self.pid.kd}, max_out={self.pid_max_output}°")
         print(f"Deadzone: {self.deadzone}px (gradient), {self.deadzone_degrees}° min move")
+        print(f"Detection smoothing: {self.smooth_window}-frame moving average" if self.smooth_window > 1 else "Detection smoothing: DISABLED")
         print(f"FOV-based mapping: {self.degrees_per_pixel_x:.4f}°/px (H), {self.degrees_per_pixel_y:.4f}°/px (V)")
         print(f"Max error at edge: ±{self.fov_horizontal/2:.1f}° horizontal, ±{self.fov_vertical/2:.1f}° vertical")
         print(f"Max step: {self.max_movement}° per command (hard clamp)")
@@ -1637,8 +1720,13 @@ class YOLOGimbal:
                             (self.center_x, self.center_y + 20), (0, 255, 0), 2)
                 
                 if target is not None:
-                    target_x, target_y, width, height = target
+                    raw_x, raw_y, raw_width, raw_height = target
                     no_target_count = 0
+                    
+                    # SMOOTH DETECTION (FIX #17) - average over multiple frames to reduce YOLO jitter
+                    target_x, target_y, width, height = self.detection_smoother.update(
+                        raw_x, raw_y, raw_width, raw_height
+                    )
                     
                     # TARGET FOUND - update state machine
                     self.last_target_time = current_time
@@ -1651,17 +1739,27 @@ class YOLOGimbal:
                         print(f"Target ACQUIRED - switching from {self.tracking_state} to TRACKING")
                         self.tracking_state = TrackingState.TRACKING
                         self.sweep_controller.reset()
+                        self.detection_smoother.clear()  # Start fresh when re-acquiring
                     
                     # Draw target bounding box (only if displaying)
                     if should_display_frame:
+                        # Draw raw detection in dark red (before smoothing)
+                        if self.smooth_window > 1:
+                            rx1 = int(raw_x - raw_width/2)
+                            ry1 = int(raw_y - raw_height/2)
+                            rx2 = int(raw_x + raw_width/2)
+                            ry2 = int(raw_y + raw_height/2)
+                            cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (0, 0, 128), 1)  # Dark red = raw
+                        
+                        # Draw smoothed detection in bright red
                         x1 = int(target_x - width/2)
                         y1 = int(target_y - height/2)
                         x2 = int(target_x + width/2)
                         y2 = int(target_y + height/2)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)  # Bright red = smoothed
                         cv2.circle(frame, (int(target_x), int(target_y)), 5, (0, 0, 255), -1)
                         
-                        # Draw line from center to target
+                        # Draw line from center to smoothed target
                         cv2.line(frame, (self.center_x, self.center_y), 
                                 (int(target_x), int(target_y)), (255, 0, 0), 2)
                     
@@ -1789,10 +1887,11 @@ class YOLOGimbal:
                             if at_limit_y:
                                 limit_text += " [Y LIM]"
                             
-                            # Show state and gradient gain
+                            # Show state, smoothing status, and gradient gain
                             gain_text = f" G:{gain_x:.0%}/{gain_y:.0%}"
+                            smooth_text = f" S:{self.detection_smoother.get_sample_count()}/{self.smooth_window}" if self.smooth_window > 1 else ""
                             
-                            cv2.putText(frame, f"TRACKING | Err: X={error_x_deg:.1f} Y={error_y_deg:.1f}{gain_text}", 
+                            cv2.putText(frame, f"TRACKING{smooth_text} | Err: X={error_x_deg:.1f} Y={error_y_deg:.1f}{gain_text}", 
                                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                             cv2.putText(frame, f"Move: X={move_x:.2f}deg Y={move_y:.2f}deg{limit_text}", 
                                        (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
@@ -1850,6 +1949,7 @@ class YOLOGimbal:
                             self.tracking_state = TrackingState.LOST
                             self.state_start_time = current_time
                             self.pid.reset()
+                            self.detection_smoother.clear()  # Clear smoother when target lost
                             print(f"Target LOST - waiting {self.lost_timeout}s before returning to last position")
                     
                     elif self.tracking_state == TrackingState.LOST:
@@ -2345,6 +2445,10 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Degrees per step during sweep pattern (default: 2.0)')
     parser.add_argument('--sweep-dwell', type=float, default=0.5,
                        help='Seconds to pause at each sweep waypoint (default: 0.5)')
+    parser.add_argument('--smooth-window', type=int, default=3,
+                       help='Number of frames to average for detection smoothing (default: 3, set to 1 to disable)')
+    parser.add_argument('--smooth-max-jump', type=float, default=100.0,
+                       help='Max pixel jump before resetting smoother (default: 100.0)')
     parser.add_argument('--list-ports', '-l', action='store_true',
                        help='List available serial ports')
 
@@ -2400,7 +2504,9 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
             lost_timeout=args.lost_timeout,
             search_timeout=args.search_timeout,
             sweep_speed=args.sweep_speed,
-            sweep_dwell=args.sweep_dwell
+            sweep_dwell=args.sweep_dwell,
+            smooth_window=args.smooth_window,
+            smooth_max_jump=args.smooth_max_jump
         )
         
         gimbal.initialize()
