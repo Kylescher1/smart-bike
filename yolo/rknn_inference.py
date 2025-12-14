@@ -30,7 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from src.hal.cam.Camera import Camera, CAMERA_CONFIG
+from src.hal.cam.Camera import Camera, ThreadedCamera, CAMERA_CONFIG
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_MODEL = ROOT / "models" / "yolo11n.rknn"
@@ -290,16 +290,131 @@ def post_process_yolov8(input_data, conf_threshold=0.25, iou_threshold=0.45, img
     return boxes, classes, scores
 
 
+def post_process_yolov5(outputs, conf_threshold=0.25, iou_threshold=0.45, img_shape=(640, 640)):
+    """
+    Post-process YOLOv5 outputs (3 anchor-based outputs).
+    
+    YOLOv5 outputs 3 tensors with shape (1, 255, H, W) where:
+    - 255 = 3 anchors × 85 (4 box + 1 obj + 80 classes)
+    - H, W = 80, 40, 20 for strides 8, 16, 32
+    """
+    # YOLOv5 anchors (width, height) for each stride
+    anchors = [
+        [(10, 13), (16, 30), (33, 23)],      # stride 8
+        [(30, 61), (62, 45), (59, 119)],     # stride 16
+        [(116, 90), (156, 198), (373, 326)]  # stride 32
+    ]
+    strides = [8, 16, 32]
+    
+    all_boxes = []
+    all_scores = []
+    all_classes = []
+    
+    for i, output in enumerate(outputs):
+        # output shape: (1, 255, H, W)
+        _, channels, h, w = output.shape
+        num_anchors = 3
+        num_classes = channels // num_anchors - 5  # 80 for COCO
+        
+        # Reshape to (1, 3, 85, H, W) then transpose to (1, 3, H, W, 85)
+        output = output.reshape(1, num_anchors, 5 + num_classes, h, w)
+        output = output.transpose(0, 1, 3, 4, 2)  # (1, 3, H, W, 85)
+        
+        # Create grid
+        grid_y, grid_x = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+        grid = np.stack([grid_x, grid_y], axis=-1).astype(np.float32)
+        
+        # Decode for each anchor
+        for a in range(num_anchors):
+            anchor_w, anchor_h = anchors[i][a]
+            pred = output[0, a]  # (H, W, 85)
+            
+            # Box decoding (sigmoid already applied by model with relu approximation)
+            # For YOLOv5, outputs are already sigmoid-activated
+            xy = pred[..., :2]  # Already sigmoid
+            wh = pred[..., 2:4]
+            obj = pred[..., 4:5]
+            cls = pred[..., 5:]
+            
+            # Decode boxes
+            xy = (xy * 2 - 0.5 + grid) * strides[i]
+            wh = (wh * 2) ** 2 * np.array([anchor_w, anchor_h])
+            
+            # Convert to x1y1x2y2
+            x1y1 = xy - wh / 2
+            x2y2 = xy + wh / 2
+            boxes = np.concatenate([x1y1, x2y2], axis=-1)
+            
+            # Confidence = objectness * class_prob
+            scores = obj * cls
+            
+            # Flatten spatial dimensions
+            boxes = boxes.reshape(-1, 4)
+            scores = scores.reshape(-1, num_classes)
+            
+            # Get best class for each box
+            class_ids = np.argmax(scores, axis=1)
+            class_scores = np.max(scores, axis=1)
+            
+            # Filter by confidence
+            mask = class_scores > conf_threshold
+            if np.any(mask):
+                all_boxes.append(boxes[mask])
+                all_scores.append(class_scores[mask])
+                all_classes.append(class_ids[mask])
+    
+    if not all_boxes:
+        return [], [], []
+    
+    boxes = np.concatenate(all_boxes)
+    scores = np.concatenate(all_scores)
+    classes = np.concatenate(all_classes)
+    
+    # Clip boxes to image bounds
+    h_img, w_img = img_shape
+    boxes[:, 0] = np.clip(boxes[:, 0], 0, w_img)
+    boxes[:, 1] = np.clip(boxes[:, 1], 0, h_img)
+    boxes[:, 2] = np.clip(boxes[:, 2], 0, w_img)
+    boxes[:, 3] = np.clip(boxes[:, 3], 0, h_img)
+    
+    # NMS per class
+    nboxes, nclasses, nscores = [], [], []
+    for c in set(classes):
+        inds = np.where(classes == c)[0]
+        b = boxes[inds]
+        s = scores[inds]
+        keep = nms(b, s, iou_threshold)
+        if len(keep) > 0:
+            nboxes.append(b[keep])
+            nclasses.append(np.full(len(keep), c))
+            nscores.append(s[keep])
+    
+    if not nboxes:
+        return [], [], []
+    
+    return np.concatenate(nboxes), np.concatenate(nclasses), np.concatenate(nscores)
+
+
 def process_output(output, conf_threshold=0.25, iou_threshold=0.45, img_shape=(640, 640)):
     """
     Process RKNN model output to get detections.
-    Supports YOLOv8/v11 (6 or 9 outputs) and older YOLO (single output) formats.
+    Supports YOLOv5 (3 outputs), YOLOv8/v11 (6 or 9 outputs), and single-output formats.
     """
     if not isinstance(output, list):
         output = [output]
     
-    # Detect output format: YOLOv8/v11 has 6 or 9 outputs, older YOLO has 1 output
-    if len(output) == 6 or len(output) == 9:
+    # Detect output format based on number and shape of outputs
+    # YOLOv5: 3 outputs with shape (1, 255, H, W)
+    # YOLOv5-seg: 7 outputs (3 det + 3 mask coeff + 1 proto)
+    # YOLOv8/v11: 6 or 9 outputs
+    if len(output) == 7 and output[0].shape[1] == 255:
+        # YOLOv5-seg format: extract detection outputs (indices 0, 2, 4), ignore mask outputs
+        det_outputs = [output[0], output[2], output[4]]
+        boxes, classes, scores = post_process_yolov5(det_outputs, conf_threshold, iou_threshold, img_shape)
+    elif len(output) == 3 and output[0].shape[1] == 255:
+        # YOLOv5 format (3 anchor-based outputs)
+        boxes, classes, scores = post_process_yolov5(output, conf_threshold, iou_threshold, img_shape)
+    elif len(output) == 6 or len(output) == 9:
         # YOLOv8/v11 format (6 outputs = boxes+classes, 9 outputs = boxes+classes+objectness)
         # post_process_yolov8 will handle both cases
         boxes, classes, scores = post_process_yolov8(output, conf_threshold, iou_threshold, img_shape)
@@ -469,21 +584,22 @@ def main():
     cap = None  # Keep for video files
     
     if source.isdigit():
-        # Camera - use Camera class
+        # Camera - use ThreadedCamera for async capture (eliminates capture wait time)
         source = int(source)
         
-        # Optimized camera config: use lower resolution for faster capture
-        # Since we resize to 640x640 anyway, lower capture resolution reduces capture time
+        # Optimized camera config: use 640x480 since we resize to 640x640 anyway
+        # Lower resolution = faster MJPEG decode and less data transfer
         camera_config = CAMERA_CONFIG.copy()
         camera_config.update({
-            "width": 1280,   # Start with 720p for good balance
-            "height": 720,
-            "fps": 30,       # Lower FPS target for stability
-            "fourcc": "MJPG"  # MJPEG is usually faster
+            "width": 640,
+            "height": 480,
+            "fps": 30,
+            "fourcc": "MJPG"
         })
         
         try:
-            camera = Camera(index=source, config=camera_config)
+            # ThreadedCamera captures in background thread - read_frame() returns immediately
+            camera = ThreadedCamera(index=source, config=camera_config)
             camera.open()
             
             # Test if we can actually read a frame
@@ -494,7 +610,7 @@ def main():
                 rknn.release()
                 return 1
             
-            # print(f"[INFO] Using camera {source} (resolution: {camera.width}x{camera.height})")
+            print(f"[INFO] Using ThreadedCamera {source} (resolution: {camera.width}x{camera.height})", file=sys.stderr)
         except RuntimeError as e:
             print(f"[ERROR] {e}", file=sys.stderr)
             rknn.release()
@@ -664,21 +780,20 @@ def main():
                 
                 # Display
                 cv2.imshow(window_name, annotated)
-                display_time += (time.time() - display_start) * 1000
                 
-                # Exit on 'q' or Esc (only if display is enabled)
+                # Exit on 'q' or Esc (include waitKey in display timing)
                 key = cv2.waitKey(1) & 0xFF
+                display_time += (time.time() - display_start) * 1000
                 if key in (27, ord('q')):
-                    # print("[INFO] Exiting...")
                     break
             else:
                 # Still calculate FPS for monitoring
                 now = time.time()
                 fps = 1.0 / max(now - prev_time, 1e-6)
                 prev_time = now
-                display_time += (time.time() - display_start) * 1000
                 # In no-display mode, check for keyboard interrupt
                 time.sleep(0.001)  # Small sleep to allow interrupt
+                display_time += (time.time() - display_start) * 1000
             
             loop_time = (time.time() - loop_start) * 1000
             total_time += loop_time
@@ -692,10 +807,11 @@ def main():
                 avg_postprocess = postprocess_time / frame_count
                 avg_display = display_time / frame_count
                 avg_total = total_time / frame_count
-                print(f"[TIMING] Frame {frame_count}: Capture={avg_capture:.1f}ms | "
-                      f"Preprocess={avg_preprocess:.1f}ms | Inference={avg_inference:.1f}ms | "
-                      f"Postprocess={avg_postprocess:.1f}ms | Display={avg_display:.1f}ms | "
-                      f"Total={avg_total:.1f}ms ({1000/avg_total:.1f} FPS)", file=sys.stderr)
+                avg_other = avg_total - avg_capture - avg_preprocess - avg_inference - avg_postprocess - avg_display
+                print(f"[TIMING] Frame {frame_count}: Cap={avg_capture:.1f}ms | "
+                      f"Pre={avg_preprocess:.1f}ms | Inf={avg_inference:.1f}ms | "
+                      f"Post={avg_postprocess:.1f}ms | Disp={avg_display:.1f}ms | "
+                      f"Other={avg_other:.1f}ms | Total={avg_total:.1f}ms ({1000/avg_total:.1f} FPS)", file=sys.stderr)
             
             # For single image, wait for key press
             if not is_video:
@@ -721,12 +837,14 @@ def main():
             avg_postprocess = postprocess_time / frame_count
             avg_display = display_time / frame_count
             avg_total = total_time / frame_count
+            avg_other = avg_total - avg_capture - avg_preprocess - avg_inference - avg_postprocess - avg_display
             print(f"\n[TIMING SUMMARY] Processed {frame_count} frames:", file=sys.stderr)
             print(f"  Capture:     {avg_capture:.2f}ms ({100*avg_capture/avg_total:.1f}%)", file=sys.stderr)
             print(f"  Preprocess:  {avg_preprocess:.2f}ms ({100*avg_preprocess/avg_total:.1f}%)", file=sys.stderr)
             print(f"  Inference:   {avg_inference:.2f}ms ({100*avg_inference/avg_total:.1f}%)", file=sys.stderr)
             print(f"  Postprocess: {avg_postprocess:.2f}ms ({100*avg_postprocess/avg_total:.1f}%)", file=sys.stderr)
             print(f"  Display:     {avg_display:.2f}ms ({100*avg_display/avg_total:.1f}%)", file=sys.stderr)
+            print(f"  Other:       {avg_other:.2f}ms ({100*avg_other/avg_total:.1f}%)", file=sys.stderr)
             print(f"  Total:       {avg_total:.2f}ms ({1000/avg_total:.2f} FPS)", file=sys.stderr)
         
         # Clean up camera resources
