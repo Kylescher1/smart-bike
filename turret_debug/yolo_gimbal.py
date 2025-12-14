@@ -1183,12 +1183,9 @@ class YOLOGimbal:
         self.use_rknn = use_rknn  # Use RKNN acceleration
         self.rknn_model = rknn_model  # Path to RKNN model
         self.enable_error_plot = enable_error_plot  # Enable error plotting
-<<<<<<< HEAD
         self.enable_timing = enable_timing  # Enable timing profiling
         self.detection_imgsz = detection_imgsz  # Detection input size (lower = faster)
         self.enable_distance = enable_distance  # Enable TF03 LiDAR distance reading
-=======
->>>>>>> parent of bcac720 (things work ok)
         
         # Initialize components
         self.camera = None
@@ -1948,6 +1945,10 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Use RKNN hardware acceleration (Radxa Rock Pi 5B)')
     parser.add_argument('--rknn-model', type=str, default=None,
                        help='Path to RKNN model file (default: yolo/models/yolo11n.rknn)')
+    parser.add_argument('--enable-timing', action='store_true', default=False,
+                       help='Enable timing profiling (default: False)')
+    parser.add_argument('--detection-imgsz', type=int, default=640,
+                       help='Detection input size in pixels (default: 640, lower = faster)')
     parser.add_argument('--enable-distance', action='store_true', default=True,
                        help='Enable TF03 LiDAR distance reading (default: enabled)')
     parser.add_argument('--disable-distance', action='store_true',
