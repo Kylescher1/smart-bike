@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-Object Tracking with PID-Controlled Gimbal
+Object Tracking with PI-Controlled Gimbal
 
 Run YOLO inference, click on a detected object to track it.
-PID controller keeps the selected object centered in frame.
+PI controller with smoothing keeps the selected object centered in frame.
 
 Usage:
     python track_object.py --source 0 --port /dev/ttyUSB0
+    
+    # Tune for less jitter (slower response):
+    python track_object.py --kp 0.08 --ki 0.01 --smoothing 0.15 --deadband 3.0
+    
+    # Tune for faster tracking (may have some overshoot):
+    python track_object.py --kp 0.15 --ki 0.03 --smoothing 0.35 --deadband 1.5
 """
 
 import argparse
@@ -141,56 +147,113 @@ class TurretController:
         return self.distance_cm if self.distance_cm else -1
 
 
-class PIDController:
-    """Simple PID controller."""
+class PIController:
+    """
+    PI controller with smoothing for servo control.
     
-    def __init__(self, kp: float, ki: float, kd: float, 
-                 output_min: float = -30, output_max: float = 30):
+    Features:
+    - Low-pass filtered output to reduce jitter
+    - Accumulated position for sub-degree precision
+    - Rate limiting to prevent overshoot
+    - Deadband to ignore small errors
+    """
+    
+    def __init__(self, kp: float, ki: float,
+                 output_min: float = -30, output_max: float = 30,
+                 smoothing: float = 0.3,
+                 rate_limit: float = 5.0,
+                 deadband: float = 1.5):
+        """
+        Args:
+            kp: Proportional gain
+            ki: Integral gain  
+            output_min/max: Clamp output range
+            smoothing: Low-pass filter factor (0-1, lower = smoother)
+            rate_limit: Max degrees per update
+            deadband: Ignore errors smaller than this (degrees)
+        """
         self.kp = kp
         self.ki = ki
-        self.kd = kd
         self.output_min = output_min
         self.output_max = output_max
+        self.smoothing = smoothing
+        self.rate_limit = rate_limit
+        self.deadband = deadband
         
-        self.integral = 0
-        self.prev_error = 0
+        self.integral = 0.0
         self.prev_time = None
+        self.smoothed_output = 0.0
+        self.accumulated_pos = 0.0  # Sub-degree accumulator
     
     def reset(self):
-        self.integral = 0
-        self.prev_error = 0
+        self.integral = 0.0
         self.prev_time = None
+        self.smoothed_output = 0.0
+        self.accumulated_pos = 0.0
     
-    def update(self, error: float) -> float:
+    def update(self, error: float) -> tuple:
+        """
+        Update PI controller.
+        
+        Returns:
+            (int_correction, float_accumulated): Integer correction to apply, 
+                                                  and accumulated position
+        """
         now = time.time()
         
         if self.prev_time is None:
             dt = 0.033  # Assume 30fps
         else:
-            dt = now - self.prev_time
+            dt = min(now - self.prev_time, 0.1)  # Cap dt to avoid jumps
         
         self.prev_time = now
         
-        # Proportional
+        # Apply deadband - zero out small errors
+        if abs(error) < self.deadband:
+            # Slowly decay integral when in deadband
+            self.integral *= 0.95
+            # Apply smoothing toward zero
+            self.smoothed_output = self.smoothed_output * (1 - self.smoothing * 0.5)
+            return 0, self.accumulated_pos
+        
+        # Proportional term
         p = self.kp * error
         
-        # Integral (with anti-windup)
-        self.integral += error * dt
-        self.integral = max(-50, min(50, self.integral))  # Clamp integral
+        # Integral term with anti-windup
+        # Only integrate if not saturated (or error would reduce saturation)
+        current_output = p + self.ki * self.integral
+        if abs(current_output) < self.output_max or (error * current_output) < 0:
+            self.integral += error * dt
+            # Clamp integral
+            max_integral = self.output_max / max(self.ki, 0.001)
+            self.integral = max(-max_integral, min(max_integral, self.integral))
+        
         i = self.ki * self.integral
         
-        # Derivative
-        if dt > 0:
-            derivative = (error - self.prev_error) / dt
-        else:
-            derivative = 0
-        d = self.kd * derivative
+        # Raw PI output
+        raw_output = p + i
         
-        self.prev_error = error
+        # Rate limiting - prevent sudden large changes
+        delta = raw_output - self.smoothed_output
+        if abs(delta) > self.rate_limit:
+            delta = self.rate_limit if delta > 0 else -self.rate_limit
         
-        # Total output
-        output = p + i + d
-        return max(self.output_min, min(self.output_max, output))
+        # Apply smoothing (exponential moving average)
+        target = self.smoothed_output + delta
+        self.smoothed_output = (self.smoothing * target + 
+                                (1 - self.smoothing) * self.smoothed_output)
+        
+        # Clamp final output
+        self.smoothed_output = max(self.output_min, 
+                                   min(self.output_max, self.smoothed_output))
+        
+        # Accumulate sub-degree position
+        self.accumulated_pos += self.smoothed_output * dt
+        
+        # Extract integer part for servo command
+        int_correction = int(self.smoothed_output)
+        
+        return int_correction, self.accumulated_pos
 
 
 class ObjectTracker:
@@ -274,10 +337,11 @@ def main():
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="RKNN model path")
     parser.add_argument("--conf", type=float, default=0.35, help="Confidence threshold")
     parser.add_argument("--imgsz", type=int, default=640, help="Inference size")
-    # PID tuning
-    parser.add_argument("--kp", type=float, default=0.15, help="Proportional gain")
-    parser.add_argument("--ki", type=float, default=0.01, help="Integral gain")
-    parser.add_argument("--kd", type=float, default=0.05, help="Derivative gain")
+    # PI tuning
+    parser.add_argument("--kp", type=float, default=0.12, help="Proportional gain")
+    parser.add_argument("--ki", type=float, default=0.02, help="Integral gain")
+    parser.add_argument("--smoothing", type=float, default=0.25, help="Output smoothing (0-1, lower=smoother)")
+    parser.add_argument("--deadband", type=float, default=2.0, help="Error deadband in degrees")
     args = parser.parse_args()
     
     # Load RKNN model
@@ -316,8 +380,10 @@ def main():
     
     # Initialize components
     tracker = ObjectTracker()
-    pid_x = PIDController(args.kp, args.ki, args.kd)  # Pan
-    pid_y = PIDController(args.kp, args.ki, args.kd)  # Tilt
+    pi_x = PIController(args.kp, args.ki, smoothing=args.smoothing, 
+                        deadband=args.deadband)  # Pan
+    pi_y = PIController(args.kp, args.ki, smoothing=args.smoothing,
+                        deadband=args.deadband)  # Tilt
     
     # Mouse callback
     click_pos = [None]
@@ -328,8 +394,8 @@ def main():
             click_pos[0] = (x, y)
         elif event == cv2.EVENT_RBUTTONDOWN:
             tracker.clear_target()
-            pid_x.reset()
-            pid_y.reset()
+            pi_x.reset()
+            pi_y.reset()
     
     window_name = "Object Tracker - Left click to track, Right click to stop, Q to quit"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -387,8 +453,8 @@ def main():
                 clicked_det = find_clicked_detection(x, y, detections)
                 if clicked_det:
                     tracker.select_target(clicked_det)
-                    pid_x.reset()
-                    pid_y.reset()
+                    pi_x.reset()
+                    pi_y.reset()
                 click_pos[0] = None
             
             # Track target
@@ -409,18 +475,19 @@ def main():
                     error_deg_x = (error_px_x / (frame_w / 2)) * (fov_h / 2)
                     error_deg_y = (error_px_y / (frame_h / 2)) * (fov_v / 2)
                     
-                    # PID control
-                    correction_x = pid_x.update(error_deg_x)
-                    correction_y = pid_y.update(error_deg_y)
+                    # PI control with smoothing
+                    correction_x, _ = pi_x.update(error_deg_x)
+                    correction_y, _ = pi_y.update(error_deg_y)
                     
-                    # Apply to servos (only if error is significant)
-                    if abs(error_deg_x) > 0.5 or abs(error_deg_y) > 0.5:
-                        new_bottom = turret.bottom_pos + int(correction_x)
-                        new_top = turret.top_pos - int(correction_y)  # Inverted
+                    # Apply to servos (PI controller handles deadband internally)
+                    if correction_x != 0 or correction_y != 0:
+                        new_bottom = turret.bottom_pos + correction_x
+                        new_top = turret.top_pos + correction_y  # Inverted
                         turret.set_position(new_top, new_bottom)
                 else:
-                    # Target lost
-                    pass
+                    # Target lost - slowly decay the PI controllers
+                    pi_x.update(0)
+                    pi_y.update(0)
             
             # Update distance periodically
             current_time = time.time()
@@ -499,8 +566,8 @@ def main():
             elif key == ord('h'):
                 tracker.clear_target()
                 turret.home()
-                pid_x.reset()
-                pid_y.reset()
+                pi_x.reset()
+                pi_y.reset()
             
             frame_count += 1
     
