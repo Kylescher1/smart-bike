@@ -6,13 +6,9 @@ Run YOLO inference, click on a detected object to track it.
 PI controller with smoothing keeps the selected object centered in frame.
 
 Usage:
-    python track_object.py --source 0 --port /dev/ttyUSB0
+    python yolo/track_object.py --source 5 --kp 0.3 --ki 0.075 --smoothing 0.45 --deadband 15
     
-    # Tune for less jitter (slower response):
-    python track_object.py --kp 0.08 --ki 0.01 --smoothing 0.15 --deadband 3.0
-    
-    # Tune for faster tracking (may have some overshoot):
-    python track_object.py --kp 0.15 --ki 0.03 --smoothing 0.35 --deadband 1.5
+    --deadband is now in pixels (default 20px)
 """
 
 import argparse
@@ -153,16 +149,14 @@ class PIController:
     
     Features:
     - Low-pass filtered output to reduce jitter
-    - Accumulated position for sub-degree precision
     - Rate limiting to prevent overshoot
-    - Deadband to ignore small errors
+    - Smooth decay when target is centered
     """
     
     def __init__(self, kp: float, ki: float,
                  output_min: float = -30, output_max: float = 30,
                  smoothing: float = 0.3,
-                 rate_limit: float = 5.0,
-                 deadband: float = 1.5):
+                 rate_limit: float = 5.0):
         """
         Args:
             kp: Proportional gain
@@ -170,7 +164,6 @@ class PIController:
             output_min/max: Clamp output range
             smoothing: Low-pass filter factor (0-1, lower = smoother)
             rate_limit: Max degrees per update
-            deadband: Ignore errors smaller than this (degrees)
         """
         self.kp = kp
         self.ki = ki
@@ -178,26 +171,27 @@ class PIController:
         self.output_max = output_max
         self.smoothing = smoothing
         self.rate_limit = rate_limit
-        self.deadband = deadband
         
         self.integral = 0.0
         self.prev_time = None
         self.smoothed_output = 0.0
-        self.accumulated_pos = 0.0  # Sub-degree accumulator
     
     def reset(self):
         self.integral = 0.0
         self.prev_time = None
         self.smoothed_output = 0.0
-        self.accumulated_pos = 0.0
     
-    def update(self, error: float) -> tuple:
+    def decay(self):
+        """Smoothly decay output when in deadband."""
+        self.integral *= 0.95
+        self.smoothed_output *= (1 - self.smoothing * 0.5)
+    
+    def update(self, error: float) -> int:
         """
         Update PI controller.
         
         Returns:
-            (int_correction, float_accumulated): Integer correction to apply, 
-                                                  and accumulated position
+            int: Integer correction to apply to servo
         """
         now = time.time()
         
@@ -207,14 +201,6 @@ class PIController:
             dt = min(now - self.prev_time, 0.1)  # Cap dt to avoid jumps
         
         self.prev_time = now
-        
-        # Apply deadband - zero out small errors
-        if abs(error) < self.deadband:
-            # Slowly decay integral when in deadband
-            self.integral *= 0.95
-            # Apply smoothing toward zero
-            self.smoothed_output = self.smoothed_output * (1 - self.smoothing * 0.5)
-            return 0, self.accumulated_pos
         
         # Proportional term
         p = self.kp * error
@@ -247,13 +233,7 @@ class PIController:
         self.smoothed_output = max(self.output_min, 
                                    min(self.output_max, self.smoothed_output))
         
-        # Accumulate sub-degree position
-        self.accumulated_pos += self.smoothed_output * dt
-        
-        # Extract integer part for servo command
-        int_correction = int(self.smoothed_output)
-        
-        return int_correction, self.accumulated_pos
+        return int(self.smoothed_output)
 
 
 class ObjectTracker:
@@ -341,7 +321,7 @@ def main():
     parser.add_argument("--kp", type=float, default=0.12, help="Proportional gain")
     parser.add_argument("--ki", type=float, default=0.02, help="Integral gain")
     parser.add_argument("--smoothing", type=float, default=0.25, help="Output smoothing (0-1, lower=smoother)")
-    parser.add_argument("--deadband", type=float, default=2.0, help="Error deadband in degrees")
+    parser.add_argument("--deadband", type=float, default=20.0, help="Error deadband in pixels")
     args = parser.parse_args()
     
     # Load RKNN model
@@ -380,10 +360,9 @@ def main():
     
     # Initialize components
     tracker = ObjectTracker()
-    pi_x = PIController(args.kp, args.ki, smoothing=args.smoothing, 
-                        deadband=args.deadband)  # Pan
-    pi_y = PIController(args.kp, args.ki, smoothing=args.smoothing,
-                        deadband=args.deadband)  # Tilt
+    pi_x = PIController(args.kp, args.ki, smoothing=args.smoothing)  # Pan
+    pi_y = PIController(args.kp, args.ki, smoothing=args.smoothing)  # Tilt
+    deadband_px = args.deadband  # Pixel deadband
     
     # Mouse callback
     click_pos = [None]
@@ -471,23 +450,29 @@ def main():
                     error_px_x = tx - cx
                     error_px_y = ty - cy
                     
-                    # Convert to degrees
-                    error_deg_x = (error_px_x / (frame_w / 2)) * (fov_h / 2)
-                    error_deg_y = (error_px_y / (frame_h / 2)) * (fov_v / 2)
-                    
-                    # PI control with smoothing
-                    correction_x, _ = pi_x.update(error_deg_x)
-                    correction_y, _ = pi_y.update(error_deg_y)
-                    
-                    # Apply to servos (PI controller handles deadband internally)
-                    if correction_x != 0 or correction_y != 0:
-                        new_bottom = turret.bottom_pos + correction_x
-                        new_top = turret.top_pos + correction_y  # Inverted
-                        turret.set_position(new_top, new_bottom)
+                    # Check pixel deadband
+                    if abs(error_px_x) < deadband_px and abs(error_px_y) < deadband_px:
+                        # Within deadband - decay controllers smoothly
+                        pi_x.decay()
+                        pi_y.decay()
+                    else:
+                        # Convert to degrees
+                        error_deg_x = (error_px_x / (frame_w / 2)) * (fov_h / 2)
+                        error_deg_y = (error_px_y / (frame_h / 2)) * (fov_v / 2)
+                        
+                        # PI control with smoothing
+                        correction_x = pi_x.update(error_deg_x)
+                        correction_y = pi_y.update(error_deg_y)
+                        
+                        # Apply to servos
+                        if correction_x != 0 or correction_y != 0:
+                            new_bottom = turret.bottom_pos + correction_x
+                            new_top = turret.top_pos + correction_y  # Inverted
+                            turret.set_position(new_top, new_bottom)
                 else:
                     # Target lost - slowly decay the PI controllers
-                    pi_x.update(0)
-                    pi_y.update(0)
+                    pi_x.decay()
+                    pi_y.decay()
             
             # Update distance periodically
             current_time = time.time()
