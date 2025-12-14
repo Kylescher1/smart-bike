@@ -1418,10 +1418,10 @@ class YOLOGimbal:
         print("Press 'c' to enter calibration mode, 's' to force status update")
         print(f"Tracking: {self.target_class or 'all classes'}")
         print(f"PID gains: Kp={self.pid.kp}, Ki={self.pid.ki}, Kd={self.pid.kd}, max_out={self.pid_max_output}°")
-        print(f"Deadzone: {self.deadzone}px, {self.deadzone_degrees}°")
+        print(f"Deadzone: {self.deadzone}px (gradient), {self.deadzone_degrees}° min move")
         print(f"FOV-based mapping: {self.degrees_per_pixel_x:.4f}°/px (H), {self.degrees_per_pixel_y:.4f}°/px (V)")
         print(f"Max error at edge: ±{self.fov_horizontal/2:.1f}° horizontal, ±{self.fov_vertical/2:.1f}° vertical")
-        print(f"Max movement: {self.max_movement}° per step (safety), PID max: {self.pid_max_output}° per step")
+        print(f"Max step: {self.max_movement}° per command (hard clamp)")
         print(f"Control rate: {self.control_rate} Hz")
         print(f"Camera FPS: {self.camera_fps} Hz")
         if not self.disable_display:
@@ -1507,47 +1507,65 @@ class YOLOGimbal:
                     # Calculate error (FIX #3 - now returns pixels, normalized, AND degrees)
                     error_x_px, error_y_px, error_x_norm, error_y_norm, error_x_deg, error_y_deg = self.calculate_error(target_x, target_y)
                     
-                    # Check pixel deadzone (FIX #12)
-                    if abs(error_x_px) > self.deadzone or abs(error_y_px) > self.deadzone:
-                        # Update PID with degree-based error (FIX #14 - FOV-based mapping)
-                        # Using degree error makes PID output directly in degrees
-                        # This is physically accurate: if target is 5° off, PID operates on 5°
-                        # Max error is limited to half FOV (e.g., 25° for 50° FOV)
-                        output_x, output_y = self.pid.update(error_x_deg, error_y_deg, self.control_dt)
-                        
-                        # PID output is now already in degrees (no arbitrary scaling needed)
-                        # The PID naturally limits large movements because max input is ~25° (half FOV)
-                        move_x = output_x
-                        move_y = output_y
-                        
-                        # Apply direction inversions
-                        if self.invert_x:
-                            move_x = -move_x
-                        if self.invert_y:
-                            move_y = -move_y
-                        
-                        # Apply minimum step to overcome deadband (FIX #2)
+                    # Update PID with degree-based error (FIX #14 - FOV-based mapping)
+                    # Using degree error makes PID output directly in degrees
+                    # This is physically accurate: if target is 5° off, PID operates on 5°
+                    # Max error is limited to half FOV (e.g., 25° for 50° FOV)
+                    output_x, output_y = self.pid.update(error_x_deg, error_y_deg, self.control_dt)
+                    
+                    # PID output is now already in degrees (no arbitrary scaling needed)
+                    move_x = output_x
+                    move_y = output_y
+                    
+                    # Apply direction inversions
+                    if self.invert_x:
+                        move_x = -move_x
+                    if self.invert_y:
+                        move_y = -move_y
+                    
+                    # GRADIENT DEADZONE (FIX #15) - smooth ramp instead of hard cutoff
+                    # This prevents jitter when target is near center by smoothly reducing
+                    # movement as error approaches zero (quadratic ramp for smooth feel)
+                    # Calculate gain: 0 at center, 1 at deadzone boundary, 1 beyond
+                    # Using quadratic for smoother transition near center
+                    if self.deadzone > 0:
+                        gain_x = min(1.0, (abs(error_x_px) / self.deadzone) ** 2)
+                        gain_y = min(1.0, (abs(error_y_px) / self.deadzone) ** 2)
+                    else:
+                        gain_x = 1.0
+                        gain_y = 1.0
+                    move_x *= gain_x
+                    move_y *= gain_y
+                    
+                    # Apply minimum step only if there's meaningful movement intent
+                    # (skip if error is very small - we want to stay still near center)
+                    if abs(error_x_px) > self.deadzone * 0.5:
                         if 0 < abs(move_x) < self.min_step:
                             move_x = self.min_step if move_x > 0 else -self.min_step
+                    if abs(error_y_px) > self.deadzone * 0.5:
                         if 0 < abs(move_y) < self.min_step:
                             move_y = self.min_step if move_y > 0 else -self.min_step
-                        
-                        # Check degree deadzone (FIX #12)
-                        if abs(move_x) < self.deadzone_degrees:
-                            move_x = 0
-                        if abs(move_y) < self.deadzone_degrees:
-                            move_y = 0
-                        
-                        # Clamp movements to maximum allowed (safety filter)
-                        original_move_x = move_x
-                        original_move_y = move_y
-                        move_x = np.clip(move_x, -self.max_movement, self.max_movement)
-                        move_y = np.clip(move_y, -self.max_movement, self.max_movement)
-                        
-                        # Log if movement was clamped (for debugging)
-                        if abs(original_move_x) > self.max_movement or abs(original_move_y) > self.max_movement:
-                            print(f"WARNING: Movement clamped! Requested: X={original_move_x:.2f}° Y={original_move_y:.2f}°, "
-                                  f"Limited to: X={move_x:.2f}° Y={move_y:.2f}° (max={self.max_movement}°)")
+                    
+                    # Degree deadzone - final check for very small movements
+                    if abs(move_x) < self.deadzone_degrees:
+                        move_x = 0
+                    if abs(move_y) < self.deadzone_degrees:
+                        move_y = 0
+                    
+                    # CLAMP to maximum step size (FIX #16) - prevents large jumps
+                    # This is critical for stability - even if PID wants big move, limit it
+                    original_move_x = move_x
+                    original_move_y = move_y
+                    move_x = np.clip(move_x, -self.max_movement, self.max_movement)
+                    move_y = np.clip(move_y, -self.max_movement, self.max_movement)
+                    
+                    # Log if movement was clamped (for debugging)
+                    if abs(original_move_x) > self.max_movement or abs(original_move_y) > self.max_movement:
+                        print(f"CLAMPED: Requested X={original_move_x:.2f}° Y={original_move_y:.2f}° → "
+                              f"Limited to X={move_x:.2f}° Y={move_y:.2f}° (max={self.max_movement}°)")
+                    
+                    # Only move if there's actual movement to do
+                    if abs(move_x) > 0 or abs(move_y) > 0:
                         
                         # Calculate target absolute positions (FIX #7)
                         target_bottom = self.turret.bottom_pos + move_x
@@ -1606,15 +1624,18 @@ class YOLOGimbal:
                         if should_display_frame:
                             limit_text = ""
                             if at_limit_x:
-                                limit_text += " [X LIMIT]"
+                                limit_text += " [X LIM]"
                             if at_limit_y:
-                                limit_text += " [Y LIMIT]"
+                                limit_text += " [Y LIM]"
                             
-                            cv2.putText(frame, f"Error: X={error_x_px:.1f}px ({error_x_deg:.2f}deg) Y={error_y_px:.1f}px ({error_y_deg:.2f}deg)", 
+                            # Show gradient gain (how much movement is being applied)
+                            gain_text = f" G:{gain_x:.0%}/{gain_y:.0%}"
+                            
+                            cv2.putText(frame, f"Err: X={error_x_deg:.1f}deg Y={error_y_deg:.1f}deg{gain_text}", 
                                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                             cv2.putText(frame, f"Move: X={move_x:.2f}deg Y={move_y:.2f}deg{limit_text}", 
                                        (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-                            cv2.putText(frame, f"Pos: Bottom={self.turret.bottom_pos:.1f}deg Top={self.turret.top_pos:.1f}deg", 
+                            cv2.putText(frame, f"Pos: Pan={self.turret.bottom_pos:.1f}deg Tilt={self.turret.top_pos:.1f}deg", 
                                        (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                     else:
                         if should_display_frame:
@@ -1973,9 +1994,9 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
     parser.add_argument('--kd', type=float, default=0.05,
                        help='PID derivative gain (default: 0.05)')
     parser.add_argument('--deadzone', type=float, default=15.0,
-                       help='Deadzone in pixels (default: 15.0, smaller = more sensitive)')
+                       help='Gradient deadzone radius in pixels (default: 15.0). Movement smoothly ramps from 0 at center to 100%% at this radius.')
     parser.add_argument('--deadzone-degrees', type=float, default=0.5,
-                       help='Deadzone in degrees (default: 0.5)')
+                       help='Minimum movement threshold in degrees (default: 0.5). Movements smaller than this are ignored.')
     parser.add_argument('--movement-scale', type=float, default=15.0,
                        help='[DEPRECATED] Movement scale factor - FOV-based mapping now used instead')
     parser.add_argument('--min-step', type=float, default=0.5,
