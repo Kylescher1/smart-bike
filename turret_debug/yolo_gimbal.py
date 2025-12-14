@@ -11,6 +11,35 @@ Usage:
     e$ /home/radxa/smart-bike/venv/bin/python /home/radxa/smart-bike/turret_debug/yolo_gimbal.py --camera 5 --turret /dev/ttyUSB0 --rknn --invert-y --class person --kp 0.3 --ki 0.9 --kd 0.01
 """
 
+# Initialize logging before any imports that use it (especially torch)
+# This prevents the "Unknown level: 'WARNING'" error
+# Ensure logging module is fully loaded and initialized
+import logging
+import logging.handlers
+# Force re-import of logging._checkLevel to ensure it's properly initialized
+# The issue is that torch's matcher_utils tries to setLevel('WARNING') which
+# requires logging._checkLevel to recognize 'WARNING' as a valid level string
+logging.basicConfig(level=logging.WARNING, format='%(levelname)s:%(name)s:%(message)s')
+# Ensure _checkLevel function works with string levels
+if hasattr(logging, '_checkLevel'):
+    # Monkey-patch _checkLevel to handle string levels if it doesn't already
+    original_checkLevel = logging._checkLevel
+    def patched_checkLevel(level):
+        if isinstance(level, str):
+            # Map string to numeric level
+            level_mapping = {
+                'DEBUG': logging.DEBUG,
+                'INFO': logging.INFO,
+                'WARNING': logging.WARNING,
+                'WARN': logging.WARNING,
+                'ERROR': logging.ERROR,
+                'CRITICAL': logging.CRITICAL,
+            }
+            if level.upper() in level_mapping:
+                return level_mapping[level.upper()]
+        return original_checkLevel(level)
+    logging._checkLevel = patched_checkLevel
+
 import serial
 import sys
 import time
@@ -929,10 +958,18 @@ class DetectionSmoother:
         self.height_history.append(height)
         
         # Calculate smoothed values (simple moving average)
+        # If history is empty (shouldn't happen with window_size > 0), return raw values
+        if len(self.x_history) == 0:
+            return x, y, width, height
+        
         smoothed_x = np.mean(self.x_history)
         smoothed_y = np.mean(self.y_history)
         smoothed_width = np.mean(self.width_history)
         smoothed_height = np.mean(self.height_history)
+        
+        # Check for NaN (can happen if window_size=0 or empty history)
+        if np.isnan(smoothed_x) or np.isnan(smoothed_y):
+            return x, y, width, height
         
         return smoothed_x, smoothed_y, smoothed_width, smoothed_height
     
@@ -1350,13 +1387,13 @@ class YOLOGimbal:
     
     def __init__(self, camera_index: int, turret_port: str, 
                  target_class: Optional[str] = None, conf_threshold: float = 0.5,
-                 kp: float = 0.3, ki: float = 0.005, kd: float = 0.05,
+                 kp: float = 1.0, ki: float = 0.2, kd: float = 0.1,
                  deadzone: float = 15.0, deadzone_degrees: float = 0.5,
                  movement_scale: float = 15.0, min_step: float = 0.5,
                  max_movement: float = 10.0,
-                 control_rate: float = 30.0,
-                 camera_fps: float = 30.0, display_fps: Optional[float] = None,
-                 disable_display: bool = False,
+                 control_rate: float = 60.0,
+                 camera_fps: float = 60.0, display_fps: Optional[float] = None,
+                 disable_display: bool = True,
                  invert_x: bool = False, invert_y: bool = False,
                  swap_servos: bool = False, enable_3d_viz: bool = False,
                  use_rknn: bool = False, rknn_model: Optional[str] = None,
@@ -1364,10 +1401,11 @@ class YOLOGimbal:
                  detection_imgsz: int = 640, enable_distance: bool = True,
                  fov_horizontal: float = 50.0, fov_vertical: Optional[float] = None,
                  frame_width: int = 1280, frame_height: int = 720,
-                 pid_max_output: float = 5.0,
+                 pid_max_output: float = 0.75,
                  lost_timeout: float = 1.0, search_timeout: float = 2.0,
                  sweep_speed: float = 2.0, sweep_dwell: float = 0.5,
-                 smooth_window: int = 3, smooth_max_jump: float = 100.0):
+                 smooth_window: int = 0, smooth_max_jump: float = 100.0,
+                 yolo_device: Optional[str] = None, yolo_half: bool = False):
         self.camera_index = camera_index
         self.turret_port = turret_port
         self.target_class = target_class
@@ -1393,6 +1431,8 @@ class YOLOGimbal:
         self.enable_timing = enable_timing  # Enable timing profiling
         self.detection_imgsz = detection_imgsz  # Detection input size (lower = faster)
         self.enable_distance = enable_distance  # Enable TF03 LiDAR distance reading
+        self.yolo_device = yolo_device  # YOLO device ('cpu', 'cuda', '0', etc.)
+        self.yolo_half = yolo_half  # Use FP16 half precision (faster on GPU)
         
         # Camera FOV-based error mapping (physically accurate pixel-to-degree conversion)
         self.fov_horizontal = fov_horizontal  # Horizontal field of view in degrees
@@ -1519,9 +1559,13 @@ class YOLOGimbal:
                 camera=self.camera,
                 weights=str(yolo_weights),
                 conf=self.conf_threshold,
-                imgsz=640
+                imgsz=self.detection_imgsz,  # Use configurable image size
+                device=self.yolo_device,  # GPU acceleration if available
+                half=self.yolo_half  # FP16 half precision (GPU only)
             )
             self.yolo.start()
+            if self.yolo_half:
+                print("YOLO: Using FP16 half precision for faster inference")
             print("YOLO initialized")
         
         print("Connecting to turret...")
@@ -1737,9 +1781,14 @@ class YOLOGimbal:
                     no_target_count = 0
                     
                     # SMOOTH DETECTION (FIX #17) - average over multiple frames to reduce YOLO jitter
-                    target_x, target_y, width, height = self.detection_smoother.update(
-                        raw_x, raw_y, raw_width, raw_height
-                    )
+                    # Skip smoothing if disabled (window <= 1) to avoid NaN from empty deque
+                    if self.smooth_window > 1:
+                        target_x, target_y, width, height = self.detection_smoother.update(
+                            raw_x, raw_y, raw_width, raw_height
+                        )
+                    else:
+                        # Smoothing disabled - use raw values directly
+                        target_x, target_y, width, height = raw_x, raw_y, raw_width, raw_height
                     
                     # TARGET FOUND - update state machine
                     self.last_target_time = current_time
@@ -2390,15 +2439,15 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Camera index (0, 1, 2, etc.)')
     parser.add_argument('--turret', '-t', type=str, required=True,
                        help='Turret serial port (e.g., COM3 or /dev/ttyUSB0)')
-    parser.add_argument('--class', '-cls', dest='target_class', type=str, default=None,
+    parser.add_argument('--class', '-cls', dest='target_class', type=str, default="person",
                        help='Target class name or ID to track (e.g., "person", "0", "bottle")')
     parser.add_argument('--conf', type=float, default=0.5,
                        help='Confidence threshold (default: 0.5)')
-    parser.add_argument('--kp', type=float, default=0.3,
+    parser.add_argument('--kp', type=float, default=0.85,
                        help='PID proportional gain (default: 0.3, higher = more aggressive)')
-    parser.add_argument('--ki', type=float, default=0.005,
+    parser.add_argument('--ki', type=float, default=0.09,
                        help='PID integral gain (default: 0.005)')
-    parser.add_argument('--kd', type=float, default=0.05,
+    parser.add_argument('--kd', type=float, default=0.1,
                        help='PID derivative gain (default: 0.05)')
     parser.add_argument('--deadzone', type=float, default=15.0,
                        help='Gradient deadzone radius in pixels (default: 15.0). Movement smoothly ramps from 0 at center to 100%% at this radius.')
@@ -2410,11 +2459,11 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Minimum step size to overcome servo deadband (default: 0.5)')
     parser.add_argument('--max-movement', type=float, default=10.0,
                        help='Maximum movement per command in degrees (default: 10.0, safety limit to prevent large jumps)')
-    parser.add_argument('--pid-max-output', type=float, default=5.0,
+    parser.add_argument('--pid-max-output', type=float, default=0.75,
                        help='PID controller max output in degrees (default: 5.0, limits max single-step movement)')
-    parser.add_argument('--control-rate', type=float, default=30.0,
+    parser.add_argument('--control-rate', type=float, default=60.0,
                        help='Control loop rate in Hz (default: 30.0, higher = faster tracking)')
-    parser.add_argument('--camera-fps', type=float, default=30.0,
+    parser.add_argument('--camera-fps', type=float, default=60.0,
                        help='Camera FPS setting (default: 30.0, increase for higher capture rate)')
     parser.add_argument('--display-fps', type=float, default=None,
                        help='Display FPS limit (default: min(30, control-rate), set lower to reduce CPU usage)')
@@ -2437,7 +2486,11 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
     parser.add_argument('--enable-timing', action='store_true', default=False,
                        help='Enable timing profiling (default: False)')
     parser.add_argument('--detection-imgsz', type=int, default=640,
-                       help='Detection input size in pixels (default: 640, lower = faster)')
+                       help='Detection input size in pixels (default: 640, lower = faster, try 416 or 320 for speed)')
+    parser.add_argument('--yolo-device', type=str, default=None,
+                       help='YOLO device: "cpu", "cuda", "0" (GPU 0), etc. (default: auto-detect)')
+    parser.add_argument('--yolo-half', action='store_true',
+                       help='Use FP16 half precision for faster inference (GPU only, ~2x speedup)')
     parser.add_argument('--enable-distance', action='store_true', default=True,
                        help='Enable TF03 LiDAR distance reading (default: enabled)')
     parser.add_argument('--disable-distance', action='store_true',
@@ -2458,7 +2511,7 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Degrees per step during sweep pattern (default: 2.0)')
     parser.add_argument('--sweep-dwell', type=float, default=0.5,
                        help='Seconds to pause at each sweep waypoint (default: 0.5)')
-    parser.add_argument('--smooth-window', type=int, default=3,
+    parser.add_argument('--smooth-window', type=int, default=0,
                        help='Number of frames to average for detection smoothing (default: 3, set to 1 to disable)')
     parser.add_argument('--smooth-max-jump', type=float, default=100.0,
                        help='Max pixel jump before resetting smoother (default: 100.0)')
@@ -2519,7 +2572,9 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
             sweep_speed=args.sweep_speed,
             sweep_dwell=args.sweep_dwell,
             smooth_window=args.smooth_window,
-            smooth_max_jump=args.smooth_max_jump
+            smooth_max_jump=args.smooth_max_jump,
+            yolo_device=args.yolo_device,
+            yolo_half=args.yolo_half
         )
         
         gimbal.initialize()
