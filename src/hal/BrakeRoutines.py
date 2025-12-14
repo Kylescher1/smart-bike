@@ -108,8 +108,9 @@ class BrakeRoutines:
         self.brake.set_pulse_width(1500, check_stall=False)
         time.sleep(0.5)
 
-
+        # Fully disable PWM - stop the PWM loop completely
         self.brake.disable()
+        time.sleep(0.05)  # Brief pause to ensure PWM loop has stopped
         print("BrakeRoutines: Start routine complete!")
 
     def start(self, blocking=False):
@@ -172,8 +173,6 @@ class BrakeRoutines:
             
         else:
 
-            self.brake.disable()
-            self.brake.enable()
             self.brake.set_pulse_width(1500, check_stall=False)
             time.sleep(0.1)
 
@@ -182,7 +181,6 @@ class BrakeRoutines:
             self.brake.set_pulse_width(1200, check_stall=False)
             
             # sleep(2)
-            
             time.sleep(2.5)
         
 
@@ -190,13 +188,6 @@ class BrakeRoutines:
             self.brake.set_pulse_width(1500, check_stall=False)
             time.sleep(0.5)
 
-            # brake.disable
-            
-            self.brake.disable()
-            
-            # brake.enable
-            
-            self.brake.enable()
             
             # release
             
@@ -211,21 +202,16 @@ class BrakeRoutines:
             time.sleep(0.5)
             
             # disable
-
-
             # brake.disable
             self.brake.disable()
             time.sleep(0.01)
-            self.brake.enable()
-            time.sleep(0.01)
 
         
-        # disable
-        
-        self.brake.disable()
+        # Final cleanup - set to neutral, wait, then fully disable PWM
         self.brake.enable()
-        
-
+        self.brake.set_pulse_width(1500, check_stall=False)  # Neutral position
+        time.sleep(0.1)  # Let it settle
+        self.brake.disable()  # Stop PWM completely
         
         print("BrakeRoutines: Dont_die routine complete!")
 

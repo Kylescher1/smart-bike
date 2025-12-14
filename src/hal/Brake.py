@@ -300,11 +300,8 @@ class BrakeESC:
             self.line.set_value(1)
             pulse_end_time = cycle_start + pulse_width_s
             
-            # Sleep for most of pulse width (releases GIL for other threads)
-            remaining = pulse_end_time - time.perf_counter()
-            if remaining > 0.0005:  # Sleep if more than 0.5ms remaining
-                time.sleep(remaining - 0.0003)  # Wake up 0.3ms early for fine-tuning
-            # Brief busy-wait only for final microseconds of precision
+            # CRITICAL: Pulse width must be precise for ESC - use busy-wait only
+            # (pulse is only 1-2ms, too short to sleep reliably)
             while time.perf_counter() < pulse_end_time:
                 pass
             
@@ -312,11 +309,12 @@ class BrakeESC:
             self.line.set_value(0)
             period_end_time = cycle_start + self.period
             
-            # Sleep for most of the low period (releases GIL for other threads)
+            # LOW phase is ~18ms - safe to sleep here and release GIL for other threads
+            # Sleep for most of it, leaving 3ms margin for scheduler jitter
             remaining = period_end_time - time.perf_counter()
-            if remaining > 0.001:  # Sleep if more than 1ms remaining
-                time.sleep(remaining - 0.0005)  # Wake up 0.5ms early for fine-tuning
-            # Brief busy-wait only for final microseconds of precision
+            if remaining > 0.005:  # Only sleep if more than 5ms remaining
+                time.sleep(remaining - 0.003)  # Wake up 3ms early to account for jitter
+            # Busy-wait for the final few ms to maintain 50Hz timing
             while time.perf_counter() < period_end_time:
                 pass
     
