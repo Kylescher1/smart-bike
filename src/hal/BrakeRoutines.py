@@ -167,6 +167,7 @@ class BrakeRoutines:
                
                 self.brake.set_pulse_width(1500, check_stall=False)
                 time.sleep(abs_release_time)
+
             
             
         else:
@@ -210,16 +211,13 @@ class BrakeRoutines:
             time.sleep(0.5)
             
             # disable
-            
-            self.brake.disable()
-            
-            time.sleep(1.5)
-        
 
 
             # brake.disable
             self.brake.disable()
-            
+            time.sleep(0.01)
+            self.brake.enable()
+            time.sleep(0.01)
 
         
         # disable
