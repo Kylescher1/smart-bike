@@ -2370,7 +2370,7 @@ FOV-Based Mapping:
   
 Note: RKNN requires rknnlite installed (Rock Pi 5B)
       To find your camera index, run: python find_camera.py
-      Higher FPS requires faster hardware and may reduce tracking stability
+      Higher FPS requires faster hardware and may reduce tracking stabilitys
         """
     )
     parser.add_argument('--camera', '-c', type=int, required=True,
