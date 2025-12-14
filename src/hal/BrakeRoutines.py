@@ -172,7 +172,10 @@ class BrakeRoutines:
             
             
         else:
-
+            # Enable PWM before sending commands (PWM was disabled after start routine)
+            self.brake.disable()
+            self.brake.enable()
+            
             self.brake.set_pulse_width(1500, check_stall=False)
             time.sleep(0.1)
 
