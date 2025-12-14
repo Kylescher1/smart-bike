@@ -865,6 +865,123 @@ class ErrorPlotter:
                     pass
 
 
+class TrackingState:
+    """Enumeration of turret tracking states"""
+    TRACKING = "TRACKING"           # Actively tracking a target
+    LOST = "LOST"                   # Just lost track, waiting
+    RETURN_TO_LAST = "RETURN_TO_LAST"  # Returning to last known position
+    SEARCHING = "SEARCHING"         # At last position, looking for target
+    SWEEPING = "SWEEPING"           # Executing sweep pattern
+    GOING_HOME = "GOING_HOME"       # Moving to home before sweep
+
+
+class SweepController:
+    """Controls sweep pattern when target is lost
+    
+    Sweep pattern: A → X → B → X → C → X → D → X → A (repeat)
+    Where:
+        A = top-left corner
+        B = top-right corner  
+        C = bottom-left corner
+        D = bottom-right corner
+        X = center (home)
+    """
+    
+    def __init__(self, pan_min: float = 45, pan_max: float = 135,
+                 tilt_min: float = 70, tilt_max: float = 110,
+                 home_pan: float = 90, home_tilt: float = 90,
+                 move_speed: float = 2.0):
+        """
+        Args:
+            pan_min/max: Sweep area horizontal limits (degrees)
+            tilt_min/max: Sweep area vertical limits (degrees)
+            home_pan/tilt: Center position
+            move_speed: Degrees per step when sweeping
+        """
+        self.pan_min = pan_min
+        self.pan_max = pan_max
+        self.tilt_min = tilt_min
+        self.tilt_max = tilt_max
+        self.home_pan = home_pan
+        self.home_tilt = home_tilt
+        self.move_speed = move_speed
+        
+        # Define waypoints: A(top-left), X(center), B(top-right), X, C(bottom-left), X, D(bottom-right), X
+        self.waypoints = [
+            ('A', pan_min, tilt_max),      # Top-left
+            ('X', home_pan, home_tilt),    # Center
+            ('B', pan_max, tilt_max),      # Top-right
+            ('X', home_pan, home_tilt),    # Center
+            ('C', pan_min, tilt_min),      # Bottom-left
+            ('X', home_pan, home_tilt),    # Center
+            ('D', pan_max, tilt_min),      # Bottom-right
+            ('X', home_pan, home_tilt),    # Center
+        ]
+        
+        self.current_waypoint_idx = 0
+        self.is_moving = False
+        
+    def reset(self):
+        """Reset sweep to beginning"""
+        self.current_waypoint_idx = 0
+        self.is_moving = False
+    
+    def get_current_waypoint(self) -> Tuple[str, float, float]:
+        """Get current waypoint (name, pan, tilt)"""
+        return self.waypoints[self.current_waypoint_idx]
+    
+    def advance_waypoint(self):
+        """Move to next waypoint in pattern"""
+        self.current_waypoint_idx = (self.current_waypoint_idx + 1) % len(self.waypoints)
+    
+    def calculate_move(self, current_pan: float, current_tilt: float) -> Tuple[float, float, bool]:
+        """Calculate movement towards current waypoint
+        
+        Returns:
+            (pan_move, tilt_move, reached_waypoint)
+        """
+        name, target_pan, target_tilt = self.get_current_waypoint()
+        
+        # Calculate error to waypoint
+        pan_error = target_pan - current_pan
+        tilt_error = target_tilt - current_tilt
+        
+        # Check if we've reached the waypoint (within tolerance)
+        tolerance = 2.0  # degrees
+        if abs(pan_error) < tolerance and abs(tilt_error) < tolerance:
+            return 0, 0, True
+        
+        # Calculate movement (limited by move_speed)
+        pan_move = np.clip(pan_error, -self.move_speed, self.move_speed)
+        tilt_move = np.clip(tilt_error, -self.move_speed, self.move_speed)
+        
+        return pan_move, tilt_move, False
+    
+    def update_limits(self, pan_min: float, pan_max: float, tilt_min: float, tilt_max: float,
+                      home_pan: float = 90, home_tilt: float = 90):
+        """Update sweep area limits based on servo configuration"""
+        # Add some margin from absolute limits
+        margin = 10
+        self.pan_min = pan_min + margin
+        self.pan_max = pan_max - margin
+        self.tilt_min = tilt_min + margin
+        self.tilt_max = tilt_max - margin
+        self.home_pan = home_pan
+        self.home_tilt = home_tilt
+        
+        # Rebuild waypoints with new limits
+        self.waypoints = [
+            ('A', self.pan_min, self.tilt_max),
+            ('X', self.home_pan, self.home_tilt),
+            ('B', self.pan_max, self.tilt_max),
+            ('X', self.home_pan, self.home_tilt),
+            ('C', self.pan_min, self.tilt_min),
+            ('X', self.home_pan, self.home_tilt),
+            ('D', self.pan_max, self.tilt_min),
+            ('X', self.home_pan, self.home_tilt),
+        ]
+
+
 class PIDController:
     """PID controller for servo positioning"""
     
@@ -1163,7 +1280,9 @@ class YOLOGimbal:
                  detection_imgsz: int = 640, enable_distance: bool = True,
                  fov_horizontal: float = 50.0, fov_vertical: Optional[float] = None,
                  frame_width: int = 1280, frame_height: int = 720,
-                 pid_max_output: float = 5.0):
+                 pid_max_output: float = 5.0,
+                 lost_timeout: float = 1.0, search_timeout: float = 2.0,
+                 sweep_speed: float = 2.0, sweep_dwell: float = 0.5):
         self.camera_index = camera_index
         self.turret_port = turret_port
         self.target_class = target_class
@@ -1209,6 +1328,18 @@ class YOLOGimbal:
         self.pid = PIDController(kp=kp, ki=ki, kd=kd, max_output=pid_max_output)  # Max output now in degrees
         self.visualizer = None
         self.error_plotter = None
+        self.sweep_controller = SweepController(move_speed=sweep_speed)  # For sweep pattern when target lost
+        
+        # Tracking state machine
+        self.tracking_state = TrackingState.TRACKING
+        self.last_target_time = 0.0  # When we last saw a target
+        self.last_known_pan = 90.0   # Last known target position (servo angles)
+        self.last_known_tilt = 90.0
+        self.lost_timeout = lost_timeout      # Seconds before returning to last position
+        self.search_timeout = search_timeout  # Seconds to search at last position before sweeping
+        self.state_start_time = 0.0           # When current state started
+        self.sweep_dwell_time = sweep_dwell   # Seconds to pause at each waypoint
+        self.sweep_speed = sweep_speed        # Degrees per step during sweep
         
         # State
         self.running = False
@@ -1331,6 +1462,20 @@ class YOLOGimbal:
         time.sleep(1)
         self.turret.update_status()
         
+        # Configure sweep controller with actual servo limits
+        home_pan = (self.turret.bottom_min + self.turret.bottom_max) / 2
+        home_tilt = (self.turret.top_min + self.turret.top_max) / 2
+        self.sweep_controller.update_limits(
+            pan_min=self.turret.bottom_min,
+            pan_max=self.turret.bottom_max,
+            tilt_min=self.turret.top_min,
+            tilt_max=self.turret.top_max,
+            home_pan=home_pan,
+            home_tilt=home_tilt
+        )
+        print(f"Sweep pattern configured: Pan {self.sweep_controller.pan_min:.0f}°-{self.sweep_controller.pan_max:.0f}°, "
+              f"Tilt {self.sweep_controller.tilt_min:.0f}°-{self.sweep_controller.tilt_max:.0f}°")
+        
         # Initialize 3D visualizer if enabled
         if self.enable_3d_viz:
             print("Starting 3D visualization...")
@@ -1422,6 +1567,8 @@ class YOLOGimbal:
         print(f"FOV-based mapping: {self.degrees_per_pixel_x:.4f}°/px (H), {self.degrees_per_pixel_y:.4f}°/px (V)")
         print(f"Max error at edge: ±{self.fov_horizontal/2:.1f}° horizontal, ±{self.fov_vertical/2:.1f}° vertical")
         print(f"Max step: {self.max_movement}° per command (hard clamp)")
+        print(f"Lost target behavior: Wait {self.lost_timeout}s → Return to last → Search {self.search_timeout}s → Sweep")
+        print(f"Sweep pattern: A(top-left)→X(center)→B(top-right)→X→C(bottom-left)→X→D(bottom-right)→X")
         print(f"Control rate: {self.control_rate} Hz")
         print(f"Camera FPS: {self.camera_fps} Hz")
         if not self.disable_display:
@@ -1433,6 +1580,8 @@ class YOLOGimbal:
         self.last_control_time = time.time()
         self.last_fps_time = time.time()
         self.last_display_time = time.time()
+        self.last_target_time = time.time()  # Initialize to now so we don't immediately think target is lost
+        self.tracking_state = TrackingState.TRACKING  # Start in tracking state
         no_target_count = 0
         status_update_counter = 0
         
@@ -1490,6 +1639,18 @@ class YOLOGimbal:
                 if target is not None:
                     target_x, target_y, width, height = target
                     no_target_count = 0
+                    
+                    # TARGET FOUND - update state machine
+                    self.last_target_time = current_time
+                    # Save last known position (servo angles when we see target)
+                    self.last_known_pan = self.turret.bottom_pos
+                    self.last_known_tilt = self.turret.top_pos
+                    
+                    # Reset to tracking state if we were searching/sweeping
+                    if self.tracking_state != TrackingState.TRACKING:
+                        print(f"Target ACQUIRED - switching from {self.tracking_state} to TRACKING")
+                        self.tracking_state = TrackingState.TRACKING
+                        self.sweep_controller.reset()
                     
                     # Draw target bounding box (only if displaying)
                     if should_display_frame:
@@ -1628,22 +1789,24 @@ class YOLOGimbal:
                             if at_limit_y:
                                 limit_text += " [Y LIM]"
                             
-                            # Show gradient gain (how much movement is being applied)
+                            # Show state and gradient gain
                             gain_text = f" G:{gain_x:.0%}/{gain_y:.0%}"
                             
-                            cv2.putText(frame, f"Err: X={error_x_deg:.1f}deg Y={error_y_deg:.1f}deg{gain_text}", 
-                                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                            cv2.putText(frame, f"TRACKING | Err: X={error_x_deg:.1f} Y={error_y_deg:.1f}{gain_text}", 
+                                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                             cv2.putText(frame, f"Move: X={move_x:.2f}deg Y={move_y:.2f}deg{limit_text}", 
                                        (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                             cv2.putText(frame, f"Pos: Pan={self.turret.bottom_pos:.1f}deg Tilt={self.turret.top_pos:.1f}deg", 
                                        (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                     else:
                         if should_display_frame:
-                            cv2.putText(frame, "LOCKED", (10, 30), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                            cv2.putText(frame, "LOCKED ON TARGET", (10, 30), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                            cv2.putText(frame, f"Pos: Pan={self.turret.bottom_pos:.1f}deg Tilt={self.turret.top_pos:.1f}deg", 
+                                       (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                             # Show distance even when locked
                             if distance_cm is not None:
-                                cv2.putText(frame, f"Range: {distance_cm:.1f}cm", (10, 60), 
+                                cv2.putText(frame, f"Range: {distance_cm:.1f}cm", (10, 80), 
                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                         
                         # Update visualizer even when locked
@@ -1676,12 +1839,143 @@ class YOLOGimbal:
                     
                     self.last_control_time = current_time
                 else:
+                    # NO TARGET - run state machine for search/sweep behavior
                     no_target_count += 1
-                    if no_target_count > 30:  # Reset PID after 1 second of no target
-                        self.pid.reset()
+                    time_since_target = current_time - self.last_target_time
+                    
+                    # STATE MACHINE for lost target behavior
+                    if self.tracking_state == TrackingState.TRACKING:
+                        # Just lost track - transition to LOST state
+                        if time_since_target > 0.1:  # Small delay to avoid flicker
+                            self.tracking_state = TrackingState.LOST
+                            self.state_start_time = current_time
+                            self.pid.reset()
+                            print(f"Target LOST - waiting {self.lost_timeout}s before returning to last position")
+                    
+                    elif self.tracking_state == TrackingState.LOST:
+                        # Waiting before returning to last known position
+                        time_in_state = current_time - self.state_start_time
+                        if time_in_state >= self.lost_timeout:
+                            self.tracking_state = TrackingState.RETURN_TO_LAST
+                            self.state_start_time = current_time
+                            print(f"Returning to last known position: Pan={self.last_known_pan:.1f}°, Tilt={self.last_known_tilt:.1f}°")
+                    
+                    elif self.tracking_state == TrackingState.RETURN_TO_LAST:
+                        # Moving back to last known position
+                        pan_error = self.last_known_pan - self.turret.bottom_pos
+                        tilt_error = self.last_known_tilt - self.turret.top_pos
+                        
+                        # Move towards last position (with speed limit)
+                        move_speed = 3.0  # degrees per step
+                        move_x = np.clip(pan_error, -move_speed, move_speed)
+                        move_y = np.clip(tilt_error, -move_speed, move_speed)
+                        
+                        if abs(pan_error) > 1.0 or abs(tilt_error) > 1.0:
+                            # Still moving to position
+                            target_bottom = self.turret.bottom_pos + move_x
+                            target_top = self.turret.top_pos + move_y
+                            if self.swap_servos:
+                                self.turret.move_to(target_top, target_bottom)
+                            else:
+                                self.turret.move_to(target_bottom, target_top)
+                        else:
+                            # Reached last position - start searching
+                            self.tracking_state = TrackingState.SEARCHING
+                            self.state_start_time = current_time
+                            print(f"At last position - searching for {self.search_timeout}s")
+                    
+                    elif self.tracking_state == TrackingState.SEARCHING:
+                        # At last position, looking for target
+                        time_in_state = current_time - self.state_start_time
+                        if time_in_state >= self.search_timeout:
+                            # Nothing found - go home and start sweep
+                            self.tracking_state = TrackingState.GOING_HOME
+                            self.state_start_time = current_time
+                            print("Target not found - going HOME to start sweep pattern")
+                    
+                    elif self.tracking_state == TrackingState.GOING_HOME:
+                        # Moving to home position before sweep
+                        home_pan = self.sweep_controller.home_pan
+                        home_tilt = self.sweep_controller.home_tilt
+                        pan_error = home_pan - self.turret.bottom_pos
+                        tilt_error = home_tilt - self.turret.top_pos
+                        
+                        move_speed = 3.0
+                        move_x = np.clip(pan_error, -move_speed, move_speed)
+                        move_y = np.clip(tilt_error, -move_speed, move_speed)
+                        
+                        if abs(pan_error) > 1.0 or abs(tilt_error) > 1.0:
+                            target_bottom = self.turret.bottom_pos + move_x
+                            target_top = self.turret.top_pos + move_y
+                            if self.swap_servos:
+                                self.turret.move_to(target_top, target_bottom)
+                            else:
+                                self.turret.move_to(target_bottom, target_top)
+                        else:
+                            # At home - start sweep
+                            self.tracking_state = TrackingState.SWEEPING
+                            self.state_start_time = current_time
+                            self.sweep_controller.reset()
+                            wp_name, _, _ = self.sweep_controller.get_current_waypoint()
+                            print(f"Starting SWEEP pattern: A→X→B→X→C→X→D→X (at waypoint {wp_name})")
+                    
+                    elif self.tracking_state == TrackingState.SWEEPING:
+                        # Executing sweep pattern: A → X → B → X → C → X → D → X → repeat
+                        pan_move, tilt_move, reached = self.sweep_controller.calculate_move(
+                            self.turret.bottom_pos, self.turret.top_pos
+                        )
+                        
+                        if reached:
+                            # Dwell at waypoint briefly
+                            time_at_waypoint = current_time - self.state_start_time
+                            if time_at_waypoint >= self.sweep_dwell_time:
+                                # Move to next waypoint
+                                old_wp, _, _ = self.sweep_controller.get_current_waypoint()
+                                self.sweep_controller.advance_waypoint()
+                                new_wp, _, _ = self.sweep_controller.get_current_waypoint()
+                                self.state_start_time = current_time
+                                print(f"Sweep: {old_wp} → {new_wp}")
+                        else:
+                            # Move towards current waypoint
+                            target_bottom = self.turret.bottom_pos + pan_move
+                            target_top = self.turret.top_pos + tilt_move
+                            if self.swap_servos:
+                                self.turret.move_to(target_top, target_bottom)
+                            else:
+                                self.turret.move_to(target_bottom, target_top)
+                            self.state_start_time = current_time  # Reset dwell timer while moving
+                    
+                    # Display current state
                     if should_display_frame:
-                        cv2.putText(frame, "NO TARGET", (10, 30), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                        state_colors = {
+                            TrackingState.TRACKING: (0, 255, 0),      # Green
+                            TrackingState.LOST: (0, 165, 255),        # Orange
+                            TrackingState.RETURN_TO_LAST: (0, 255, 255),  # Yellow
+                            TrackingState.SEARCHING: (255, 255, 0),   # Cyan
+                            TrackingState.GOING_HOME: (255, 0, 255),  # Magenta
+                            TrackingState.SWEEPING: (255, 0, 0),      # Blue
+                        }
+                        color = state_colors.get(self.tracking_state, (0, 0, 255))
+                        
+                        cv2.putText(frame, f"State: {self.tracking_state}", (10, 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                        
+                        # Show additional info based on state
+                        if self.tracking_state == TrackingState.LOST:
+                            time_left = max(0, self.lost_timeout - (current_time - self.state_start_time))
+                            cv2.putText(frame, f"Returning in {time_left:.1f}s", (10, 55), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                        elif self.tracking_state == TrackingState.SEARCHING:
+                            time_left = max(0, self.search_timeout - (current_time - self.state_start_time))
+                            cv2.putText(frame, f"Sweep in {time_left:.1f}s", (10, 55), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                        elif self.tracking_state == TrackingState.SWEEPING:
+                            wp_name, wp_pan, wp_tilt = self.sweep_controller.get_current_waypoint()
+                            cv2.putText(frame, f"Waypoint: {wp_name} ({wp_pan:.0f}, {wp_tilt:.0f})", (10, 55), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                        elif self.tracking_state == TrackingState.RETURN_TO_LAST:
+                            cv2.putText(frame, f"Last: ({self.last_known_pan:.0f}, {self.last_known_tilt:.0f})", (10, 55), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                     
                     # Update visualizer with no target
                     if self.visualizer:
@@ -2043,6 +2337,14 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Camera frame width in pixels (default: 1280)')
     parser.add_argument('--frame-height', type=int, default=720,
                        help='Camera frame height in pixels (default: 720)')
+    parser.add_argument('--lost-timeout', type=float, default=1.0,
+                       help='Seconds after losing target before returning to last position (default: 1.0)')
+    parser.add_argument('--search-timeout', type=float, default=2.0,
+                       help='Seconds to search at last position before starting sweep (default: 2.0)')
+    parser.add_argument('--sweep-speed', type=float, default=2.0,
+                       help='Degrees per step during sweep pattern (default: 2.0)')
+    parser.add_argument('--sweep-dwell', type=float, default=0.5,
+                       help='Seconds to pause at each sweep waypoint (default: 0.5)')
     parser.add_argument('--list-ports', '-l', action='store_true',
                        help='List available serial ports')
 
@@ -2094,7 +2396,11 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
             fov_vertical=args.fov_vertical,
             frame_width=args.frame_width,
             frame_height=args.frame_height,
-            pid_max_output=args.pid_max_output
+            pid_max_output=args.pid_max_output,
+            lost_timeout=args.lost_timeout,
+            search_timeout=args.search_timeout,
+            sweep_speed=args.sweep_speed,
+            sweep_dwell=args.sweep_dwell
         )
         
         gimbal.initialize()
