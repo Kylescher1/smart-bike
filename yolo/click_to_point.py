@@ -49,6 +49,7 @@ class TurretController:
         # Current positions
         self.top_pos = self.top_home
         self.bottom_pos = self.bottom_home
+        self.last_move_time = 0  # Track when servo last moved
     
     def connect(self) -> bool:
         """Connect to the turret controller."""
@@ -94,14 +95,26 @@ class TurretController:
                 return ""
     
     def set_position(self, top: int, bottom: int):
-        """Set both servo positions."""
+        """Set both servo positions with rate limiting."""
         top = max(self.top_min, min(self.top_max, top))
         bottom = max(self.bottom_min, min(self.bottom_max, bottom))
         
-        self.send_command(f"TOP:{top}")
-        self.send_command(f"BOTTOM:{bottom}")
-        self.top_pos = top
-        self.bottom_pos = bottom
+        # Only send if position actually changed (reduces serial traffic)
+        top_changed = top != self.top_pos
+        bottom_changed = bottom != self.bottom_pos
+        
+        if top_changed:
+            self.send_command(f"TOP:{top}")
+            self.top_pos = top
+        
+        if bottom_changed:
+            self.send_command(f"BOTTOM:{bottom}")
+            self.bottom_pos = bottom
+        
+        # Allow servo to settle before next command
+        if top_changed or bottom_changed:
+            self.last_move_time = time.time()
+            time.sleep(0.1)  # 100ms settling time
     
     def home(self):
         """Move to home position."""
@@ -110,7 +123,16 @@ class TurretController:
         self.bottom_pos = self.bottom_home
     
     def get_distance(self) -> float:
-        """Get distance from TF03 LiDAR in cm."""
+        """Get distance from TF03 LiDAR in cm.
+        
+        Skips reads for 300ms after servo move to avoid SoftwareSerial
+        interrupt interference with servo PWM timing.
+        """
+        # Don't poll LiDAR right after servo move (causes jitter from SoftwareSerial)
+        # Wait 500ms to allow servo to reach position and detach
+        if time.time() - self.last_move_time < 0.5:
+            return self.distance_cm if self.distance_cm else -1
+        
         response = self.send_command("GET_RANGE")
         
         if "Range:" in response and "in" in response:

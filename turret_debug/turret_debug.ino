@@ -73,7 +73,7 @@ const int HEADER = 0x59;
 // --- Servo idle tracking (for detach to reduce buzzing) ---
 unsigned long topLastMove = 0;
 unsigned long bottomLastMove = 0;
-const unsigned long SERVO_IDLE_TIME = 2000;  // Detach after 2 seconds idle
+const unsigned long SERVO_IDLE_TIME = 200;  // Detach after 200ms idle (reduces jitter from SoftwareSerial)
 bool topAttached = true;
 bool bottomAttached = true;
 
