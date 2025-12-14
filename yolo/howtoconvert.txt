@@ -1,5 +1,14 @@
 ### RKNN Conversion Summary
 
+wsl
+source ~/rknn-venv310/bin/activate
+cd /mnt/c/smart-bike
+
+# Convert each model directly
+yolo export model=yolo/models/yolo12n.pt format=rknn name=rk3588
+yolo export model=yolo/models/yolo11n-seg.pt format=rknn name=rk3588
+yolo export model=yolo/models/yolov8n-seg.pt format=rknn name=rk3588
+
 - `yolo11n.rknn`, `yolov8n.rknn`, and `yolov8s-seg.rknn` now live in `C:\smart-bike\yolo`.
 
 python yolo/live_demo.py --weights "C:\smart-bike\yolo\models\yolo12n.pt" --radar-view --radar-size 800 --source 0
