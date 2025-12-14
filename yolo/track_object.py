@@ -236,52 +236,173 @@ class PIController:
         return int(self.smoothed_output)
 
 
-class ObjectTracker:
-    """Tracks a selected object across frames."""
+class TrackedObject:
+    """Single tracked object with motion prediction."""
     
-    def __init__(self):
-        self.target_class = None
-        self.target_bbox = None  # Last known bbox [x1, y1, x2, y2]
-        self.tracking = False
-    
-    def select_target(self, detection: dict):
-        """Select a detection to track."""
-        self.target_class = detection['class_id']
-        self.target_bbox = detection['bbox']
-        self.tracking = True
-        print(f"[TRACK] Tracking: {detection['class_name']} (class {self.target_class})")
-    
-    def clear_target(self):
-        """Stop tracking."""
-        self.tracking = False
-        self.target_bbox = None
-        self.target_class = None
-        print("[TRACK] Tracking stopped")
-    
-    def find_target(self, detections: list) -> dict:
-        """Find the target object in new detections using IoU matching."""
-        if not self.tracking or self.target_bbox is None:
-            return None
+    def __init__(self, track_id: int, detection: dict):
+        self.id = track_id
+        self.class_id = detection['class_id']
+        self.class_name = detection['class_name']
+        self.bbox = list(detection['bbox'])  # [x1, y1, x2, y2]
+        self.score = detection['score']
         
-        best_match = None
-        best_iou = 0.3  # Minimum IoU threshold
+        # Motion state
+        self.cx = (self.bbox[0] + self.bbox[2]) / 2
+        self.cy = (self.bbox[1] + self.bbox[3]) / 2
+        self.vx = 0.0  # velocity x
+        self.vy = 0.0  # velocity y
         
-        for det in detections:
-            # Must be same class
-            if det['class_id'] != self.target_class:
+        # Tracking state
+        self.lost_frames = 0
+        self.total_frames = 1
+        self.last_update = time.time()
+    
+    def predict(self):
+        """Predict next position using velocity."""
+        dt = time.time() - self.last_update
+        pred_cx = self.cx + self.vx * dt
+        pred_cy = self.cy + self.vy * dt
+        return pred_cx, pred_cy
+    
+    def update(self, detection: dict):
+        """Update track with new detection."""
+        new_bbox = detection['bbox']
+        new_cx = (new_bbox[0] + new_bbox[2]) / 2
+        new_cy = (new_bbox[1] + new_bbox[3]) / 2
+        
+        # Update velocity (smoothed)
+        dt = time.time() - self.last_update
+        if dt > 0 and dt < 0.5:  # Ignore if too long gap
+            alpha = 0.5  # Smoothing factor
+            new_vx = (new_cx - self.cx) / dt
+            new_vy = (new_cy - self.cy) / dt
+            self.vx = alpha * new_vx + (1 - alpha) * self.vx
+            self.vy = alpha * new_vy + (1 - alpha) * self.vy
+        
+        # Update position
+        self.bbox = list(new_bbox)
+        self.cx = new_cx
+        self.cy = new_cy
+        self.score = detection['score']
+        self.lost_frames = 0
+        self.total_frames += 1
+        self.last_update = time.time()
+    
+    def mark_lost(self):
+        """Mark as not detected this frame."""
+        self.lost_frames += 1
+        # Update predicted position
+        pred_cx, pred_cy = self.predict()
+        w = self.bbox[2] - self.bbox[0]
+        h = self.bbox[3] - self.bbox[1]
+        self.cx = pred_cx
+        self.cy = pred_cy
+        self.bbox = [pred_cx - w/2, pred_cy - h/2, pred_cx + w/2, pred_cy + h/2]
+        self.last_update = time.time()
+    
+    def get_predicted_center(self) -> tuple:
+        """Get predicted center position."""
+        return self.predict()
+
+
+class MultiObjectTracker:
+    """
+    Multi-object tracker with persistent IDs and motion prediction.
+    Uses IoU + distance matching to associate detections with tracks.
+    """
+    
+    def __init__(self, max_lost_frames: int = 10, iou_threshold: float = 0.2,
+                 distance_threshold: float = 100):
+        """
+        Args:
+            max_lost_frames: Remove track after this many frames without detection
+            iou_threshold: Minimum IoU for matching
+            distance_threshold: Max distance (pixels) for matching when IoU fails
+        """
+        self.tracks: dict[int, TrackedObject] = {}
+        self.next_id = 1
+        self.max_lost_frames = max_lost_frames
+        self.iou_threshold = iou_threshold
+        self.distance_threshold = distance_threshold
+    
+    def update(self, detections: list) -> dict[int, TrackedObject]:
+        """
+        Update tracks with new detections.
+        Returns dict of track_id -> TrackedObject
+        """
+        # Match detections to existing tracks
+        matched_tracks = set()
+        matched_detections = set()
+        
+        # First pass: IoU matching
+        for det_idx, det in enumerate(detections):
+            best_track_id = None
+            best_score = 0
+            
+            for track_id, track in self.tracks.items():
+                if track_id in matched_tracks:
+                    continue
+                if track.class_id != det['class_id']:
+                    continue
+                
+                iou = self._calc_iou(track.bbox, det['bbox'])
+                if iou > self.iou_threshold and iou > best_score:
+                    best_score = iou
+                    best_track_id = track_id
+            
+            if best_track_id is not None:
+                self.tracks[best_track_id].update(det)
+                matched_tracks.add(best_track_id)
+                matched_detections.add(det_idx)
+        
+        # Second pass: Distance matching for unmatched (using predicted position)
+        for det_idx, det in enumerate(detections):
+            if det_idx in matched_detections:
                 continue
             
-            # Calculate IoU
-            iou = self._calc_iou(self.target_bbox, det['bbox'])
-            if iou > best_iou:
-                best_iou = iou
-                best_match = det
+            det_cx = (det['bbox'][0] + det['bbox'][2]) / 2
+            det_cy = (det['bbox'][1] + det['bbox'][3]) / 2
+            
+            best_track_id = None
+            best_dist = self.distance_threshold
+            
+            for track_id, track in self.tracks.items():
+                if track_id in matched_tracks:
+                    continue
+                if track.class_id != det['class_id']:
+                    continue
+                
+                # Use predicted position
+                pred_cx, pred_cy = track.get_predicted_center()
+                dist = np.sqrt((det_cx - pred_cx)**2 + (det_cy - pred_cy)**2)
+                
+                if dist < best_dist:
+                    best_dist = dist
+                    best_track_id = track_id
+            
+            if best_track_id is not None:
+                self.tracks[best_track_id].update(det)
+                matched_tracks.add(best_track_id)
+                matched_detections.add(det_idx)
         
-        if best_match:
-            # Update tracked bbox
-            self.target_bbox = best_match['bbox']
+        # Mark unmatched tracks as lost
+        for track_id in list(self.tracks.keys()):
+            if track_id not in matched_tracks:
+                self.tracks[track_id].mark_lost()
+                if self.tracks[track_id].lost_frames > self.max_lost_frames:
+                    del self.tracks[track_id]
         
-        return best_match
+        # Create new tracks for unmatched detections
+        for det_idx, det in enumerate(detections):
+            if det_idx not in matched_detections:
+                self.tracks[self.next_id] = TrackedObject(self.next_id, det)
+                self.next_id += 1
+        
+        return self.tracks
+    
+    def get_track(self, track_id: int) -> TrackedObject:
+        """Get track by ID, or None if not found."""
+        return self.tracks.get(track_id)
     
     def _calc_iou(self, box1, box2) -> float:
         """Calculate IoU between two boxes [x1, y1, x2, y2]."""
@@ -301,12 +422,53 @@ class ObjectTracker:
         return inter / union if union > 0 else 0
 
 
-def find_clicked_detection(x: int, y: int, detections: list) -> dict:
-    """Find detection that contains the clicked point."""
-    for det in detections:
-        x1, y1, x2, y2 = det['bbox']
+class TargetSelector:
+    """Selects and maintains focus on a specific tracked object by ID."""
+    
+    def __init__(self):
+        self.target_id = None
+        self.target_class_name = None
+        self.tracking = False
+    
+    def select_target(self, track: TrackedObject):
+        """Select a track to follow."""
+        self.target_id = track.id
+        self.target_class_name = track.class_name
+        self.tracking = True
+        print(f"[TRACK] Tracking ID {track.id}: {track.class_name}")
+    
+    def clear_target(self):
+        """Stop tracking."""
+        if self.tracking:
+            print(f"[TRACK] Stopped tracking ID {self.target_id}")
+        self.tracking = False
+        self.target_id = None
+        self.target_class_name = None
+    
+    def get_target(self, tracks: dict[int, TrackedObject]) -> TrackedObject:
+        """
+        Get the current target from tracks.
+        Returns TrackedObject or None if target not found.
+        """
+        if not self.tracking or self.target_id is None:
+            return None
+        
+        track = tracks.get(self.target_id)
+        if track is None:
+            # Target ID no longer exists
+            print(f"[TRACK] Lost ID {self.target_id} permanently")
+            self.clear_target()
+            return None
+        
+        return track
+
+
+def find_clicked_track(x: int, y: int, tracks: dict) -> TrackedObject:
+    """Find track that contains the clicked point."""
+    for track in tracks.values():
+        x1, y1, x2, y2 = track.bbox
         if x1 <= x <= x2 and y1 <= y <= y2:
-            return det
+            return track
     return None
 
 
@@ -359,20 +521,21 @@ def main():
         return 1
     
     # Initialize components
-    tracker = ObjectTracker()
+    mot_tracker = MultiObjectTracker(max_lost_frames=30)  # Multi-object tracker
+    target_selector = TargetSelector()  # Target selection
     pi_x = PIController(args.kp, args.ki, smoothing=args.smoothing)  # Pan
     pi_y = PIController(args.kp, args.ki, smoothing=args.smoothing)  # Tilt
     deadband_px = args.deadband  # Pixel deadband
+    current_tracks = {}  # Current frame's tracks
     
     # Mouse callback
     click_pos = [None]
-    current_detections = []
     
     def on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             click_pos[0] = (x, y)
         elif event == cv2.EVENT_RBUTTONDOWN:
-            tracker.clear_target()
+            target_selector.clear_target()
             pi_x.reset()
             pi_y.reset()
     
@@ -424,27 +587,30 @@ def main():
                     bbox[[1, 3]] = (bbox[[1, 3]] - pad_y) / scale
                     det['bbox'] = bbox.astype(int).tolist()
             
-            current_detections = detections
+            # Update multi-object tracker
+            current_tracks = mot_tracker.update(detections)
             
             # Handle click - select target
             if click_pos[0] is not None:
                 x, y = click_pos[0]
-                clicked_det = find_clicked_detection(x, y, detections)
-                if clicked_det:
-                    tracker.select_target(clicked_det)
+                clicked_track = find_clicked_track(x, y, current_tracks)
+                if clicked_track:
+                    target_selector.select_target(clicked_track)
                     pi_x.reset()
                     pi_y.reset()
                 click_pos[0] = None
             
             # Track target
-            target_det = None
-            if tracker.tracking:
-                target_det = tracker.find_target(detections)
+            target_track = None
+            if target_selector.tracking:
+                target_track = target_selector.get_target(current_tracks)
                 
-                if target_det:
-                    # Calculate error (target center - frame center)
-                    tx = (target_det['bbox'][0] + target_det['bbox'][2]) / 2
-                    ty = (target_det['bbox'][1] + target_det['bbox'][3]) / 2
+                if target_track:
+                    # Use predicted center (works even when detection is lost)
+                    tx, ty = target_track.cx, target_track.cy
+                    
+                    # Check if detection is current or predicted
+                    is_predicted = target_track.lost_frames > 0
                     
                     # Error in pixels
                     error_px_x = tx - cx
@@ -460,6 +626,11 @@ def main():
                         error_deg_x = (error_px_x / (frame_w / 2)) * (fov_h / 2)
                         error_deg_y = (error_px_y / (frame_h / 2)) * (fov_v / 2)
                         
+                        # Reduce gain if using predicted position
+                        if is_predicted:
+                            error_deg_x *= 0.5
+                            error_deg_y *= 0.5
+                        
                         # PI control with smoothing
                         correction_x = pi_x.update(error_deg_x)
                         correction_y = pi_y.update(error_deg_y)
@@ -470,7 +641,7 @@ def main():
                             new_top = turret.top_pos + correction_y  # Inverted
                             turret.set_position(new_top, new_bottom)
                 else:
-                    # Target lost - slowly decay the PI controllers
+                    # Target lost permanently
                     pi_x.decay()
                     pi_y.decay()
             
@@ -483,29 +654,45 @@ def main():
             # Draw frame
             annotated = frame.copy()
             
-            # Draw all detections (dimmed if not target)
-            for det in detections:
-                x1, y1, x2, y2 = det['bbox']
-                is_target = (target_det and det['bbox'] == target_det['bbox'])
+            # Draw all tracked objects
+            for track_id, track in current_tracks.items():
+                x1, y1, x2, y2 = [int(v) for v in track.bbox]
+                is_target = (target_track and track.id == target_track.id)
+                is_lost = track.lost_frames > 0
                 
                 if is_target:
-                    color = (0, 255, 0)  # Green for target
+                    if is_lost:
+                        color = (0, 165, 255)  # Orange for predicted target
+                    else:
+                        color = (0, 255, 0)  # Green for active target
                     thickness = 3
                 else:
                     color = (128, 128, 128)  # Gray for others
                     thickness = 1
                 
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
+                # Draw dashed box if predicted
+                if is_lost:
+                    # Dashed rectangle
+                    for i in range(0, int(x2-x1), 10):
+                        cv2.line(annotated, (x1+i, y1), (min(x1+i+5, x2), y1), color, thickness)
+                        cv2.line(annotated, (x1+i, y2), (min(x1+i+5, x2), y2), color, thickness)
+                    for i in range(0, int(y2-y1), 10):
+                        cv2.line(annotated, (x1, y1+i), (x1, min(y1+i+5, y2)), color, thickness)
+                        cv2.line(annotated, (x2, y1+i), (x2, min(y1+i+5, y2)), color, thickness)
+                else:
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
                 
-                label = f"{det['class_name']} {det['score']:.2f}"
+                # Label with ID
+                label = f"ID{track.id} {track.class_name}"
+                if is_lost:
+                    label += f" (pred:{track.lost_frames})"
                 cv2.putText(annotated, label, (x1, y1 - 5), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
                 
                 if is_target:
                     # Draw center point and line to frame center
-                    tx = int((x1 + x2) / 2)
-                    ty = int((y1 + y2) / 2)
-                    cv2.circle(annotated, (tx, ty), 8, (0, 255, 0), -1)
+                    tx, ty = int(track.cx), int(track.cy)
+                    cv2.circle(annotated, (tx, ty), 8, color, -1)
                     cv2.line(annotated, (cx, cy), (tx, ty), (0, 255, 255), 2)
             
             # Draw crosshair
@@ -517,20 +704,23 @@ def main():
             prev_time = current_time
             
             info_lines = [
-                f"FPS: {fps:.1f} | Detections: {len(detections)}",
+                f"FPS: {fps:.1f} | Tracks: {len(current_tracks)} | Detections: {len(detections)}",
                 f"Servos: TOP={turret.top_pos} BOTTOM={turret.bottom_pos}",
             ]
             
             if turret.distance_cm and turret.distance_cm > 0:
                 info_lines.append(f"Distance: {turret.distance_cm:.1f} cm")
             
-            if tracker.tracking:
-                if target_det:
-                    error_x = (target_det['bbox'][0] + target_det['bbox'][2]) / 2 - cx
-                    error_y = (target_det['bbox'][1] + target_det['bbox'][3]) / 2 - cy
-                    info_lines.append(f"TRACKING: {COCO_CLASSES[tracker.target_class]} | Error: ({error_x:.0f}, {error_y:.0f})px")
+            if target_selector.tracking:
+                if target_track:
+                    error_x = target_track.cx - cx
+                    error_y = target_track.cy - cy
+                    status = "PREDICTED" if target_track.lost_frames > 0 else "TRACKING"
+                    info_lines.append(f"{status}: ID{target_track.id} {target_track.class_name} | Error: ({error_x:.0f}, {error_y:.0f})px")
+                    if target_track.lost_frames > 0:
+                        info_lines.append(f"Lost for {target_track.lost_frames} frames - using prediction")
                 else:
-                    info_lines.append("TRACKING: Target lost - searching...")
+                    info_lines.append("TRACKING: Target lost permanently")
             else:
                 info_lines.append("Click on an object to track")
             
@@ -549,7 +739,7 @@ def main():
             if key == ord('q'):
                 break
             elif key == ord('h'):
-                tracker.clear_target()
+                target_selector.clear_target()
                 turret.home()
                 pi_x.reset()
                 pi_y.reset()
