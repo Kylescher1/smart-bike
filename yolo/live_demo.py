@@ -96,6 +96,7 @@ class YOLODetector:
                 - conf: Confidence threshold (default: 0.25)
                 - device: Computation device (default: None/auto)
                 - frame_size: Optional "WIDTHxHEIGHT" for center cropping
+                - half: Use FP16 half precision (default: False, GPU only)
         """
         self.name = name
         self.debug_mode = True
@@ -114,6 +115,7 @@ class YOLODetector:
         self.conf = getattr(self, "conf", 0.25)
         self.device = getattr(self, "device", None)
         self.frame_size = getattr(self, "frame_size", None)
+        self.half = getattr(self, "half", False)  # FP16 half precision
         
         # Convert weights path to Path if string
         if isinstance(self.weights, str):
@@ -299,6 +301,7 @@ class YOLODetector:
                     imgsz=imgsz_override,
                     conf=self.conf,
                     device=self.device,
+                    half=self.half,  # FP16 half precision
                     verbose=False,
                 )
                 result = inference_results[0]
@@ -319,6 +322,7 @@ class YOLODetector:
                 imgsz=self.imgsz,
                 conf=self.conf,
                 device=self.device,
+                half=self.half,  # FP16 half precision
                 show=False,
             )
             
