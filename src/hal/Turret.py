@@ -2636,7 +2636,7 @@ class peripheral_mode:
         # Handle distance sensor flag
         enable_distance = self.enable_distance and not self.disable_distance
         try:
-            self.gimbalOBJ = gimbal = YOLOGimbal(
+            self.gimbal = YOLOGimbal(
                 camera_index=self.camera,
                 turret_port=self.turret,
                 target_class=target_class,
