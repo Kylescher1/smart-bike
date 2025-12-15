@@ -212,6 +212,29 @@ config = {
                 "seting1"
             }
         },
+    "Turret":
+        {
+            "port": None,
+            "orientation": None,
+            "sensor_location":None,
+            "who_to_run": "src.hal.Turret.peripheral_mode",
+            "debug_mode":False,
+            "camera": 1,
+            "turret":"/dev/ttyUSB0",
+            "invert-y":True,
+            "timing":True,
+            "rknn-model": "/home/radxa/smart-bike/yolo/models/yolo11n.rknn",
+            "deadzone": 50,
+            "pid-max-output": 3,
+            "rknn":True,
+            "kp": 0.1,
+            "ki": 0.1,
+            "kd": 0.15,
+            "max-movement": 5,
+            "control-rate": 60,
+            "detection-imgsz": 320,
+            "yolo-half":True
+        }
 }
 config = {
     'horizontal_lidar':config['horizontal_lidar'],
