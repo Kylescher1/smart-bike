@@ -1485,6 +1485,10 @@ class YOLOGimbal:
         self.timing_stats = {
             'frame_read': [],
             'detection': [],
+            'yolo_inference': [],  # Actual YOLO inference time from result object
+            'yolo_read_time': [],  # Time to read from YOLO buffer
+            'yolo_result_available': 0,  # Count of successful reads
+            'yolo_result_none': 0,  # Count of None results (stale/no new detection)
             'pid_calc': [],
             'servo_cmd': [],
             'display': [],
@@ -1492,6 +1496,7 @@ class YOLOGimbal:
         }
         self.last_timing_print = 0.0
         self.timing_print_interval = 1.0  # Print timing stats every 1 second
+        self.last_yolo_result_time = 0.0  # Track when we last got a YOLO result
         
         # Calibration mode (FIX #6)
         self.calibration_mode = False
@@ -1850,6 +1855,51 @@ class YOLOGimbal:
                   f"p50={p50:6.2f}ms  p95={p95:6.2f}ms  p99={p99:6.2f}ms  (n={count})")
         
         print_stat("Frame Read", self.timing_stats['frame_read'])
+        
+        # YOLO-specific stats (only if using YOLO, not RKNN)
+        if not self.use_rknn:
+            print_stat("YOLO Read Time", self.timing_stats['yolo_read_time'])
+            if self.timing_stats['yolo_inference']:
+                print_stat("YOLO Inference", self.timing_stats['yolo_inference'])
+            
+                # YOLO result availability
+            total_yolo_reads = self.timing_stats['yolo_result_available'] + self.timing_stats['yolo_result_none']
+            if total_yolo_reads > 0:
+                avail_pct = (self.timing_stats['yolo_result_available'] / total_yolo_reads) * 100
+                print(f"\n  YOLO Result Availability:")
+                print(f"    Available: {self.timing_stats['yolo_result_available']} ({avail_pct:.1f}%)")
+                print(f"    None (stale): {self.timing_stats['yolo_result_none']} ({100-avail_pct:.1f}%)")
+                
+                # Warning if YOLO is falling behind
+                if avail_pct < 50:
+                    print(f"    ⚠️  WARNING: YOLO thread is falling behind! Only {avail_pct:.1f}% of reads got new results")
+                    print(f"       Consider: --detection-imgsz 416 or --detection-imgsz 320 (faster inference)")
+                    if not self.yolo_half and self.yolo_device and 'cuda' in str(self.yolo_device).lower():
+                        print(f"       Or try: --yolo-half (FP16 half precision, ~2x faster)")
+                
+                # Calculate actual YOLO FPS based on available results
+                if self.timing_stats['yolo_result_available'] > 0:
+                    # Estimate YOLO FPS from inference time
+                    if self.timing_stats['yolo_inference']:
+                        avg_inference_ms = np.mean(self.timing_stats['yolo_inference'])
+                        yolo_fps = 1000.0 / avg_inference_ms if avg_inference_ms > 0 else 0
+                        print(f"    YOLO Inference FPS: {yolo_fps:.1f} Hz (from inference time)")
+                    
+                    # Calculate effective YOLO update rate
+                    yolo_update_rate = self.timing_stats['yolo_result_available'] / self.timing_print_interval
+                    print(f"    YOLO Update Rate: {yolo_update_rate:.1f} Hz (actual results/sec)")
+                    
+                    # Compare to control rate
+                    if yolo_update_rate < self.control_rate * 0.8:
+                        print(f"    ⚠️  YOLO update rate ({yolo_update_rate:.1f} Hz) is slower than control rate ({self.control_rate:.1f} Hz)")
+                
+                # Time since last result
+                if self.last_yolo_result_time > 0:
+                    time_since_last = time.time() - self.last_yolo_result_time
+                    print(f"    Time since last result: {time_since_last*1000:.1f} ms")
+                    if time_since_last > 0.1:  # More than 100ms since last result
+                        print(f"    ⚠️  YOLO thread may be stuck or very slow")
+        
         print_stat("Detection", self.timing_stats['detection'])
         print_stat("PID Calc", self.timing_stats['pid_calc'])
         print_stat("Servo Cmd", self.timing_stats['servo_cmd'])
@@ -1863,7 +1913,7 @@ class YOLOGimbal:
             effective_fps = 1000.0 / avg_loop_ms if avg_loop_ms > 0 else 0
             print(f"\n  Effective Loop FPS: {effective_fps:.1f} Hz (target: {self.control_rate:.1f} Hz)")
         
-        # Calculate detection FPS
+        # Calculate detection FPS (only if we have detection times)
         if self.timing_stats['detection']:
             avg_detection_ms = np.mean(self.timing_stats['detection'])
             detection_fps = 1000.0 / avg_detection_ms if avg_detection_ms > 0 else 0
@@ -1934,14 +1984,39 @@ class YOLOGimbal:
                     # RKNN: direct synchronous inference on frame
                     detections = self.rknn_detector.detect(frame)
                     target = self.find_target_detection(detections)
+                    if self.enable_timing:
+                        self.timing_stats['detection'].append((time.time() - detection_start) * 1000)  # ms
                 else:
                     # YOLO: read from threaded detector
+                    yolo_read_start = time.time()
                     result = self.yolo.read()
+                    yolo_read_time = (time.time() - yolo_read_start) * 1000  # ms
+                    
                     if result is None:
+                        # No new detection available (YOLO thread hasn't produced new result yet)
+                        if self.enable_timing:
+                            self.timing_stats['yolo_result_none'] += 1
+                            self.timing_stats['yolo_read_time'].append(yolo_read_time)
                         continue
+                    
+                    # Got a YOLO result
+                    if self.enable_timing:
+                        self.timing_stats['yolo_result_available'] += 1
+                        self.timing_stats['yolo_read_time'].append(yolo_read_time)
+                        self.last_yolo_result_time = time.time()
+                        
+                        # Extract actual inference time from YOLO result
+                        if hasattr(result, 'inference_time_ms') and result.inference_time_ms > 0:
+                            self.timing_stats['yolo_inference'].append(result.inference_time_ms)
+                        elif hasattr(result, 'speed'):
+                            # Try to get from speed dict
+                            speed_dict = getattr(result, 'speed', {})
+                            if isinstance(speed_dict, dict) and 'inference' in speed_dict:
+                                self.timing_stats['yolo_inference'].append(speed_dict['inference'])
+                    
                     target = self.find_target_detection(result.detections)
-                if self.enable_timing:
-                    self.timing_stats['detection'].append((time.time() - detection_start) * 1000)  # ms
+                    if self.enable_timing:
+                        self.timing_stats['detection'].append((time.time() - detection_start) * 1000)  # ms
                 
                 # Periodic status re-sync (FIX #8) - adaptive based on control rate
                 status_update_counter += 1
@@ -2383,8 +2458,13 @@ class YOLOGimbal:
                         self.last_timing_print = current_time
                         # Clear old stats (keep last 100 samples)
                         for key in self.timing_stats:
-                            if len(self.timing_stats[key]) > 100:
-                                self.timing_stats[key] = self.timing_stats[key][-100:]
+                            if isinstance(self.timing_stats[key], list):
+                                if len(self.timing_stats[key]) > 100:
+                                    self.timing_stats[key] = self.timing_stats[key][-100:]
+                            elif isinstance(self.timing_stats[key], (int, float)):
+                                # Reset counters
+                                if key in ['yolo_result_available', 'yolo_result_none']:
+                                    self.timing_stats[key] = 0
                 
                 # Calculate FPS properly (FIX #4)
                 self.frame_count += 1
