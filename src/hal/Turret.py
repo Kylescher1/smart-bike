@@ -1193,14 +1193,12 @@ class TurretController:
 
     def send_command(self, command: str, read_response: bool = False) -> Optional[str]:
         if not self.ser or not self.ser.is_open:
-            print(f"[SERIAL] NOT CONNECTED - command dropped: {command}")
             return None
         try:
             self.ser.reset_input_buffer()
             self.ser.write((command + '\n').encode())
             self.ser.flush()
-            print(f"[SERIAL] SENT: {command}")
-
+            
             if not read_response:
                 return None
 
@@ -1337,29 +1335,37 @@ class TurretController:
             target_top: Target angle for top servo (float)
             force: If True, bypass rate limiting
         """
-        # Rate limiting (FIX #9) - DISABLED FOR DEBUG
+        # Rate limiting (FIX #9)
         current_time = time.time()
-        # if not force and (current_time - self.last_command_time) < self.command_interval:
-        #     return  # Too soon, skip this command
-
-        # LIMITS DISABLED - let PID move freely
-        # target_bottom = max(self.bottom_min, min(self.bottom_max, target_bottom))
-        # target_top = max(self.top_min, min(self.top_max, target_top))
-
+        if not force and (current_time - self.last_command_time) < self.command_interval:
+            return  # Too soon, skip this command
+        
+        # Clamp to limits (keep as float until sending)
+        target_bottom = max(self.bottom_min, min(self.bottom_max, target_bottom))
+        target_top = max(self.top_min, min(self.top_max, target_top))
+        
         # Check if change is significant enough (FIX #9)
         bottom_change = abs(target_bottom - self.bottom_pos)
         top_change = abs(target_top - self.top_pos)
-
-        # ALWAYS send commands (min_angle_change check disabled for debug)
-        bottom_int = round(target_bottom)
-        top_int = round(target_top)
         
-        self.send_command(f"BOTTOM:{bottom_int}", read_response=False)
-        self.send_command(f"TOP:{top_int}", read_response=False)
+        commands_sent = False
         
-        self.bottom_pos = target_bottom
-        self.top_pos = target_top
-        self.last_command_time = current_time
+        if bottom_change >= self.min_angle_change or force:
+            # Round to integer for sending (FIX #1)
+            bottom_int = round(target_bottom)
+            self.send_command(f"BOTTOM:{bottom_int}", read_response=False)
+            self.bottom_pos = target_bottom  # Keep float internally
+            commands_sent = True
+        
+        if top_change >= self.min_angle_change or force:
+            # Round to integer for sending (FIX #1)
+            top_int = round(target_top)
+            self.send_command(f"TOP:{top_int}", read_response=False)
+            self.top_pos = target_top  # Keep float internally
+            commands_sent = True
+        
+        if commands_sent:
+            self.last_command_time = current_time
 
 
 class YOLOGimbal:
