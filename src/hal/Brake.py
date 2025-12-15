@@ -47,6 +47,8 @@ class BrakeESC:
         try:
             import gpiod
             self.gpiod = gpiod
+            # Detect gpiod version (v1.x vs v2.x have different APIs)
+            self._gpiod_v2 = hasattr(gpiod, 'LineSettings')
         except ImportError:
             raise ImportError(
                 "python3-libgpiod not installed. "
@@ -71,7 +73,8 @@ class BrakeESC:
 
         # Initialize GPIO
         self.chip = None
-        self.line = None
+        self.line = None  # For v1.x API
+        self._line_request = None  # For v2.x API
         self.running = False
         self.armed = False
         self.pwm_thread = None
@@ -121,7 +124,7 @@ class BrakeESC:
 
     
     def _init_gpio(self):
-        """Initialize GPIO chip and line."""
+        """Initialize GPIO chip and line. Supports both gpiod v1.x and v2.x APIs."""
         import os
         
         # Try different path formats - gpiod may accept chip name or full path
@@ -133,10 +136,12 @@ class BrakeESC:
         last_error = None
         for chip_path in chip_paths:
             try:
-                self.chip = self.gpiod.Chip(chip_path)
-                self.line = self.chip.get_line(self.line_num)
-                self.line.request(consumer='brake_esc', type=self.gpiod.LINE_REQ_DIR_OUT)
-                self.line.set_value(0)  # Start LOW
+                if self._gpiod_v2:
+                    # gpiod v2.x API
+                    self._init_gpio_v2(chip_path)
+                else:
+                    # gpiod v1.x API
+                    self._init_gpio_v1(chip_path)
                 return  # Success!
             except FileNotFoundError as e:
                 last_error = e
@@ -173,6 +178,36 @@ class BrakeESC:
             f"Note: GPIO access may require sudo permissions or proper udev rules.\n"
             f"Original error: {last_error}"
         )
+    
+    def _init_gpio_v1(self, chip_path):
+        """Initialize GPIO using gpiod v1.x API."""
+        self.chip = self.gpiod.Chip(chip_path)
+        self.line = self.chip.get_line(self.line_num)
+        self.line.request(consumer='brake_esc', type=self.gpiod.LINE_REQ_DIR_OUT)
+        self.line.set_value(0)  # Start LOW
+    
+    def _init_gpio_v2(self, chip_path):
+        """Initialize GPIO using gpiod v2.x API."""
+        self.chip = self.gpiod.Chip(chip_path)
+        # v2.x uses LineSettings and request_lines
+        line_settings = self.gpiod.LineSettings(
+            direction=self.gpiod.line.Direction.OUTPUT,
+            output_value=self.gpiod.line.Value.INACTIVE
+        )
+        self._line_request = self.chip.request_lines(
+            consumer='brake_esc',
+            config={self.line_num: line_settings}
+        )
+    
+    def _set_line_value(self, value: int):
+        """Set GPIO line value (0 or 1). Works with both gpiod v1.x and v2.x."""
+        if self._gpiod_v2:
+            # v2.x API
+            line_value = self.gpiod.line.Value.ACTIVE if value else self.gpiod.line.Value.INACTIVE
+            self._line_request.set_value(self.line_num, line_value)
+        else:
+            # v1.x API
+            self.line.set_value(value)
     
     def _init_encoder(self):
         """Initialize ESP32 encoder serial connection."""
@@ -339,7 +374,7 @@ class BrakeESC:
             pulse_width_s = pulse_width_us / 1_000_000.0
             
             # Set HIGH for pulse width duration
-            self.line.set_value(1)
+            self._set_line_value(1)
             pulse_end_time = cycle_start + pulse_width_s
             
             # CRITICAL: Pulse width must be precise for ESC - use busy-wait only
@@ -348,7 +383,7 @@ class BrakeESC:
                 pass
             
             # Set LOW for the remainder of the period
-            self.line.set_value(0)
+            self._set_line_value(0)
             period_end_time = cycle_start + self.period
             
             # LOW phase is ~18ms - safe to sleep here and release GIL for other threads
@@ -461,11 +496,11 @@ class BrakeESC:
         self.running = False
         if self.pwm_thread is not None:
             self.pwm_thread.join(timeout=1.0)
-        if self.line is not None:
-            try:
-                self.line.set_value(0)  # Ensure LOW when disabled
-            except Exception:
-                pass
+        # Ensure LOW when disabled (works with both v1.x and v2.x)
+        try:
+            self._set_line_value(0)
+        except Exception:
+            pass
     
     def set_led(self, state: bool):
         """
@@ -481,11 +516,16 @@ class BrakeESC:
             print("Warning: Cannot set LED while PWM is running. Disable PWM first.")
             return
         
-        if self.line is None:
-            return  # Silently ignore if not initialized
+        # Check if GPIO is initialized (v1.x uses self.line, v2.x uses self._line_request)
+        if self._gpiod_v2:
+            if self._line_request is None:
+                return  # Silently ignore if not initialized
+        else:
+            if self.line is None:
+                return  # Silently ignore if not initialized
         
         try:
-            self.line.set_value(1 if state else 0)
+            self._set_line_value(1 if state else 0)
         except (ValueError, RuntimeError, OSError) as e:
             # GPIO line is closed or invalid - silently ignore during cleanup
             if not self._cleaned_up:
@@ -584,12 +624,22 @@ class BrakeESC:
             self.encoder_connected = False
         
         # Release GPIO line (do this last, after stopping LED operations)
-        if self.line is not None:
-            try:
-                self.line.release()
-            except Exception:
-                pass
-            self.line = None
+        if self._gpiod_v2:
+            # v2.x API - release the line request
+            if self._line_request is not None:
+                try:
+                    self._line_request.release()
+                except Exception:
+                    pass
+                self._line_request = None
+        else:
+            # v1.x API - release the line
+            if self.line is not None:
+                try:
+                    self.line.release()
+                except Exception:
+                    pass
+                self.line = None
         
         if self.chip is not None:
             try:
