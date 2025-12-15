@@ -1179,7 +1179,7 @@ class TurretController:
                 timeout=0.5,
                 write_timeout=0.5
             )
-            time.sleep(2)  # Wait for Arduino reset
+            time.sleep(1)  # Wait for Arduino reset (reduced from 2s)
             # Get initial status
             self.update_status()
             return True
@@ -1616,11 +1616,9 @@ class YOLOGimbal:
             print("  Or press 'l' during tracking to reset limits to full range")
 
         # Move to home position on startup
-        print("\nHoming turret...")
+        print("Homing turret...")
         home_response = self.turret.send_command("HOME", read_response=True)
-        if home_response:
-            print(f"  HOME response: {home_response.split(chr(10))[0]}")  # First line only
-        time.sleep(2)  # Give servos time to reach home position
+        time.sleep(0.5)  # Brief pause for servo movement
         self.turret.update_status()
         print(f"  Turret homed to: Pan={self.turret.bottom_pos:.1f}°, Tilt={self.turret.top_pos:.1f}°")
 
@@ -1954,14 +1952,7 @@ class YOLOGimbal:
                 distance_cm = None
                 if self.enable_distance:
                     distance_cm = self.turret.read_distance()
-
-                    # Periodic console output of distance (every 1 second)
-                    if distance_cm is not None and self.turret.distance_available:
-                        if current_time - self.turret.last_distance_print_time >= self.turret.distance_print_interval:
-                            distance_m = distance_cm / 100.0
-                            distance_in = distance_cm / 2.54
-                            print(f"[Range] {distance_cm:.1f} cm ({distance_m:.2f} m / {distance_in:.1f} in)")
-                            self.turret.last_distance_print_time = current_time
+                    # Distance printing disabled to prevent blocking other threads
 
                 # Check if we should display this frame (for display FPS limiting)
                 dt_display = current_time - self.last_display_time
@@ -2086,10 +2077,8 @@ class YOLOGimbal:
                         # BRUTE FORCE: If position is near physical limits (0 or 180), reset to center
                         # Use hard-coded values, not parsed limits which might be wrong
                         if self.turret.bottom_pos <= 10 or self.turret.bottom_pos >= 170:
-                            print(f"[BRUTE FORCE] Pan at {self.turret.bottom_pos}° - resetting to 90°")
                             self.turret.bottom_pos = 90.0
                         if self.turret.top_pos <= 10 or self.turret.top_pos >= 170:
-                            print(f"[BRUTE FORCE] Tilt at {self.turret.top_pos}° - resetting to 90°")
                             self.turret.top_pos = 90.0
 
                         # Calculate target absolute positions (FIX #7)
@@ -2137,14 +2126,14 @@ class YOLOGimbal:
                                 has_target=True
                             )
 
-                        # Better logging (FIX #13) - now with degree error
-                        if abs(error_x_deg) > 2.0:  # Significant horizontal error (>2 degrees)
-                            direction = "RIGHT" if error_x_px > 0 else "LEFT"
-                            move_dir = "RIGHT" if move_x > 0 else "LEFT"
-                            dist_info = f", Range={distance_cm:.1f}cm" if distance_cm is not None else ""
-                            print(f"Target {direction} (err={error_x_deg:.2f}°/{error_x_px:.0f}px), "
-                                  f"PID={output_x:.2f}°, move {move_dir} {move_x:.2f}°, "
-                                  f"pos={self.turret.bottom_pos:.1f}°{dist_info}")
+                        # Logging disabled to prevent blocking other threads
+                        # if abs(error_x_deg) > 2.0:
+                        #     direction = "RIGHT" if error_x_px > 0 else "LEFT"
+                        #     move_dir = "RIGHT" if move_x > 0 else "LEFT"
+                        #     dist_info = f", Range={distance_cm:.1f}cm" if distance_cm is not None else ""
+                        #     print(f"Target {direction} (err={error_x_deg:.2f}°/{error_x_px:.0f}px), "
+                        #           f"PID={output_x:.2f}°, move {move_dir} {move_x:.2f}°, "
+                        #           f"pos={self.turret.bottom_pos:.1f}°{dist_info}")
 
                         # Display info (only if displaying)
                         if should_display_frame:
@@ -2643,51 +2632,52 @@ class peripheral_mode:
         # Handle distance sensor flag
         enable_distance = self.enable_distance and not self.disable_distance
         try:
-            self.gimbal = YOLOGimbal(
-                camera_index=self.camera,
-                turret_port=self.turret,
-                target_class=target_class,
-                conf_threshold=self.conf,
-                kp=self.kp,
-                ki=self.ki,
-                kd=self.kd,
-                deadzone=self.deadzone,
-                deadzone_degrees=self.deadzone_degrees,
-                movement_scale=self.movement_scale,
-                min_step=self.min_step,
-                max_movement=self.max_movement,
-                control_rate=self.control_rate,
-                camera_fps=self.camera_fps,
-                display_fps=self.display_fps,
-                disable_display=self.disable_display,
-                invert_x=self.invert_x,
-                invert_y=self.invert_y,
-                swap_servos=self.swap_servos,
-                enable_3d_viz=self.enable_3d_viz,
-                use_rknn=self.rknn,
-                rknn_model=self.rknn_model,
-                enable_error_plot=self.enable_error_plot,
-                enable_timing=self.enable_timing,
-                detection_imgsz=self.detection_imgsz,
-                enable_distance=enable_distance,
-                fov_horizontal=self.fov_horizontal,
-                fov_vertical=self.fov_vertical,
-                frame_width=self.frame_width,
-                frame_height=self.frame_height,
-                pid_max_output=self.pid_max_output,
-                lost_timeout=self.lost_timeout,
-                search_timeout=self.search_timeout,
-                sweep_speed=self.sweep_speed,
-                sweep_dwell=self.sweep_dwell,
-                smooth_window=self.smooth_window,
-                smooth_max_jump=self.smooth_max_jump,
-                yolo_device=self.yolo_device,
-                yolo_half=self.yolo_half
-            )
-            time.sleep(0.25)
-            self.gimbal.initialize()
-        except Exception as e: #how fucking stupid is cursor
-            print(f"Error: {e}", file=sys.stderr)
+            # Store gimbal config - actual initialization happens in start() thread
+            self._gimbal_config = {
+                'camera_index': self.camera,
+                'turret_port': self.turret,
+                'target_class': target_class,
+                'conf_threshold': self.conf,
+                'kp': self.kp,
+                'ki': self.ki,
+                'kd': self.kd,
+                'deadzone': self.deadzone,
+                'deadzone_degrees': self.deadzone_degrees,
+                'movement_scale': self.movement_scale,
+                'min_step': self.min_step,
+                'max_movement': self.max_movement,
+                'control_rate': self.control_rate,
+                'camera_fps': self.camera_fps,
+                'display_fps': self.display_fps,
+                'disable_display': self.disable_display,
+                'invert_x': self.invert_x,
+                'invert_y': self.invert_y,
+                'swap_servos': self.swap_servos,
+                'enable_3d_viz': self.enable_3d_viz,
+                'use_rknn': self.rknn,
+                'rknn_model': self.rknn_model,
+                'enable_error_plot': self.enable_error_plot,
+                'enable_timing': self.enable_timing,
+                'detection_imgsz': self.detection_imgsz,
+                'enable_distance': enable_distance,
+                'fov_horizontal': self.fov_horizontal,
+                'fov_vertical': self.fov_vertical,
+                'frame_width': self.frame_width,
+                'frame_height': self.frame_height,
+                'pid_max_output': self.pid_max_output,
+                'lost_timeout': self.lost_timeout,
+                'search_timeout': self.search_timeout,
+                'sweep_speed': self.sweep_speed,
+                'sweep_dwell': self.sweep_dwell,
+                'smooth_window': self.smooth_window,
+                'smooth_max_jump': self.smooth_max_jump,
+                'yolo_device': self.yolo_device,
+                'yolo_half': self.yolo_half
+            }
+            self.gimbal = None  # Will be created in thread
+            print(f"[{self.name}] Turret config prepared (init deferred to start)")
+        except Exception as e:
+            print(f"Error preparing turret config: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc()
             sys.exit(1)
@@ -2695,11 +2685,25 @@ class peripheral_mode:
     def read(self):
         return None
     
+    def _run_turret(self):
+        """Thread target: initialize and run gimbal"""
+        try:
+            print(f"[{self.name}] Initializing turret in background thread...")
+            self.gimbal = YOLOGimbal(**self._gimbal_config)
+            time.sleep(0.25)
+            self.gimbal.initialize()
+            print(f"[{self.name}] Turret initialized, starting tracking...")
+            self.gimbal.run()
+        except Exception as e:
+            print(f"[{self.name}] Turret error: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+    
     def start(self):
-        # Run gimbal in a separate thread so it doesn't block main loop
-        self._gimbal_thread = threading.Thread(target=self.gimbal.run, daemon=True)
+        # Run gimbal initialization AND run in a separate thread so it doesn't block main loop
+        self._gimbal_thread = threading.Thread(target=self._run_turret, daemon=True)
         self._gimbal_thread.start()
-        print(f"[{self.name}] Turret started in background thread")
+        print(f"[{self.name}] Turret thread started (initializing in background)")
         return
     
     def stop(self):
