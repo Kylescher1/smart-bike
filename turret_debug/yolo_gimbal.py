@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+python yolo_gimbal.py --camera 1 --turret /dev/ttyUSB0 --invert-y --timing --rknn-model /home/radxa/smart-bike/yolo/models/yolo11n.rknn --deadzone 25 --pid-max-output 1 --rknn
+
 YOLO-Based Automatic Camera Gimbal
 Tracks detected objects and keeps them centered using PID servo control
 
