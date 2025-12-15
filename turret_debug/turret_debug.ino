@@ -20,11 +20,13 @@
   - GET_LIMITS: Print current limits
   - MOTOR1:<speed>: Set motor 1 speed (0-255)
   - MOTOR2:<speed>: Set motor 2 speed (0-255)
+  - GET_RANGE: Get ToF sensor range reading (if connected)
   - STATUS: Print current positions and limits
   - HELP: Print available commands
 */
 
 #include <Servo.h>
+#include <SoftwareSerial.h>
 
 // --- PIN CONFIGURATION ---
 const int PIN_SERVO_TOP = 7;
@@ -33,6 +35,11 @@ const int PIN_MOTOR_1 = 5;
 const int PIN_MOTOR_2 = 6;
 const int PIN_LED_1 = 8;  
 const int PIN_LED_2 = 10;
+
+// TF03 LiDAR Pins (SoftwareSerial)
+const int PIN_LIDAR_RX = 11; // Connect TF03 Brown
+const int PIN_LIDAR_TX = 12; // Connect TF03 Blue
+bool tof_available = true;  // TF03 LiDAR is connected
 
 // --- SERVO LIMITS (will be updated via commands) ---
 //TOP
@@ -51,15 +58,22 @@ int servo_home = 90;
 // --- Objects ---
 Servo topServo;
 Servo bottomServo;
+SoftwareSerial lidarSerial(PIN_LIDAR_RX, PIN_LIDAR_TX);
 
 // --- Current Positions ---
 int topPos = servo_home;
 int bottomPos = servo_home;
 
+// --- LiDAR Variables ---
+int dist_cm;     // LiDAR Distance in cm
+int check;       // Checksum calc
+int uart[9];     // LiDAR Data Buffer
+const int HEADER = 0x59;
+
 // --- Servo idle tracking (for detach to reduce buzzing) ---
 unsigned long topLastMove = 0;
 unsigned long bottomLastMove = 0;
-const unsigned long SERVO_IDLE_TIME = 2000;  // Detach after 2 seconds idle
+const unsigned long SERVO_IDLE_TIME = 1;  // Detach after 200ms idle (reduces jitter from SoftwareSerial)
 bool topAttached = true;
 bool bottomAttached = true;
 
@@ -70,6 +84,7 @@ int bufferIndex = 0;
 void setup() {
   Serial.begin(115200);
   Serial.setTimeout(100);
+  lidarSerial.begin(115200);  // TF03 LiDAR Speed (Factory Default)
   
   // Attach Servos with default min/max pulse widths (500-2500 microseconds)
   // This provides better stability and reduces buzzing
@@ -341,6 +356,18 @@ void processCommand(char* cmd) {
     Serial.println(bottom_max);
   }
   
+  // GET_RANGE command - read ToF sensor
+  else if (strcmp(cmd, "GET_RANGE") == 0) {
+    float range = readToFRange();
+    if (range >= 0) {
+      Serial.print(F("OK: Range: "));
+      Serial.print(range, 2);
+      Serial.println(F(" in"));
+    } else {
+      Serial.println(F("ERROR: ToF sensor not available"));
+    }
+  }
+  
   // HELP command
   else if (strcmp(cmd, "HELP") == 0) {
     printHelp();
@@ -471,6 +498,57 @@ void testLimit(bool isTop, bool isMin) {
   Serial.println(F("Test complete. Check for physical interference."));
 }
 
+float readToFRange() {
+  /*
+   * Read TF03 LiDAR and return distance in inches.
+   * Uses robust checksum validation to ensure data integrity.
+   * 
+   * Returns distance in inches, or -1.0 if sensor not available or read failed.
+   */
+  
+  if (!tof_available) {
+    return -1.0;
+  }
+  
+  // Try to find a valid LiDAR packet (up to 50ms timeout)
+  unsigned long startT = millis();
+  while(millis() - startT < 50) { 
+    
+    if (lidarSerial.available()) {
+      // 1. Hunt for Header 1
+      if (lidarSerial.read() == HEADER) {
+        uart[0] = HEADER;
+        
+        // 2. Hunt for Header 2
+        if (lidarSerial.read() == HEADER) {
+          uart[1] = HEADER;
+          
+          // 3. Read Data Payload
+          for (int i = 2; i < 9; i++) {
+            uart[i] = lidarSerial.read();
+          }
+          
+          // 4. Verify Checksum
+          check = uart[0] + uart[1] + uart[2] + uart[3] + uart[4] + uart[5] + uart[6] + uart[7];
+          
+          if (uart[8] == (check & 0xff)) {
+            // Checksum Passed! Extract distance
+            dist_cm = uart[2] + uart[3] * 256;
+            
+            // Convert cm to inches (1 inch = 2.54 cm)
+            float inches = dist_cm / 2.54;
+            
+            return inches;
+          }
+        }
+      }
+    }
+  }
+  
+  // Timeout - no valid packet received
+  return -1.0;
+}
+
 void printHelp() {
   Serial.println(F("=== AVAILABLE COMMANDS ==="));
   Serial.println(F("HOME                    - Move both servos to home (90)"));
@@ -490,6 +568,7 @@ void printHelp() {
   Serial.println(F("GET_LIMITS             - Print current limits"));
   Serial.println(F("MOTOR1:<speed>         - Set motor 1 speed (0-255)"));
   Serial.println(F("MOTOR2:<speed>         - Set motor 2 speed (0-255)"));
+  Serial.println(F("GET_RANGE              - Get ToF sensor range (inches)"));
   Serial.println(F("STATUS                 - Print current status"));
   Serial.println(F("HELP                   - Show this help"));
   Serial.println(F("========================="));
