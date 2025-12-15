@@ -1340,9 +1340,9 @@ class TurretController:
         if not force and (current_time - self.last_command_time) < self.command_interval:
             return  # Too soon, skip this command
         
-        # Clamp to limits (keep as float until sending)
-        target_bottom = max(self.bottom_min, min(self.bottom_max, target_bottom))
-        target_top = max(self.top_min, min(self.top_max, target_top))
+        # Clamp to PHYSICAL limits only (0-180), ignore parsed software limits
+        target_bottom = max(0, min(180, target_bottom))
+        target_top = max(0, min(180, target_top))
         
         # Check if change is significant enough (FIX #9)
         bottom_change = abs(target_bottom - self.bottom_pos)
@@ -2083,16 +2083,14 @@ class YOLOGimbal:
                     # Only move if there's actual movement to do
                     if abs(move_x) > 0 or abs(move_y) > 0:
                         
-                        # BRUTE FORCE: If position is at/near limits, reset to center so we never think we're stuck
-                        limit_margin = 5.0
-                        if self.turret.bottom_pos <= self.turret.bottom_min + limit_margin:
-                            self.turret.bottom_pos = 90.0  # Reset to center
-                        if self.turret.bottom_pos >= self.turret.bottom_max - limit_margin:
-                            self.turret.bottom_pos = 90.0  # Reset to center
-                        if self.turret.top_pos <= self.turret.top_min + limit_margin:
-                            self.turret.top_pos = 90.0  # Reset to center
-                        if self.turret.top_pos >= self.turret.top_max - limit_margin:
-                            self.turret.top_pos = 90.0  # Reset to center
+                        # BRUTE FORCE: If position is near physical limits (0 or 180), reset to center
+                        # Use hard-coded values, not parsed limits which might be wrong
+                        if self.turret.bottom_pos <= 10 or self.turret.bottom_pos >= 170:
+                            print(f"[BRUTE FORCE] Pan at {self.turret.bottom_pos}° - resetting to 90°")
+                            self.turret.bottom_pos = 90.0
+                        if self.turret.top_pos <= 10 or self.turret.top_pos >= 170:
+                            print(f"[BRUTE FORCE] Tilt at {self.turret.top_pos}° - resetting to 90°")
+                            self.turret.top_pos = 90.0
 
                         # Calculate target absolute positions (FIX #7)
                         target_bottom = self.turret.bottom_pos + move_x
