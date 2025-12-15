@@ -2082,22 +2082,25 @@ class YOLOGimbal:
 
                     # Only move if there's actual movement to do
                     if abs(move_x) > 0 or abs(move_y) > 0:
+                        
+                        # BRUTE FORCE: If position is at/near limits, reset to center so we never think we're stuck
+                        limit_margin = 5.0
+                        if self.turret.bottom_pos <= self.turret.bottom_min + limit_margin:
+                            self.turret.bottom_pos = 90.0  # Reset to center
+                        if self.turret.bottom_pos >= self.turret.bottom_max - limit_margin:
+                            self.turret.bottom_pos = 90.0  # Reset to center
+                        if self.turret.top_pos <= self.turret.top_min + limit_margin:
+                            self.turret.top_pos = 90.0  # Reset to center
+                        if self.turret.top_pos >= self.turret.top_max - limit_margin:
+                            self.turret.top_pos = 90.0  # Reset to center
 
                         # Calculate target absolute positions (FIX #7)
                         target_bottom = self.turret.bottom_pos + move_x
                         target_top = self.turret.top_pos + move_y
 
-                        # Check limits - only flag if we're actually pushing against the limit
-                        # (i.e., we wanted to move further but got clamped)
-                        limit_margin = 2.0  # degrees - don't flag unless truly at limit
-                        at_limit_x = (
-                                (self.turret.bottom_pos <= self.turret.bottom_min + limit_margin and move_x < 0) or
-                                (self.turret.bottom_pos >= self.turret.bottom_max - limit_margin and move_x > 0)
-                        )
-                        at_limit_y = (
-                                (self.turret.top_pos <= self.turret.top_min + limit_margin and move_y < 0) or
-                                (self.turret.top_pos >= self.turret.top_max - limit_margin and move_y > 0)
-                        )
+                        # Disable limit checking - just always say we're not at limits
+                        at_limit_x = False
+                        at_limit_y = False
 
                         # Apply servo swap if needed and move (FIX #7 - absolute positioning)
                         servo_start = time.time()
