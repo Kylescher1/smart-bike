@@ -45,7 +45,7 @@ import sys
 import time
 import argparse
 import threading
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 from pathlib import Path
 from collections import deque
 
@@ -1679,6 +1679,112 @@ class YOLOGimbal:
         height = y2 - y1
         
         return center_x, center_y, width, height
+    
+    def read(self) -> Optional[Dict]:
+        """
+        Read current detections and return them in XYZ coordinates.
+        
+        Returns:
+            Dictionary with detection data including XYZ coordinates in meters:
+            {
+                'detections': [
+                    {
+                        'label': str,
+                        'class_id': int,
+                        'confidence': float,
+                        'bbox': [x1, y1, x2, y2],  # pixels
+                        'center_px': [x, y],  # pixel coordinates
+                        'xyz': [x, y, z],  # meters (relative to turret)
+                        'distance_m': float,  # meters
+                        'pan_deg': float,  # degrees
+                        'tilt_deg': float,  # degrees
+                    },
+                    ...
+                ],
+                'timestamp': float,
+                'pan_deg': float,  # Current turret pan angle
+                'tilt_deg': float,  # Current turret tilt angle
+                'distance_m': float or None,  # LiDAR distance if available
+            }
+            Returns None if no detections or not running.
+        """
+        if not self.running or self.camera is None:
+            return None
+        
+        # Get current frame
+        frame = self.camera.read_frame()
+        if frame is None:
+            return None
+        
+        # Run detection
+        if self.use_rknn:
+            detections = self.rknn_detector.detect(frame)
+        else:
+            if self.yolo is None:
+                return None
+            result = self.yolo.read()
+            if result is None:
+                return None
+            detections = result.detections
+        
+        if not detections:
+            return None
+        
+        # Get current turret state
+        self.turret.update_status()
+        pan_deg = self.turret.bottom_pos  # Bottom servo = pan (horizontal)
+        tilt_deg = self.turret.top_pos   # Top servo = tilt (vertical)
+        
+        # Get LiDAR distance (in cm, convert to meters)
+        distance_cm = self.turret.read_distance() if self.enable_distance else None
+        distance_m = distance_cm / 100.0 if distance_cm is not None else None
+        
+        # Convert angles to radians
+        pan_rad = np.radians(pan_deg)
+        tilt_rad = np.radians(tilt_deg)
+        
+        # Build detection list with XYZ coordinates
+        detection_list = []
+        for det in detections:
+            # Extract bbox and center
+            x1, y1, x2, y2 = det.bbox
+            center_x_px = (x1 + x2) / 2.0
+            center_y_px = (y1 + y2) / 2.0
+            
+            # Calculate XYZ coordinates using provided formulas
+            # x = sin(bottom_angle) * cos(top_angle) * depth
+            # y = sin(bottom_angle) * sin(top_angle) * depth
+            # z = cos(bottom_angle) * depth
+            if distance_m is not None and distance_m > 0:
+                x = np.sin(pan_rad) * np.cos(tilt_rad) * distance_m
+                y = np.sin(pan_rad) * np.sin(tilt_rad) * distance_m
+                z = np.cos(pan_rad) * distance_m
+            else:
+                # No depth available - set to None
+                x = y = z = None
+            
+            detection_dict = {
+                'label': getattr(det, 'label', 'unknown'),
+                'class_id': getattr(det, 'class_id', -1),
+                'confidence': getattr(det, 'confidence', 0.0),
+                'bbox': [float(x1), float(y1), float(x2), float(y2)],  # pixels
+                'center_px': [float(center_x_px), float(center_y_px)],  # pixels
+                'xyz': [x, y, z] if x is not None else None,  # meters (or None if no depth)
+                'distance_m': distance_m,  # meters (or None)
+                'pan_deg': float(pan_deg),  # degrees
+                'tilt_deg': float(tilt_deg),  # degrees
+            }
+            detection_list.append(detection_dict)
+        
+        return {
+            'detections': detection_list,
+            'timestamp': time.time(),
+            'pan_deg': float(pan_deg),
+            'tilt_deg': float(tilt_deg),
+            'distance_m': distance_m,
+            'num_detections': len(detection_list),
+        }
+    
     def calculate_error(self, target_x: float, target_y: float) -> Tuple[float, float, float, float, float, float]:
         """Calculate error from center in pixels, normalized, and degrees (FOV-based)
         
