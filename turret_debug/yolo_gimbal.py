@@ -1578,20 +1578,42 @@ class YOLOGimbal:
         
         # Print current limits
         print(f"\nServo Limits:")
-        print(f"  Top: {self.turret.top_min}° - {self.turret.top_max}°")
-        print(f"  Bottom: {self.turret.bottom_min}° - {self.turret.bottom_max}°")
+        top_range = self.turret.top_max - self.turret.top_min
+        bottom_range = self.turret.bottom_max - self.turret.bottom_min
+        print(f"  Top (tilt):   {self.turret.top_min}° - {self.turret.top_max}° (range: {top_range}°)")
+        print(f"  Bottom (pan): {self.turret.bottom_min}° - {self.turret.bottom_max}° (range: {bottom_range}°)")
         print(f"  Current positions: Top={self.turret.top_pos}°, Bottom={self.turret.bottom_pos}°")
         
-        # Check if bottom servo limits are too restrictive
+        # Check if servo limits are too restrictive
+        warnings = []
         if self.turret.bottom_max <= 90:
-            print(f"\nWARNING: Bottom servo max limit is {self.turret.bottom_max}° (should be 180°)")
-            print("  This will prevent tracking to the right side!")
-            print("  Fix by running: SET_BOTTOM_MAX:180 on Arduino or reset limits")
+            warnings.append(f"Bottom servo max is {self.turret.bottom_max}° (should be ~180°) - can't pan right!")
+        if self.turret.bottom_min >= 90:
+            warnings.append(f"Bottom servo min is {self.turret.bottom_min}° (should be ~0°) - can't pan left!")
+        if bottom_range < 90:
+            warnings.append(f"Bottom servo range is only {bottom_range}° (recommend 120°+ for good pan)")
+        if top_range < 30:
+            warnings.append(f"Top servo range is only {top_range}° (recommend 40°+ for good tilt)")
+        if self.turret.top_min >= 90:
+            warnings.append(f"Top servo min is {self.turret.top_min}° (should be ~60°) - can't tilt up!")
+        if self.turret.top_max <= 90:
+            warnings.append(f"Top servo max is {self.turret.top_max}° (should be ~120°) - can't tilt down!")
         
-        # Move to home position
-        self.turret.send_command("HOME", read_response=False)
-        time.sleep(1)
+        if warnings:
+            print(f"\n⚠️  LIMIT WARNINGS ({len(warnings)}):")
+            for w in warnings:
+                print(f"  • {w}")
+            print("  Fix with: SET_TOP_MIN:60, SET_TOP_MAX:120, SET_BOTTOM_MIN:0, SET_BOTTOM_MAX:180")
+            print("  Or press 'l' during tracking to reset limits to full range")
+        
+        # Move to home position on startup
+        print("\nHoming turret...")
+        home_response = self.turret.send_command("HOME", read_response=True)
+        if home_response:
+            print(f"  HOME response: {home_response.split(chr(10))[0]}")  # First line only
+        time.sleep(2)  # Give servos time to reach home position
         self.turret.update_status()
+        print(f"  Turret homed to: Pan={self.turret.bottom_pos:.1f}°, Tilt={self.turret.top_pos:.1f}°")
         
         # Configure sweep controller with actual servo limits
         home_pan = (self.turret.bottom_min + self.turret.bottom_max) / 2
@@ -1892,11 +1914,17 @@ class YOLOGimbal:
                         target_bottom = self.turret.bottom_pos + move_x
                         target_top = self.turret.top_pos + move_y
                         
-                        # Check limits
-                        at_limit_x = (target_bottom <= self.turret.bottom_min or 
-                                     target_bottom >= self.turret.bottom_max)
-                        at_limit_y = (target_top <= self.turret.top_min or 
-                                     target_top >= self.turret.top_max)
+                        # Check limits - only flag if we're actually pushing against the limit
+                        # (i.e., we wanted to move further but got clamped)
+                        limit_margin = 2.0  # degrees - don't flag unless truly at limit
+                        at_limit_x = (
+                            (self.turret.bottom_pos <= self.turret.bottom_min + limit_margin and move_x < 0) or
+                            (self.turret.bottom_pos >= self.turret.bottom_max - limit_margin and move_x > 0)
+                        )
+                        at_limit_y = (
+                            (self.turret.top_pos <= self.turret.top_min + limit_margin and move_y < 0) or
+                            (self.turret.top_pos >= self.turret.top_max - limit_margin and move_y > 0)
+                        )
                         
                         # Apply servo swap if needed and move (FIX #7 - absolute positioning)
                         if self.swap_servos:
