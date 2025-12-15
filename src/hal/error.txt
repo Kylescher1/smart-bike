@@ -15,20 +15,17 @@ horizontal_lidar RPLidar object created successfully
 horizontal_lidar Sending stop and reset commands...
 horizontal_lidar Warning: Could not reset LIDAR (might be ok): 'RPLidar' object has no attribute 'stop'
 Lidar data collector thread started.
-<Thread(Thread-1 (lidar_data_collector), started daemon 281473072820640)>
+<Thread(Thread-1 (lidar_data_collector), started daemon 281472264303008)>
 horizontal_lidar Connection successful.
 Started: horizontal_lidar
 Loading: Brakes
 Starting Lidar scan...
 In waiting: 0
 Traceback (most recent call last):
-  File "/home/radxa/smart-bike/src/hal/Brake.py", line 126, in _init_gpio
-    self.chip = self.gpiod.Chip(f'gpiochip{self.chip_num}')
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/radxa/smart-bike/venv/lib/python3.11/site-packages/gpiod/chip.py", line 63, in __init__
-    self._chip: Union[_ext.Chip, None] = _ext.Chip(path)
-                                         ^^^^^^^^^^^^^^^
-FileNotFoundError: [Errno 2] No such file or directory
+  File "/home/radxa/smart-bike/src/hal/Brake.py", line 137, in _init_gpio
+    self.line = self.chip.get_line(self.line_num)
+                ^^^^^^^^^^^^^^^^^^
+AttributeError: 'Chip' object has no attribute 'get_line'. Did you mean: 'get_info'?
 
 During handling of the above exception, another exception occurred:
 
@@ -41,9 +38,10 @@ Traceback (most recent call last):
                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   File "/home/radxa/smart-bike/src/hal/Brake.py", line 114, in __init__
     self._init_gpio()
-  File "/home/radxa/smart-bike/src/hal/Brake.py", line 131, in _init_gpio
+  File "/home/radxa/smart-bike/src/hal/Brake.py", line 154, in _init_gpio
     raise RuntimeError(
-RuntimeError: Failed to initialize GPIO chip 4, line 11: [Errno 2] No such file or directory
+RuntimeError: Failed to initialize GPIO chip 4, line 11: 'Chip' object has no attribute 'get_line'
+Make sure the GPIO line is not already in use by another process.
 
 During handling of the above exception, another exception occurred:
 
@@ -53,7 +51,7 @@ Traceback (most recent call last):
                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   File "/home/radxa/smart-bike/main.py", line 32, in instantiate_Peripherals
     raise KeyError(f"{name} threw an error: {e}")
-KeyError: 'Brakes threw an error: Failed to initialize GPIO chip 4, line 11: [Errno 2] No such file or directory'
+KeyError: "Brakes threw an error: Failed to initialize GPIO chip 4, line 11: 'Chip' object has no attribute 'get_line'\nMake sure the GPIO line is not already in use by another process."
 
 During handling of the above exception, another exception occurred:
 
@@ -62,12 +60,5 @@ Traceback (most recent call last):
     main()
   File "/home/radxa/smart-bike/main.py", line 311, in main
     raise KeyError(f"An unexpected error occurred with instantiate_sensors(), blame Damian: {e}")
-KeyError: "An unexpected error occurred with instantiate_sensors(), blame Damian: 'Brakes threw an error: Failed to initialize GPIO chip 4, line 11: [Errno 2] No such file or directory'"
-(venv) radxa@rock-5b:~/smart-bike$ gpiodfind PIN_3
-bash: gpiodfind: command not found
-(venv) radxa@rock-5b:~/smart-bike$ gpiofind PIN_27
-gpiochip4 22
-(venv) radxa@rock-5b:~/smart-bike$ gpiofind PIN_3
-gpiochip4 11
-(venv) radxa@rock-5b:~/smart-bike$  cd /home/radxa/smart-bike/src/hal
-(venv) radxa@rock-5b:~/smart-bike/src/hal$
+KeyError: 'An unexpected error occurred with instantiate_sensors(), blame Damian: "Brakes threw an error: Failed to initialize GPIO chip 4, line 11: \'Chip\' object has no attribute \'get_line\'\\nMake sure the GPIO line is not already in use by another process."'
+(venv) radxa@rock-5b:~/smart-bike$
