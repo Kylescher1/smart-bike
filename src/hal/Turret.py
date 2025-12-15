@@ -2681,7 +2681,7 @@ class peripheral_mode:
                 yolo_half=self.yolo_half
             )
             time.sleep(0.25)
-            self.gimbal.initialize()
+            self.gimbalOBJ.initialize()
         except Exception as e: #how fucking stupid is cursor
             print(f"Error: {e}", file=sys.stderr)
             import traceback
@@ -2691,7 +2691,7 @@ class peripheral_mode:
     def read(self):
         return
     def start(self):
-        self.gimbal.run()
+        self.gimbalOBJ.run()
         return
     def stop(self):
         return
