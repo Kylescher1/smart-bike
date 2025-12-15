@@ -30,7 +30,6 @@ black==23.3.0
 
 # Performance Profiling
 memory-profiler==0.60.0
-line-profiler
 
 Flask==3.1.2
 
