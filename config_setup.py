@@ -214,32 +214,72 @@ config = {
         },
     "Turret":
         {
-            "port": None,
+            "port": "/dev/ttyUSB0",  # Required by peripheral_mode
+            "baudrate": 115200,       # Required by peripheral_mode
             "orientation": None,
-            "sensor_location":None,
+            "sensor_location": None,
             "who_to_run": "src.hal.Turret.peripheral_mode",
-            "debug_mode":False,
+            "debug_mode": False,
+            "data_out_label": "turret",
+            # Camera and turret settings
             "camera": 1,
-            "turret":"/dev/ttyUSB0",
-            "invert-y":True,
-            "timing":True,
-            "rknn-model": "/home/radxa/smart-bike/yolo/models/yolo11n.rknn",
-            "deadzone": 50,
-            "pid-max-output": 3,
-            "rknn":True,
+            "turret": "/dev/ttyUSB0",
+            # PID settings
             "kp": 0.1,
             "ki": 0.1,
             "kd": 0.15,
-            "max-movement": 5,
-            "control-rate": 60,
-            "detection-imgsz": 320,
-            "yolo-half":True
+            "pid_max_output": 3.0,
+            # Movement settings
+            "deadzone": 50,
+            "deadzone_degrees": 0.5,
+            "movement_scale": 15.0,
+            "min_step": 0.5,
+            "max_movement": 5.0,
+            # Control timing
+            "control_rate": 60.0,
+            "camera_fps": 60.0,
+            "display_fps": 30.0,
+            # Display/output
+            "disable_display": True,
+            "enable_timing": True,
+            "enable_error_plot": False,
+            "enable_3d_viz": False,
+            # Servo inversion
+            "invert_x": False,
+            "invert_y": True,
+            "swap_servos": False,
+            # YOLO settings
+            "rknn": True,
+            "rknn_model": "/home/radxa/smart-bike/yolo/models/yolo11n.rknn",
+            "detection_imgsz": 320,
+            "yolo_half": True,
+            "yolo_device": None,
+            "conf": 0.5,
+            "target_class": None,
+            # Distance/FOV
+            "enable_distance": False,
+            "disable_distance": True,
+            "fov_horizontal": 126.0,
+            "fov_vertical": None,
+            "frame_width": 1920,
+            "frame_height": 1080,
+            # Tracking timeouts
+            "lost_timeout": 1.0,
+            "search_timeout": 2.0,
+            "sweep_speed": 2.0,
+            "sweep_dwell": 0.5,
+            # Smoothing
+            "smooth_window": 0,
+            "smooth_max_jump": 100.0,
+            # Misc
+            "list_ports": False,
         }
 }
 config = {
-    'horizontal_lidar':config['horizontal_lidar'],
+    # 'horizontal_lidar':config['horizontal_lidar'],
     # 'esp32':config['esp32'],
-    'Brakes':config['Brakes'],
+    # 'Brakes':config['Brakes'],
+    'Turret':config['Turret'],
           }
 
 #Check you have all reqired fields
