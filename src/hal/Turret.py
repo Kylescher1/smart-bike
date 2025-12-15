@@ -2693,9 +2693,19 @@ class peripheral_mode:
             sys.exit(1)
 
     def read(self):
-        return
+        return None
+    
     def start(self):
-        self.gimbal.run()
+        # Run gimbal in a separate thread so it doesn't block main loop
+        self._gimbal_thread = threading.Thread(target=self.gimbal.run, daemon=True)
+        self._gimbal_thread.start()
+        print(f"[{self.name}] Turret started in background thread")
         return
+    
     def stop(self):
+        if hasattr(self, 'gimbal') and self.gimbal:
+            self.gimbal.running = False
+            if hasattr(self, '_gimbal_thread') and self._gimbal_thread:
+                self._gimbal_thread.join(timeout=2.0)
+        print(f"[{self.name}] Turret stopped")
         return
