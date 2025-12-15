@@ -254,13 +254,13 @@ class BrakeRoutines:
         """
         if self._start_thread is not None and self._start_thread.is_alive():
             self._start_thread.join(timeout=timeout)
-            if self._start_thread.is_alive():
+            if self._start_thread is not None and self._start_thread.is_alive():
                 return False
             self._start_thread = None
         
         if self._dont_die_thread is not None and self._dont_die_thread.is_alive():
             self._dont_die_thread.join(timeout=timeout)
-            if self._dont_die_thread.is_alive():
+            if self._dont_die_thread is not None and self._dont_die_thread.is_alive():
                 return False
             self._dont_die_thread = None
         
@@ -286,12 +286,12 @@ class BrakeRoutines:
         # Wait for threads to finish (with timeout)
         if self._start_thread is not None and self._start_thread.is_alive():
             self._start_thread.join(timeout=1.0)
-            if self._start_thread.is_alive():
+            if self._start_thread is not None and self._start_thread.is_alive():
                 print("BrakeRoutines: Warning: start_thread did not stop in time")
         
         if self._dont_die_thread is not None and self._dont_die_thread.is_alive():
             self._dont_die_thread.join(timeout=1.0)
-            if self._dont_die_thread.is_alive():
+            if self._dont_die_thread is not None and self._dont_die_thread.is_alive():
                 print("BrakeRoutines: Warning: dont_die_thread did not stop in time")
         
         print("BrakeRoutines: Stop complete")
