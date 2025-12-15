@@ -122,15 +122,57 @@ class BrakeESC:
     
     def _init_gpio(self):
         """Initialize GPIO chip and line."""
-        try:
-            self.chip = self.gpiod.Chip(f'gpiochip{self.chip_num}')
-            self.line = self.chip.get_line(self.line_num)
-            self.line.request(consumer='brake_esc', type=self.gpiod.LINE_REQ_DIR_OUT)
-            self.line.set_value(0)  # Start LOW
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to initialize GPIO chip {self.chip_num}, line {self.line_num}: {e}"
-            )
+        import os
+        
+        # Try different path formats - gpiod may accept chip name or full path
+        chip_paths = [
+            f'/dev/gpiochip{self.chip_num}',  # Full path
+            f'gpiochip{self.chip_num}',        # Chip name (gpiod may resolve it)
+        ]
+        
+        last_error = None
+        for chip_path in chip_paths:
+            try:
+                self.chip = self.gpiod.Chip(chip_path)
+                self.line = self.chip.get_line(self.line_num)
+                self.line.request(consumer='brake_esc', type=self.gpiod.LINE_REQ_DIR_OUT)
+                self.line.set_value(0)  # Start LOW
+                return  # Success!
+            except FileNotFoundError as e:
+                last_error = e
+                continue  # Try next path format
+            except PermissionError as e:
+                raise RuntimeError(
+                    f"Permission denied accessing GPIO chip {self.chip_num}, line {self.line_num}.\n"
+                    f"Try running with sudo or add user to gpio group:\n"
+                    f"  sudo usermod -a -G gpio $USER\n"
+                    f"  (then log out and back in)\n"
+                    f"Original error: {e}"
+                )
+            except Exception as e:
+                # Other errors (like line already in use) should be raised immediately
+                raise RuntimeError(
+                    f"Failed to initialize GPIO chip {self.chip_num}, line {self.line_num}: {e}\n"
+                    f"Make sure the GPIO line is not already in use by another process."
+                )
+        
+        # If we get here, all path formats failed
+        # Provide helpful diagnostics
+        available_chips = []
+        if os.path.exists('/dev'):
+            try:
+                available_chips = [f for f in os.listdir('/dev') if f.startswith('gpiochip')]
+            except PermissionError:
+                pass
+        
+        raise RuntimeError(
+            f"GPIO chip device file not found: gpiochip{self.chip_num}\n"
+            f"Available GPIO chips: {available_chips if available_chips else 'None found'}\n"
+            f"Try running: gpiodetect (to list available GPIO chips)\n"
+            f"Or: ls -la /dev/gpiochip* (to check device files)\n"
+            f"Note: GPIO access may require sudo permissions or proper udev rules.\n"
+            f"Original error: {last_error}"
+        )
     
     def _init_encoder(self):
         """Initialize ESP32 encoder serial connection."""
