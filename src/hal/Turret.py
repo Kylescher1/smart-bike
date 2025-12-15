@@ -2046,34 +2046,30 @@ class YOLOGimbal:
                     if self.invert_y:
                         move_y = -move_y
 
-                    # GRADIENT DEADZONE (FIX #15) - smooth ramp instead of hard cutoff
-                    # This prevents jitter when target is near center by smoothly reducing
-                    # movement as error approaches zero (quadratic ramp for smooth feel)
-                    # Calculate gain: 0 at center, 1 at deadzone boundary, 1 beyond
-                    # Using quadratic for smoother transition near center
-                    if self.deadzone > 0:
-                        gain_x = min(1.0, (abs(error_x_px) / self.deadzone) ** 2)
-                        gain_y = min(1.0, (abs(error_y_px) / self.deadzone) ** 2)
-                    else:
-                        gain_x = 1.0
-                        gain_y = 1.0
-                    move_x *= gain_x
-                    move_y *= gain_y
-
-                    # Apply minimum step only if there's meaningful movement intent
-                    # (skip if error is very small - we want to stay still near center)
-                    if abs(error_x_px) > self.deadzone * 0.5:
-                        if 0 < abs(move_x) < self.min_step:
-                            move_x = self.min_step if move_x > 0 else -self.min_step
-                    if abs(error_y_px) > self.deadzone * 0.5:
-                        if 0 < abs(move_y) < self.min_step:
-                            move_y = self.min_step if move_y > 0 else -self.min_step
-
-                    # Degree deadzone - final check for very small movements
-                    if abs(move_x) < self.deadzone_degrees:
-                        move_x = 0
-                    if abs(move_y) < self.deadzone_degrees:
-                        move_y = 0
+                    # ALL DEADZONES DISABLED - full PID movement
+                    # # GRADIENT DEADZONE (FIX #15) - smooth ramp instead of hard cutoff
+                    # if self.deadzone > 0:
+                    #     gain_x = min(1.0, (abs(error_x_px) / self.deadzone) ** 2)
+                    #     gain_y = min(1.0, (abs(error_y_px) / self.deadzone) ** 2)
+                    # else:
+                    #     gain_x = 1.0
+                    #     gain_y = 1.0
+                    # move_x *= gain_x
+                    # move_y *= gain_y
+                    #
+                    # # Apply minimum step
+                    # if abs(error_x_px) > self.deadzone * 0.5:
+                    #     if 0 < abs(move_x) < self.min_step:
+                    #         move_x = self.min_step if move_x > 0 else -self.min_step
+                    # if abs(error_y_px) > self.deadzone * 0.5:
+                    #     if 0 < abs(move_y) < self.min_step:
+                    #         move_y = self.min_step if move_y > 0 else -self.min_step
+                    #
+                    # # Degree deadzone
+                    # if abs(move_x) < self.deadzone_degrees:
+                    #     move_x = 0
+                    # if abs(move_y) < self.deadzone_degrees:
+                    #     move_y = 0
 
                     # MAX MOVEMENT CLAMP DISABLED - let PID move freely
                     # original_move_x = move_x
