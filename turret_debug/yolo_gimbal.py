@@ -1481,6 +1481,18 @@ class YOLOGimbal:
         self.frame_count = 0
         self.current_fps = 0.0
         
+        # Timing statistics (for --timing flag)
+        self.timing_stats = {
+            'frame_read': [],
+            'detection': [],
+            'pid_calc': [],
+            'servo_cmd': [],
+            'display': [],
+            'total_loop': [],
+        }
+        self.last_timing_print = 0.0
+        self.timing_print_interval = 1.0  # Print timing stats every 1 second
+        
         # Calibration mode (FIX #6)
         self.calibration_mode = False
         
@@ -1814,6 +1826,51 @@ class YOLOGimbal:
         
         return error_x_px, error_y_px, error_x_norm, error_y_norm, error_x_deg, error_y_deg
     
+    def _print_timing_stats(self):
+        """Print timing statistics to console"""
+        if not self.enable_timing:
+            return
+        
+        print("\n" + "="*70)
+        print("TIMING STATISTICS (last 1 second)")
+        print("="*70)
+        
+        def print_stat(name, times_ms):
+            if not times_ms:
+                print(f"  {name:20s}: No data")
+                return
+            avg = np.mean(times_ms)
+            min_t = np.min(times_ms)
+            max_t = np.max(times_ms)
+            p50 = np.percentile(times_ms, 50)
+            p95 = np.percentile(times_ms, 95)
+            p99 = np.percentile(times_ms, 99)
+            count = len(times_ms)
+            print(f"  {name:20s}: avg={avg:6.2f}ms  min={min_t:6.2f}ms  max={max_t:6.2f}ms  "
+                  f"p50={p50:6.2f}ms  p95={p95:6.2f}ms  p99={p99:6.2f}ms  (n={count})")
+        
+        print_stat("Frame Read", self.timing_stats['frame_read'])
+        print_stat("Detection", self.timing_stats['detection'])
+        print_stat("PID Calc", self.timing_stats['pid_calc'])
+        print_stat("Servo Cmd", self.timing_stats['servo_cmd'])
+        if self.timing_stats['display']:
+            print_stat("Display", self.timing_stats['display'])
+        print_stat("Total Loop", self.timing_stats['total_loop'])
+        
+        # Calculate effective FPS from loop time
+        if self.timing_stats['total_loop']:
+            avg_loop_ms = np.mean(self.timing_stats['total_loop'])
+            effective_fps = 1000.0 / avg_loop_ms if avg_loop_ms > 0 else 0
+            print(f"\n  Effective Loop FPS: {effective_fps:.1f} Hz (target: {self.control_rate:.1f} Hz)")
+        
+        # Calculate detection FPS
+        if self.timing_stats['detection']:
+            avg_detection_ms = np.mean(self.timing_stats['detection'])
+            detection_fps = 1000.0 / avg_detection_ms if avg_detection_ms > 0 else 0
+            print(f"  Detection FPS: {detection_fps:.1f} Hz")
+        
+        print("="*70 + "\n")
+    
     def run(self):
         """Main tracking loop with all fixes applied"""
         self.running = True
@@ -1845,8 +1902,15 @@ class YOLOGimbal:
         no_target_count = 0
         status_update_counter = 0
         
+        # Initialize timing
+        if self.enable_timing:
+            self.last_timing_print = time.time()
+            print("Timing profiling ENABLED - performance stats will be printed every 1 second")
+        
         try:
             while self.running:
+                loop_start_time = time.time()
+                
                 # Fixed control rate (FIX #11)
                 current_time = time.time()
                 dt_since_last = current_time - self.last_control_time
@@ -1857,11 +1921,15 @@ class YOLOGimbal:
                     current_time = time.time()
                 
                 # Read frame (FIX #5 - read fresh frame)
+                frame_read_start = time.time()
                 frame = self.camera.read_frame()
                 if frame is None:
                     continue
+                if self.enable_timing:
+                    self.timing_stats['frame_read'].append((time.time() - frame_read_start) * 1000)  # ms
                 
                 # Run detection (RKNN or YOLO)
+                detection_start = time.time()
                 if self.use_rknn:
                     # RKNN: direct synchronous inference on frame
                     detections = self.rknn_detector.detect(frame)
@@ -1872,6 +1940,8 @@ class YOLOGimbal:
                     if result is None:
                         continue
                     target = self.find_target_detection(result.detections)
+                if self.enable_timing:
+                    self.timing_stats['detection'].append((time.time() - detection_start) * 1000)  # ms
                 
                 # Periodic status re-sync (FIX #8) - adaptive based on control rate
                 status_update_counter += 1
@@ -1960,7 +2030,10 @@ class YOLOGimbal:
                     # Using degree error makes PID output directly in degrees
                     # This is physically accurate: if target is 5° off, PID operates on 5°
                     # Max error is limited to half FOV (e.g., 25° for 50° FOV)
+                    pid_start = time.time()
                     output_x, output_y = self.pid.update(error_x_deg, error_y_deg, self.control_dt)
+                    if self.enable_timing:
+                        self.timing_stats['pid_calc'].append((time.time() - pid_start) * 1000)  # ms
                     
                     # PID output is now already in degrees (no arbitrary scaling needed)
                     move_x = output_x
@@ -2033,10 +2106,13 @@ class YOLOGimbal:
                         )
                         
                         # Apply servo swap if needed and move (FIX #7 - absolute positioning)
+                        servo_start = time.time()
                         if self.swap_servos:
                             self.turret.move_to(target_top, target_bottom)
                         else:
                             self.turret.move_to(target_bottom, target_top)
+                        if self.enable_timing:
+                            self.timing_stats['servo_cmd'].append((time.time() - servo_start) * 1000)  # ms
                         
                         # Update 3D visualizer
                         if self.visualizer:
@@ -2297,6 +2373,19 @@ class YOLOGimbal:
                             has_target=False
                         )
                 
+                # Record total loop time and print timing statistics
+                if self.enable_timing:
+                    self.timing_stats['total_loop'].append((time.time() - loop_start_time) * 1000)  # ms
+                    
+                    # Print timing statistics periodically
+                    if current_time - self.last_timing_print >= self.timing_print_interval:
+                        self._print_timing_stats()
+                        self.last_timing_print = current_time
+                        # Clear old stats (keep last 100 samples)
+                        for key in self.timing_stats:
+                            if len(self.timing_stats[key]) > 100:
+                                self.timing_stats[key] = self.timing_stats[key][-100:]
+                
                 # Calculate FPS properly (FIX #4)
                 self.frame_count += 1
                 fps_elapsed = current_time - self.last_fps_time
@@ -2307,6 +2396,7 @@ class YOLOGimbal:
                 
                 # Display frame if enabled and enough time has passed for display FPS
                 if should_display_frame:
+                    display_start = time.time()
                     cv2.putText(frame, f"FPS: {self.current_fps:.1f}", (10, frame.shape[0] - 10), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                     
@@ -2319,6 +2409,8 @@ class YOLOGimbal:
                     # Show frame
                     cv2.imshow("YOLO Gimbal Tracking", frame)
                     self.last_display_time = current_time
+                    if self.enable_timing:
+                        self.timing_stats['display'].append((time.time() - display_start) * 1000)  # ms
                 
                 # Handle keys (always check, even if display is disabled)
                 key = cv2.waitKey(1) & 0xFF if not self.disable_display else -1
@@ -2617,8 +2709,8 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Use RKNN hardware acceleration (Radxa Rock Pi 5B)')
     parser.add_argument('--rknn-model', type=str, default=None,
                        help='Path to RKNN model file (default: yolo/models/yolo11n.rknn)')
-    parser.add_argument('--enable-timing', action='store_true', default=False,
-                       help='Enable timing profiling (default: False)')
+    parser.add_argument('--timing', '--enable-timing', action='store_true', dest='enable_timing',
+                       help='Enable timing profiling - prints performance stats every 1 second (default: False)')
     parser.add_argument('--detection-imgsz', type=int, default=640,
                        help='Detection input size in pixels (default: 640, lower = faster, try 416 or 320 for speed)')
     parser.add_argument('--yolo-device', type=str, default=None,
