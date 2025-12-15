@@ -101,6 +101,8 @@ class RKNNDetector:
         self.conf_threshold = conf_threshold
         self.imgsz = imgsz
         self.rknn = None
+        # Pre-allocate input buffer for better performance (matches rknn_inference.py optimization)
+        self.img_input_buffer = None
         
     def load(self):
         """Load and initialize RKNN model"""
@@ -264,11 +266,17 @@ class RKNNDetector:
         return detections
     
     def detect(self, frame):
-        """Run detection on frame"""
+        """Run detection on frame (optimized with pre-allocated buffers)"""
         # Preprocess
         img_resized, ratio, (dw, dh) = self.letterbox(frame, new_shape=(self.imgsz, self.imgsz))
         img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-        img_input = np.expand_dims(img_rgb.astype(np.uint8), axis=0)
+        
+        # Use pre-allocated buffer (optimization from rknn_inference.py)
+        # RKNN expects NHWC format: (batch, height, width, channels)
+        if self.img_input_buffer is None or self.img_input_buffer.shape != (1, self.imgsz, self.imgsz, 3):
+            self.img_input_buffer = np.zeros((1, self.imgsz, self.imgsz, 3), dtype=np.uint8)
+        self.img_input_buffer[0] = img_rgb.astype(np.uint8)
+        img_input = self.img_input_buffer
         
         # Inference
         outputs = self.rknn.inference([img_input])
@@ -278,7 +286,7 @@ class RKNNDetector:
         # Post-process
         detections = self.post_process(outputs)
         
-        # Scale boxes back to original image
+        # Scale boxes back to original image (vectorized for speed)
         if detections:
             h_orig, w_orig = frame.shape[:2]
             scale = min(self.imgsz / w_orig, self.imgsz / h_orig)
@@ -287,13 +295,14 @@ class RKNNDetector:
             pad_x = (self.imgsz - new_w) / 2
             pad_y = (self.imgsz - new_h) / 2
             
-            for det in detections:
-                bbox = det.bbox
-                bbox[0] = int((bbox[0] - pad_x) / scale)
-                bbox[1] = int((bbox[1] - pad_y) / scale)
-                bbox[2] = int((bbox[2] - pad_x) / scale)
-                bbox[3] = int((bbox[3] - pad_y) / scale)
-                det.bbox = bbox
+            # Vectorized box scaling (much faster than loop - matches rknn_inference.py)
+            boxes = np.array([det.bbox for det in detections], dtype=np.float32)
+            boxes[:, [0, 2]] = (boxes[:, [0, 2]] - pad_x) / scale
+            boxes[:, [1, 3]] = (boxes[:, [1, 3]] - pad_y) / scale
+            boxes = boxes.astype(np.int32)
+            
+            for i, det in enumerate(detections):
+                det.bbox = boxes[i].tolist()
         
         return detections
     
@@ -1876,6 +1885,12 @@ class YOLOGimbal:
                     print(f"       Consider: --detection-imgsz 416 or --detection-imgsz 320 (faster inference)")
                     if not self.yolo_half and self.yolo_device and 'cuda' in str(self.yolo_device).lower():
                         print(f"       Or try: --yolo-half (FP16 half precision, ~2x faster)")
+                    # Check if on Rock Pi and suggest RKNN
+                    import platform
+                    if 'linux' in platform.system().lower() and not self.use_rknn:
+                        print(f"       ⚠️  CRITICAL: You're using PyTorch YOLO on Rock Pi - this is VERY slow!")
+                        print(f"          Use --rknn flag for hardware acceleration (10-20x faster on Rock Pi NPU)")
+                        print(f"          Example: python yolo_gimbal.py --rknn --camera 5 --turret /dev/ttyUSB0")
                 
                 # Calculate actual YOLO FPS based on available results
                 if self.timing_stats['yolo_result_available'] > 0:
@@ -1884,6 +1899,15 @@ class YOLOGimbal:
                         avg_inference_ms = np.mean(self.timing_stats['yolo_inference'])
                         yolo_fps = 1000.0 / avg_inference_ms if avg_inference_ms > 0 else 0
                         print(f"    YOLO Inference FPS: {yolo_fps:.1f} Hz (from inference time)")
+                        
+                        # Warn if inference is very slow (likely not using RKNN on Rock Pi)
+                        if avg_inference_ms > 100 and not self.use_rknn:
+                            import platform
+                            if 'linux' in platform.system().lower():
+                                print(f"    ⚠️  CRITICAL: {avg_inference_ms:.1f}ms inference is VERY slow!")
+                                print(f"       You're using PyTorch YOLO - use --rknn for Rock Pi NPU acceleration")
+                                print(f"       RKNN typically runs at 20-50ms (10-20x faster)")
+                                print(f"       Command: python yolo_gimbal.py --rknn --camera 5 --turret /dev/ttyUSB0")
                     
                     # Calculate effective YOLO update rate
                     yolo_update_rate = self.timing_stats['yolo_result_available'] / self.timing_print_interval
