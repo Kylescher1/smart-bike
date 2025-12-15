@@ -1399,8 +1399,8 @@ class YOLOGimbal:
                  use_rknn: bool = False, rknn_model: Optional[str] = None,
                  enable_error_plot: bool = False, enable_timing: bool = False,
                  detection_imgsz: int = 640, enable_distance: bool = True,
-                 fov_horizontal: float = 126.6, fov_vertical: Optional[float] = None,
-                 frame_width: int = 1920, frame_height: int = 1200,
+                 fov_horizontal: float = 126.0, fov_vertical: Optional[float] = None,
+                 frame_width: int = 1920, frame_height: int = 1080,
                  pid_max_output: float = 0.75,
                  lost_timeout: float = 1.0, search_timeout: float = 2.0,
                  sweep_speed: float = 2.0, sweep_dwell: float = 0.5,
@@ -2415,9 +2415,9 @@ Examples:
   python yolo_gimbal.py --camera 0 --turret COM3 --class person
   python yolo_gimbal.py --camera 1 --turret /dev/ttyUSB0 --class 0
   
-  # With custom camera FOV and resolution:
-  python yolo_gimbal.py --camera 0 --turret COM3 --fov-h 60 --frame-width 1920 --frame-height 1080
-  python yolo_gimbal.py --camera 0 --turret COM3 --fov-h 50 --frame-width 1280 --frame-height 720
+  # With custom camera FOV and resolution (defaults: 126° FOV, 1920x1080):
+  python yolo_gimbal.py --camera 0 --turret COM3 --fov-h 126 --frame-width 1920 --frame-height 1080
+  python yolo_gimbal.py --camera 0 --turret COM3 --fov-h 60 --frame-width 1280 --frame-height 720  # narrower FOV
   
   # With RKNN acceleration (Rock Pi 5B):
   python yolo_gimbal.py --camera 0 --turret /dev/ttyUSB0 --rknn
@@ -2454,9 +2454,9 @@ Examples:
 
 FOV-Based Mapping:
   The system uses camera FOV to accurately map pixel error to servo degrees.
-  For a 50° horizontal FOV on 1280px width: 1 pixel = 0.039° (50/1280)
-  Max error at frame edge (640px off center) = 25° (half FOV)
-  This prevents unrealistic large servo movements from detection noise.
+  For a 126° horizontal FOV on 1920px width: 1 pixel = 0.066° (126/1920)
+  Max error at frame edge (960px off center) = 63° (half FOV)
+  This ensures accurate tracking - wider FOV means larger movements needed.
   
 Note: RKNN requires rknnlite installed (Rock Pi 5B)
       To find your camera index, run: python find_camera.py
@@ -2523,14 +2523,14 @@ Note: RKNN requires rknnlite installed (Rock Pi 5B)
                        help='Enable TF03 LiDAR distance reading (default: enabled)')
     parser.add_argument('--disable-distance', action='store_true',
                        help='Disable TF03 LiDAR distance reading (use if sensor not connected)')
-    parser.add_argument('--fov-h', '--fov', type=float, default=50.0, dest='fov_horizontal',
-                       help='Camera horizontal field of view in degrees (default: 50.0)')
+    parser.add_argument('--fov-h', '--fov', type=float, default=126.0, dest='fov_horizontal',
+                       help='Camera horizontal field of view in degrees (default: 126.0 for wide-angle camera)')
     parser.add_argument('--fov-v', type=float, default=None, dest='fov_vertical',
                        help='Camera vertical field of view in degrees (default: calculated from aspect ratio)')
-    parser.add_argument('--frame-width', type=int, default=1280,
-                       help='Camera frame width in pixels (default: 1280)')
-    parser.add_argument('--frame-height', type=int, default=720,
-                       help='Camera frame height in pixels (default: 720)')
+    parser.add_argument('--frame-width', type=int, default=1920,
+                       help='Camera frame width in pixels (default: 1920)')
+    parser.add_argument('--frame-height', type=int, default=1080,
+                       help='Camera frame height in pixels (default: 1080)')
     parser.add_argument('--lost-timeout', type=float, default=1.0,
                        help='Seconds after losing target before returning to last position (default: 1.0)')
     parser.add_argument('--search-timeout', type=float, default=2.0,
