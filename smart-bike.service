@@ -1,0 +1,17 @@
+[Unit]
+Description=Smart Bike Main Service
+After=network.target
+
+[Service]
+Type=simple
+User=radxa
+WorkingDirectory=/home/radxa/smart-bike
+ExecStart=/home/radxa/smart-bike/venv/bin/python /home/radxa/smart-bike/main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/radxa/smart-bike/logs/smart-bike.log
+StandardError=append:/home/radxa/smart-bike/logs/smart-bike.log
+
+[Install]
+WantedBy=multi-user.target
+
