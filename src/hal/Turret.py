@@ -1121,9 +1121,9 @@ class PIDController:
                          self.ki * self.integral_y +
                          self.kd * derivative_y)
 
-        # Clamp outputs to prevent large spikes (FIX #10)
-        self.output_x = np.clip(self.output_x, -self.max_output, self.max_output)
-        self.output_y = np.clip(self.output_y, -self.max_output, self.max_output)
+        # PID OUTPUT CLAMP DISABLED - let PID move freely
+        # self.output_x = np.clip(self.output_x, -self.max_output, self.max_output)
+        # self.output_y = np.clip(self.output_y, -self.max_output, self.max_output)
 
         self.last_error_x = error_x
         self.last_error_y = error_y
@@ -1151,8 +1151,8 @@ class TurretController:
         # Use float positions internally (FIX #1)
         self.top_pos = 90.0
         self.bottom_pos = 90.0
-        self.top_min = 60
-        self.top_max = 120
+        self.top_min = 0      # Full range - no artificial limits
+        self.top_max = 180
         self.bottom_min = 0
         self.bottom_max = 180
 
@@ -1340,9 +1340,9 @@ class TurretController:
         if not force and (current_time - self.last_command_time) < self.command_interval:
             return  # Too soon, skip this command
 
-        # Clamp to limits (keep as float until sending)
-        target_bottom = max(self.bottom_min, min(self.bottom_max, target_bottom))
-        target_top = max(self.top_min, min(self.top_max, target_top))
+        # LIMITS DISABLED - let PID move freely
+        # target_bottom = max(self.bottom_min, min(self.bottom_max, target_bottom))
+        # target_top = max(self.top_min, min(self.top_max, target_top))
 
         # Check if change is significant enough (FIX #9)
         bottom_change = abs(target_bottom - self.bottom_pos)
@@ -1573,6 +1573,14 @@ class YOLOGimbal:
         if not self.turret.connect():
             raise RuntimeError(f"Failed to connect to turret on {self.turret_port}")
         print("Turret connected")
+
+        # Reset servo limits to full range (0-180) to prevent false limit detection
+        print("Setting servo limits to full range (0-180)...")
+        self.turret.send_command("SET_BOTTOM_MIN:0", read_response=False)
+        self.turret.send_command("SET_BOTTOM_MAX:180", read_response=False)
+        self.turret.send_command("SET_TOP_MIN:0", read_response=False)
+        self.turret.send_command("SET_TOP_MAX:180", read_response=False)
+        time.sleep(0.1)
 
         # Update status to get current positions and limits
         self.turret.update_status()
@@ -2067,17 +2075,14 @@ class YOLOGimbal:
                     if abs(move_y) < self.deadzone_degrees:
                         move_y = 0
 
-                    # CLAMP to maximum step size (FIX #16) - prevents large jumps
-                    # This is critical for stability - even if PID wants big move, limit it
-                    original_move_x = move_x
-                    original_move_y = move_y
-                    move_x = np.clip(move_x, -self.max_movement, self.max_movement)
-                    move_y = np.clip(move_y, -self.max_movement, self.max_movement)
-
-                    # Log if movement was clamped (for debugging)
-                    if abs(original_move_x) > self.max_movement or abs(original_move_y) > self.max_movement:
-                        print(f"CLAMPED: Requested X={original_move_x:.2f}° Y={original_move_y:.2f}° → "
-                              f"Limited to X={move_x:.2f}° Y={move_y:.2f}° (max={self.max_movement}°)")
+                    # MAX MOVEMENT CLAMP DISABLED - let PID move freely
+                    # original_move_x = move_x
+                    # original_move_y = move_y
+                    # move_x = np.clip(move_x, -self.max_movement, self.max_movement)
+                    # move_y = np.clip(move_y, -self.max_movement, self.max_movement)
+                    # if abs(original_move_x) > self.max_movement or abs(original_move_y) > self.max_movement:
+                    #     print(f"CLAMPED: Requested X={original_move_x:.2f}° Y={original_move_y:.2f}° → "
+                    #           f"Limited to X={move_x:.2f}° Y={move_y:.2f}° (max={self.max_movement}°)")
 
                     # Only move if there's actual movement to do
                     if abs(move_x) > 0 or abs(move_y) > 0:
@@ -2423,13 +2428,15 @@ class YOLOGimbal:
                     self.pid.reset()
                     print("Moved to home")
                 elif key == ord('l'):
-                    # Reset limits to full range
-                    print("Resetting bottom servo limits to 0-180...")
+                    # Reset limits to full range for BOTH servos
+                    print("Resetting ALL servo limits to 0-180...")
                     self.turret.send_command("SET_BOTTOM_MIN:0", read_response=False)
                     self.turret.send_command("SET_BOTTOM_MAX:180", read_response=False)
+                    self.turret.send_command("SET_TOP_MIN:0", read_response=False)
+                    self.turret.send_command("SET_TOP_MAX:180", read_response=False)
                     time.sleep(0.1)
                     self.turret.update_status()
-                    print(f"Limits reset: Bottom now {self.turret.bottom_min}-{self.turret.bottom_max}°")
+                    print(f"Limits reset: Bottom={self.turret.bottom_min}-{self.turret.bottom_max}°, Top={self.turret.top_min}-{self.turret.top_max}°")
                 elif key == ord('c'):
                     # Calibration mode (FIX #6)
                     self.run_calibration()
