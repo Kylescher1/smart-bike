@@ -2153,8 +2153,8 @@ class YOLOGimbal:
                             if at_limit_y:
                                 limit_text += " [Y LIM]"
 
-                            # Show state, smoothing status, and gradient gain
-                            gain_text = f" G:{gain_x:.0%}/{gain_y:.0%}"
+                            # Show state, smoothing status (gain disabled - always 100%)
+                            gain_text = " G:100%/100%"
                             smooth_text = f" S:{self.detection_smoother.get_sample_count()}/{self.smooth_window}" if self.smooth_window > 1 else ""
 
                             cv2.putText(frame,
