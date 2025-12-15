@@ -1,0 +1,73 @@
+(venv) radxa@rock-5b:~/smart-bike$ python main.py
+Loading Config...
+Loaded Config
+Device: horizontal_lidar | Properties: {'port': '/dev/ttyUSB1', 'baudrate': 460800, 'BUFFER_SIZE': 600, 'orientation': quaternion(6.12323399573677e-17, 0, 0, -1), 'sensor_location': array([0, 0, 0]), 'data_out_label': 'point_cloud', 'who_to_run': 'src.hal.SpinningLidar.SpinningLidar'}
+Device: Brakes | Properties: {'port': None, 'orientation': None, 'sensor_location': None, 'who_to_run': 'src.hal.BrakeRoutines.BrakeRoutines', 'debug_mode': False, 'abs_enabled': False, 'chip_num': 4, 'line_num': 11}
+============================================================
+Enabling Peripherals...
+Loading: horizontal_lidar
+Loaded: horizontal_lidar
+horizontal_lidar Connecting to /dev/ttyUSB1 at 460800...
+horizontal_lidar Attempting to reset LIDAR before connection...
+horizontal_lidar Serial buffers cleared
+In waiting: 3
+horizontal_lidar RPLidar object created successfully
+horizontal_lidar Sending stop and reset commands...
+horizontal_lidar Warning: Could not reset LIDAR (might be ok): 'RPLidar' object has no attribute 'stop'
+Lidar data collector thread started.
+<Thread(Thread-1 (lidar_data_collector), started daemon 281473072820640)>
+horizontal_lidar Connection successful.
+Started: horizontal_lidar
+Loading: Brakes
+Starting Lidar scan...
+In waiting: 0
+Traceback (most recent call last):
+  File "/home/radxa/smart-bike/src/hal/Brake.py", line 126, in _init_gpio
+    self.chip = self.gpiod.Chip(f'gpiochip{self.chip_num}')
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/radxa/smart-bike/venv/lib/python3.11/site-packages/gpiod/chip.py", line 63, in __init__
+    self._chip: Union[_ext.Chip, None] = _ext.Chip(path)
+                                         ^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/radxa/smart-bike/main.py", line 30, in instantiate_Peripherals
+    Peripheral = cls(name=name,**params)
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/radxa/smart-bike/src/hal/BrakeRoutines.py", line 48, in __init__
+    self.brake = BrakeESC(name=f"{name}_BrakeESC", **brake_kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/radxa/smart-bike/src/hal/Brake.py", line 114, in __init__
+    self._init_gpio()
+  File "/home/radxa/smart-bike/src/hal/Brake.py", line 131, in _init_gpio
+    raise RuntimeError(
+RuntimeError: Failed to initialize GPIO chip 4, line 11: [Errno 2] No such file or directory
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/radxa/smart-bike/main.py", line 308, in main
+    Peripherals = instantiate_Peripherals(config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/radxa/smart-bike/main.py", line 32, in instantiate_Peripherals
+    raise KeyError(f"{name} threw an error: {e}")
+KeyError: 'Brakes threw an error: Failed to initialize GPIO chip 4, line 11: [Errno 2] No such file or directory'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/radxa/smart-bike/main.py", line 546, in <module>
+    main()
+  File "/home/radxa/smart-bike/main.py", line 311, in main
+    raise KeyError(f"An unexpected error occurred with instantiate_sensors(), blame Damian: {e}")
+KeyError: "An unexpected error occurred with instantiate_sensors(), blame Damian: 'Brakes threw an error: Failed to initialize GPIO chip 4, line 11: [Errno 2] No such file or directory'"
+(venv) radxa@rock-5b:~/smart-bike$ gpiodfind PIN_3
+bash: gpiodfind: command not found
+(venv) radxa@rock-5b:~/smart-bike$ gpiofind PIN_27
+gpiochip4 22
+(venv) radxa@rock-5b:~/smart-bike$ gpiofind PIN_3
+gpiochip4 11
+(venv) radxa@rock-5b:~/smart-bike$  cd /home/radxa/smart-bike/src/hal
+(venv) radxa@rock-5b:~/smart-bike/src/hal$
